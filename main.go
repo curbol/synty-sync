@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"time"
@@ -87,8 +88,12 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// No whole-request timeout (asset downloads are large), but a response-header
+	// timeout so a stalled connection fails instead of hanging forever.
 	client := &portal.Client{
-		HTTP:       &http.Client{Timeout: 0},
+		HTTP: &http.Client{
+			Transport: &http.Transport{ResponseHeaderTimeout: 60 * time.Second},
+		},
 		BaseURL:    "https://syntystore.com",
 		CustomerID: cfg.CustomerID,
 		Cookie:     cookie,
@@ -103,7 +108,9 @@ func run(args []string) error {
 		Concurrency: cfg.Concurrency,
 		Now:         time.Now().UTC().Format(time.RFC3339),
 	}
-	rep, err := syncer.Run(context.Background(), client, lf, lockPath, opts)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	rep, err := syncer.Run(ctx, client, lf, lockPath, opts)
 	if err != nil {
 		return err
 	}
