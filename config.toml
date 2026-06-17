@@ -7,7 +7,7 @@
 #   customer_id = "0000000000000"
 #   library_path = "/home/you/code/synty-assets"
 
-variant_includes = ["Godot_*", "SourceFiles"]
+variant_includes = ["Godot_*", "SourceFiles", "SourceSprites"]
 concurrency = 4
 session_source = "firefox"
 library_path = "~/code/synty-assets"
