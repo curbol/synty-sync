@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,20 @@ func TestFromCurl(t *testing.T) {
 	}
 	if got != "localization=US; _shopify_essential=ABC" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestFromCurlWithQuotedJSONCookie(t *testing.T) {
+	// Single-quoted -H whose Cookie value contains double quotes (Shopify's
+	// _consentik_cookie holds JSON). The whole value, including later cookies,
+	// must survive.
+	curl := `curl 'https://x' -H 'Cookie: _shopify_essential=ABC; _consentik_cookie=[{"k":"v"}]; _shopify_s=END'`
+	got, err := FromCurl(curl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "_shopify_essential=ABC") || !strings.HasSuffix(got, "_shopify_s=END") {
+		t.Errorf("truncated cookie: %q", got)
 	}
 }
 

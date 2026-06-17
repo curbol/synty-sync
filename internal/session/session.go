@@ -41,18 +41,24 @@ func FromCookiesTxt(content string) (string, error) {
 	return joinCookies(pairs)
 }
 
-// Cookie values do not contain quotes, so matching a value of non-quote chars
-// between matching quotes works for both -H 'Cookie: …' and -H "Cookie: …" without
-// a backreference (RE2 has none).
-var curlCookieRe = regexp.MustCompile(`(?i)(?:-H|--header)\s+['"]Cookie:\s*([^'"]+)['"]`)
+// A Cookie value can contain the opposite quote char (Shopify's _consentik_cookie
+// holds JSON with double quotes), so match per outer-quote type: a single-quoted
+// header captures up to the next single quote, a double-quoted one up to the next
+// double quote. RE2 has no backreferences, so two patterns rather than one.
+var (
+	curlCookieSingle = regexp.MustCompile(`(?i)(?:-H|--header)\s+'Cookie:\s*([^']*)'`)
+	curlCookieDouble = regexp.MustCompile(`(?i)(?:-H|--header)\s+"Cookie:\s*([^"]*)"`)
+)
 
 // FromCurl extracts the Cookie header value from a pasted curl command.
 func FromCurl(content string) (string, error) {
-	m := curlCookieRe.FindStringSubmatch(content)
-	if m == nil {
-		return "", fmt.Errorf("no Cookie header found in curl command")
+	if m := curlCookieSingle.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1]), nil
 	}
-	return strings.TrimSpace(m[1]), nil
+	if m := curlCookieDouble.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1]), nil
+	}
+	return "", fmt.Errorf("no Cookie header found in curl command")
 }
 
 // FromFile reads a cookie source file, auto-detecting curl vs cookies.txt.
@@ -62,7 +68,7 @@ func FromFile(path string) (string, error) {
 		return "", err
 	}
 	content := string(raw)
-	if strings.Contains(content, "curl ") || curlCookieRe.MatchString(content) {
+	if strings.Contains(content, "curl ") || curlCookieSingle.MatchString(content) || curlCookieDouble.MatchString(content) {
 		return FromCurl(content)
 	}
 	return FromCookiesTxt(content)

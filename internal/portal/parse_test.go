@@ -40,9 +40,9 @@ func TestHasLibrarySentinel(t *testing.T) {
 	cases := map[string]bool{
 		"library_p1.html":                  true,
 		"library_p5.html":                  true,
-		"library_empty_authenticated.html": true,
-		"library_logout_shell.html":        false,
-		"item_1.html":                      false,
+		"library_empty_authenticated.html": true,  // empty overflow page: search box, no heading
+		"library_logout_shell.html":        false, // logged out: no Sky Pilot UI
+		"item_1.html":                      true,  // item pages are authenticated too (not enumerated)
 	}
 	for name, want := range cases {
 		got, err := HasLibrarySentinel(read(t, name))
@@ -150,6 +150,29 @@ func TestParseItemArchivedFlag(t *testing.T) {
 	}
 	if !sawArchived {
 		t.Errorf("expected an ARCHIVED variant in Alpine Mountain: %+v", files)
+	}
+}
+
+func TestParseItemSkipsUnknownVariant(t *testing.T) {
+	// Synty has a real typo "Ureal_5_3" (missing the n). An unrecognized variant
+	// keyword is skipped, not fatal; the recognizable row still parses.
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_Holiday_2025_Ureal_5_3 | v1_0_0 <span class='sky-pilot-file-size'>(50 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/111?x=1'>Download</a></div>
+	</div>
+	<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_Holiday_2025_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222?x=1'>Download</a></div>
+	</div>`)
+	files, err := ParseItemPage(html, "polygon-holiday-2025")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("got %d files, want 1 (Ureal skipped): %+v", len(files), files)
+	}
+	if files[0].Variant != "Godot_4_5_1" || files[0].FileID != 222 {
+		t.Errorf("kept wrong row: %+v", files[0])
 	}
 }
 

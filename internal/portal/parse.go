@@ -26,23 +26,18 @@ var (
 	wsRe         = regexp.MustCompile(`\s+`)
 )
 
-// HasLibrarySentinel reports whether a page is an authenticated library page (the
-// positive "Your Library" heading), distinguishing it from a logged-out shell.
-// sky-pilot-files-list is NOT used: it appears on item pages too.
+// HasLibrarySentinel reports whether a page is an authenticated Sky Pilot page,
+// distinguishing it from a logged-out shell. The marker is the "Search My Products"
+// box (.sky-pilot-search-input): it is present on every authenticated library page
+// INCLUDING the empty page past the last one, whereas the "Your Library" heading is
+// absent on that overflow page (confirmed against the live store), so the heading
+// would misread the legitimate terminator as an expired session.
 func HasLibrarySentinel(html []byte) (bool, error) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(html))
 	if err != nil {
 		return false, err
 	}
-	found := false
-	doc.Find("h1, h2, h3").EachWithBreak(func(_ int, s *goquery.Selection) bool {
-		if strings.EqualFold(strings.TrimSpace(s.Text()), "Your Library") {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found, nil
+	return doc.Find(".sky-pilot-search-input").Length() > 0, nil
 }
 
 // ParseLibraryPage extracts the packs listed on one "Your Library" page. An
@@ -108,8 +103,11 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 
 		token, variant, version, ok := splitLabel(label)
 		if !ok {
-			parseErr = fmt.Errorf("file row %q: cannot recover token/variant", label)
-			return false
+			// Unrecognized variant keyword (e.g. Synty's "Ureal" typo, or a future
+			// engine). Skip rather than abort: such variants are never in the
+			// Godot/SourceFiles filter. Structural breakage is still caught above
+			// (a versioned row with no download link errors).
+			return true
 		}
 		size, _ := parseSize(sizeText)
 		files = append(files, model.FileEntry{
