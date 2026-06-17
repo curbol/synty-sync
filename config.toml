@@ -1,0 +1,13 @@
+# synty tool defaults (committed). No account PII here.
+#
+# The customer id is account-identifying and is NOT committed. Provide it via the
+# SYNTY_CUSTOMER_ID environment variable or a gitignored config.local.toml:
+#
+#   # config.local.toml
+#   customer_id = "0000000000000"
+#   library_path = "/home/you/code/synty-assets"
+
+variant_includes = ["Godot_*", "SourceFiles"]
+concurrency = 4
+session_source = "firefox"
+library_path = "~/code/synty-assets"
