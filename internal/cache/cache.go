@@ -76,6 +76,22 @@ func Exists(libraryRoot, relPath string) bool {
 	return err == nil
 }
 
+// Hash returns the sha256 and byte size of a cached file (used to adopt a file
+// migrated in from a pre-existing flat zip).
+func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {
+	f, err := os.Open(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err = io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
 // Remove deletes the file at relPath (used to prune a prior version).
 func Remove(libraryRoot, relPath string) error {
 	err := os.Remove(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))

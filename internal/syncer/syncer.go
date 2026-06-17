@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/curbol/hexed-haven/tools/synty/internal/cache"
 	"github.com/curbol/hexed-haven/tools/synty/internal/lockfile"
@@ -25,9 +26,8 @@ const (
 	Changed
 	DownloadNow  // owned, was filtered out before, now selected
 	CacheMissing // tracked + version matches, but absent/corrupt on disk
+	Adopted      // matched a pre-existing flat zip and folded into the layout
 )
-
-func (c Class) NeedsDownload() bool { return c != Unchanged }
 
 func (c Class) String() string {
 	switch c {
@@ -39,6 +39,8 @@ func (c Class) String() string {
 		return "download-now"
 	case CacheMissing:
 		return "cache-missing"
+	case Adopted:
+		return "adopted"
 	default:
 		return "unchanged"
 	}
@@ -73,6 +75,7 @@ type FileDiff struct {
 type Report struct {
 	Diffs       []FileDiff
 	Downloaded  []FileDiff
+	Adopted     []FileDiff // matched pre-existing flat zips, no download
 	Warnings    []string
 	NewLockfile lockfile.Lockfile
 }
@@ -85,7 +88,9 @@ type Options struct {
 	DryRun      bool   // status: classify only, no downloads, no save
 	FullVerify  bool   // sha-verify cache (sync) vs presence-only (status)
 	Concurrency int
-	Now         string // timestamp for generatedAt/downloadedAt
+	Now         string        // timestamp for generatedAt/downloadedAt
+	Attempts    int           // download attempts (default 3)
+	Backoff     time.Duration // base backoff between attempts (default 500ms)
 }
 
 type resolved struct {
@@ -131,29 +136,64 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 	}
 
+	if opts.Attempts <= 0 {
+		opts.Attempts = 3
+	}
+	if opts.Backoff <= 0 {
+		opts.Backoff = 500 * time.Millisecond
+	}
+
 	report := Report{NewLockfile: lockfile.Lockfile{GeneratedAt: opts.Now, Packs: map[string]lockfile.Pack{}}}
 	resolvedByID := map[int]resolved{}
 
-	for _, id := range selOrder {
-		group := selectedByID[id]
-		rep := group[0].file
-		prior, hasPrior := priorByID[id]
-		class := classify(rep, prior, hasPrior, cacheOK)
+	// Adopt pre-existing flat zips into the layout so they are not re-downloaded.
+	adoptedByID := map[int]resolved{}
+	if !opts.DryRun {
+		var wanted []cache.Wanted
+		for _, id := range selOrder {
+			f := selectedByID[id][0].file
+			wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
+		}
+		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
+		if err != nil {
+			return Report{}, fmt.Errorf("migrate flat zips: %w", err)
+		}
+		for _, m := range migrated {
+			sha, size, err := cache.Hash(opts.LibraryRoot, m.RelPath)
+			if err != nil {
+				return Report{}, fmt.Errorf("hash migrated %s: %w", m.From, err)
+			}
+			adoptedByID[m.FileID] = resolved{cachePath: m.RelPath, sha: sha, size: size, now: true}
+		}
+	}
 
-		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id, Class: class}
+	for _, id := range selOrder {
+		rep := selectedByID[id][0].file
+		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}
+
+		if r, ok := adoptedByID[id]; ok {
+			fd.Class = Adopted
+			report.Diffs = append(report.Diffs, fd)
+			report.Adopted = append(report.Adopted, fd)
+			resolvedByID[id] = r
+			continue
+		}
+
+		prior, hasPrior := priorByID[id]
+		fd.Class = classify(rep, prior, hasPrior, cacheOK)
 		report.Diffs = append(report.Diffs, fd)
 
 		switch {
-		case class == Unchanged:
+		case fd.Class == Unchanged:
 			resolvedByID[id] = resolved{cachePath: prior.CachePath, sha: prior.SHA256, size: prior.SizeBytes}
 		case opts.DryRun:
 			// classify only; nothing resolved
 		default:
-			r, err := download(ctx, c, opts.LibraryRoot, rep)
+			r, err := downloadWithRetry(ctx, c, opts.LibraryRoot, rep, opts.Attempts, opts.Backoff)
 			if err != nil {
 				return Report{}, fmt.Errorf("download %s: %w", rep.Key(), err)
 			}
-			if class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
+			if fd.Class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
 				_ = cache.Remove(opts.LibraryRoot, prior.CachePath)
 			}
 			resolvedByID[id] = r
@@ -222,6 +262,27 @@ func download(ctx context.Context, c *portal.Client, libraryRoot string, f model
 		return resolved{}, err
 	}
 	return resolved{cachePath: rel, sha: sha, size: size, now: true}, nil
+}
+
+// downloadWithRetry retries a download with bounded exponential backoff, resolving
+// a fresh signed URL on each attempt (the CloudFront signature expires).
+func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string, f model.FileEntry, attempts int, base time.Duration) (resolved, error) {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return resolved{}, ctx.Err()
+			case <-time.After(base << (i - 1)):
+			}
+		}
+		r, err := download(ctx, c, libraryRoot, f)
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
+	}
+	return resolved{}, lastErr
 }
 
 func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {

@@ -45,6 +45,7 @@ func run(args []string) error {
 	library := fs.String("library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
 	only := fs.String("only", "", "limit to packs whose slug matches this glob")
 	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
+	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
 	switch cmd {
 	case "status", "sync", "list", "-h", "--help", "help":
 	default:
@@ -92,12 +93,13 @@ func run(args []string) error {
 		CustomerID: cfg.CustomerID,
 		Cookie:     cookie,
 	}
+	dry := cmd == "status" || *dryRun
 	opts := syncer.Options{
 		LibraryRoot: cfg.LibraryPath,
 		Filter:      cfg.Filter(),
 		OnlyGlob:    *only,
-		DryRun:      cmd == "status",
-		FullVerify:  cmd == "sync",
+		DryRun:      dry,
+		FullVerify:  !dry,
 		Concurrency: cfg.Concurrency,
 		Now:         time.Now().UTC().Format(time.RFC3339),
 	}
@@ -105,7 +107,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	printReport(cmd, cfg, rep)
+	printReport(dry, cfg, rep)
 	return nil
 }
 
@@ -120,25 +122,21 @@ func resolveCookie(cfg config.Config, override string) (string, error) {
 	return session.FromFile(src)
 }
 
-func printReport(cmd string, cfg config.Config, rep syncer.Report) {
+func printReport(dry bool, cfg config.Config, rep syncer.Report) {
 	counts := map[syncer.Class]int{}
 	for _, d := range rep.Diffs {
 		counts[d.Class]++
 	}
-	verb := "would download"
-	if cmd == "sync" {
-		verb = "downloaded"
-	}
 	fmt.Printf("library: %s\n", cfg.LibraryPath)
 	fmt.Printf("packs: %d  files selected: %d\n", len(rep.NewLockfile.Packs), len(rep.Diffs))
-	fmt.Printf("  new=%d changed=%d download-now=%d cache-missing=%d unchanged=%d\n",
+	fmt.Printf("  new=%d changed=%d download-now=%d cache-missing=%d adopted=%d unchanged=%d\n",
 		counts[syncer.New], counts[syncer.Changed], counts[syncer.DownloadNow],
-		counts[syncer.CacheMissing], counts[syncer.Unchanged])
-	if cmd == "sync" {
-		fmt.Printf("%s: %d files\n", verb, len(rep.Downloaded))
-	} else {
+		counts[syncer.CacheMissing], counts[syncer.Adopted], counts[syncer.Unchanged])
+	if dry {
 		pending := counts[syncer.New] + counts[syncer.Changed] + counts[syncer.DownloadNow] + counts[syncer.CacheMissing]
-		fmt.Printf("%s: %d files\n", verb, pending)
+		fmt.Printf("would download: %d files\n", pending)
+	} else {
+		fmt.Printf("downloaded: %d files  adopted: %d existing\n", len(rep.Downloaded), len(rep.Adopted))
 	}
 	for _, w := range rep.Warnings {
 		fmt.Printf("  warning: %s\n", w)

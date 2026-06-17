@@ -237,6 +237,47 @@ func TestCacheMissingRedownloads(t *testing.T) {
 	}
 }
 
+func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	// Pre-place a Synty-named flat zip matching POLYGON_Pirate Godot_4_5_1 v1_0_1.
+	flat := filepath.Join(lib, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
+	if err := os.WriteFile(flat, []byte("EXISTING-CONTENT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted := false
+	for _, d := range rep.Adopted {
+		if d.FileID == 2282645 {
+			adopted = true
+		}
+	}
+	if !adopted {
+		t.Errorf("fileId 2282645 not adopted: %+v", rep.Adopted)
+	}
+	for _, d := range rep.Downloaded {
+		if d.FileID == 2282645 {
+			t.Error("2282645 was downloaded; should have been adopted from the flat zip")
+		}
+	}
+	lf, _ := lockfile.Load(lockPath)
+	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	if !f.Tracked || f.CachePath == "" {
+		t.Fatalf("adopted entry not tracked: %+v", f)
+	}
+	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
+	if string(got) != "EXISTING-CONTENT" {
+		t.Errorf("adopted content changed: %q (re-downloaded instead of adopted?)", got)
+	}
+	if _, err := os.Stat(flat); err == nil {
+		t.Error("flat zip still at library root after adopt")
+	}
+}
+
 func TestExpiredSessionAborts(t *testing.T) {
 	srv := newServer(t, serverOpts{page1: logoutShell})
 	lib := t.TempDir()
