@@ -1,0 +1,5 @@
+# Account-specific config (customer id, machine paths) — never committed.
+config.local.toml
+
+# Built binary.
+/synty

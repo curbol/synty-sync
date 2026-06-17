@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><title>Synty Store</title></head>
+<body>
+<!-- Logged-out shell: a 200 response with no "Your Library" sentinel (a login
+     prompt instead). An expired session lands here; the tool must abort rather
+     than write an empty lockfile. Hand-authored; no real logout page was captured. -->
+<div class='shopify-section'>
+  <h1>Login</h1>
+  <form method='post' action='/account/login'>
+    <label for='customer_email'>Email</label>
+    <input type='email' id='customer_email' name='customer[email]'>
+    <label for='customer_password'>Password</label>
+    <input type='password' id='customer_password' name='customer[password]'>
+    <button type='submit'>Sign in</button>
+  </form>
+  <a href='/account/register'>Create account</a>
+</div>
+</body>
+</html>
