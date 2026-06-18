@@ -82,15 +82,16 @@ type Report struct {
 
 // Options configures a run.
 type Options struct {
-	LibraryRoot string
-	Filter      func(model.Variant) bool
-	OnlyGlob    string // optional pack-slug glob; empty = all
-	DryRun      bool   // status: classify only, no downloads, no save
-	FullVerify  bool   // sha-verify cache (sync) vs presence-only (status)
-	Concurrency int
-	Now         string        // timestamp for generatedAt/downloadedAt
-	Attempts    int           // download attempts (default 3)
-	Backoff     time.Duration // base backoff between attempts (default 500ms)
+	LibraryRoot  string
+	Filter       func(model.Variant) bool
+	OnlyGlob     string // optional pack-slug glob; empty = all
+	DryRun       bool   // status: classify only, no downloads, no save
+	FullVerify   bool   // sha-verify cache (sync) vs presence-only (status)
+	Concurrency  int
+	Now          string                 // timestamp for generatedAt/downloadedAt
+	Attempts     int                    // download attempts (default 3)
+	Backoff      time.Duration          // base backoff between attempts (default 500ms)
+	PackSelected func(slug string) bool // manifest allowlist; nil = all packs
 }
 
 type resolved struct {
@@ -107,7 +108,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	if err != nil {
 		return Report{}, err
 	}
-	packs = filterPacks(packs, opts.OnlyGlob)
+	packs = filterPacks(packs, opts.OnlyGlob, opts.PackSelected)
 
 	packFiles, err := fetchAll(ctx, c, packs, opts.Concurrency)
 	if err != nil {
@@ -363,15 +364,18 @@ func cacheChecker(opts Options) func(relPath, sha string) bool {
 	return func(relPath, _ string) bool { return cache.Exists(opts.LibraryRoot, relPath) }
 }
 
-func filterPacks(packs []model.Pack, glob string) []model.Pack {
-	if glob == "" {
-		return packs
-	}
+func filterPacks(packs []model.Pack, glob string, selected func(string) bool) []model.Pack {
 	var out []model.Pack
 	for _, p := range packs {
-		if ok, _ := filepath.Match(glob, p.Slug); ok {
-			out = append(out, p)
+		if selected != nil && !selected(p.Slug) {
+			continue
 		}
+		if glob != "" {
+			if ok, _ := filepath.Match(glob, p.Slug); !ok {
+				continue
+			}
+		}
+		out = append(out, p)
 	}
 	return out
 }

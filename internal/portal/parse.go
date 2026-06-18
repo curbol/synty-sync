@@ -17,7 +17,23 @@ import (
 // delimiter between token and variant (goquery concatenates the `token<br><span>`
 // shape with no space, and one real row fuses them with an underscore), so we find
 // the rightmost keyword: the variant is always the last segment before " | ".
-var variantKeywords = []string{"Godot", "Unity", "Unreal", "SourceFiles", "SourceSprites"}
+// Synty labels the source variants inconsistently (some packs use "Source_Sprites"
+// / "Source_Files" with an underscore), so both forms are keywords and the result
+// is canonicalized below.
+var variantKeywords = []string{"Godot", "Unity", "Unreal", "SourceFiles", "SourceSprites", "Source_Files", "Source_Sprites"}
+
+// canonicalVariant folds Synty's inconsistent source-variant spellings to one token
+// so the filter matches them uniformly (Fantasy Warrior HUD ships "Source_Sprites",
+// Dark Fantasy HUD ships "SourceSprites").
+func canonicalVariant(v string) string {
+	switch v {
+	case "Source_Sprites":
+		return "SourceSprites"
+	case "Source_Files":
+		return "SourceFiles"
+	}
+	return v
+}
 
 var (
 	libAnchorRe  = regexp.MustCompile(`/customers/(\d+)/orders/(\d+)/order_items/(\d+)`)
@@ -60,12 +76,14 @@ func ParseLibraryPage(html []byte) ([]model.Pack, error) {
 		orderID, _ := strconv.Atoi(m[2])
 		orderItemID, _ := strconv.Atoi(m[3])
 		name := collapse(s.Text())
+		icon, _ := s.Find("img").First().Attr("src")
 		packs = append(packs, model.Pack{
 			Slug:        model.Slug(name),
 			DisplayName: name,
 			OrderID:     orderID,
 			OrderItemID: orderItemID,
 			ItemURL:     href,
+			IconURL:     normalizeURL(icon),
 		})
 		return true
 	})
@@ -113,7 +131,7 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		files = append(files, model.FileEntry{
 			PackSlug:     packSlug,
 			FileToken:    token,
-			Variant:      model.Variant(variant),
+			Variant:      model.Variant(canonicalVariant(variant)),
 			Version:      version,
 			FileID:       fileID,
 			SizeBytes:    size,
@@ -174,3 +192,11 @@ func collapse(s string) string { return strings.TrimSpace(wsRe.ReplaceAllString(
 // html2href returns the href as given; goquery already decodes HTML entities in
 // attribute values, so "&amp;" arrives as "&".
 func html2href(h string) string { return h }
+
+// normalizeURL upgrades a protocol-relative URL ("//cdn...") to https.
+func normalizeURL(u string) string {
+	if strings.HasPrefix(u, "//") {
+		return "https:" + u
+	}
+	return u
+}

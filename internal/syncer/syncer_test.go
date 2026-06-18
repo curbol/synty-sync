@@ -278,6 +278,31 @@ func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
 	}
 }
 
+func TestPackSelectedLimitsToAllowlist(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	opts := runOpts(lib, true) // dry: classify only
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range rep.Diffs {
+		if d.PackSlug != "polygon-pirate-pack" {
+			t.Errorf("diff for non-selected pack %q: %+v", d.PackSlug, d)
+		}
+	}
+	// Only the selected pack appears in the rebuilt lockfile.
+	if _, ok := rep.NewLockfile.Packs["polygon-dungeon-pack"]; ok {
+		t.Error("excluded pack present in lockfile")
+	}
+	if _, ok := rep.NewLockfile.Packs["polygon-pirate-pack"]; !ok {
+		t.Error("selected pack missing from lockfile")
+	}
+}
+
 func TestExpiredSessionAborts(t *testing.T) {
 	srv := newServer(t, serverOpts{page1: logoutShell})
 	lib := t.TempDir()

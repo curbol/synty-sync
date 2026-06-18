@@ -19,9 +19,11 @@ import (
 
 	"github.com/curbol/synty-sync/internal/config"
 	"github.com/curbol/synty-sync/internal/lockfile"
+	"github.com/curbol/synty-sync/internal/manifest"
 	"github.com/curbol/synty-sync/internal/portal"
 	"github.com/curbol/synty-sync/internal/session"
 	"github.com/curbol/synty-sync/internal/syncer"
+	"github.com/curbol/synty-sync/internal/web"
 )
 
 const lockfileName = "synty-library.lock.json"
@@ -48,7 +50,7 @@ func run(args []string) error {
 	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
 	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
 	switch cmd {
-	case "status", "sync", "list", "-h", "--help", "help":
+	case "status", "sync", "list", "select", "-h", "--help", "help":
 	default:
 		usage()
 		return fmt.Errorf("unknown subcommand %q", cmd)
@@ -84,10 +86,6 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		return err
-	}
 	// No whole-request timeout (asset downloads are large), but a response-header
 	// timeout so a stalled connection fails instead of hanging forever.
 	client := &portal.Client{
@@ -98,23 +96,67 @@ func run(args []string) error {
 		CustomerID: cfg.CustomerID,
 		Cookie:     cookie,
 	}
-	dry := cmd == "status" || *dryRun
-	opts := syncer.Options{
-		LibraryRoot: cfg.LibraryPath,
-		Filter:      cfg.Filter(),
-		OnlyGlob:    *only,
-		DryRun:      dry,
-		FullVerify:  !dry,
-		Concurrency: cfg.Concurrency,
-		Now:         time.Now().UTC().Format(time.RFC3339),
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	manifestPath := filepath.Join(*cfgDir, manifestName)
+
+	if cmd == "select" {
+		return selectPacks(ctx, client, manifestPath)
+	}
+
+	man, err := manifest.Load(manifestPath)
+	if err != nil {
+		return err
+	}
+	enabled := man.EnabledSet()
+	if len(enabled) == 0 {
+		fmt.Fprintln(os.Stderr, "note: no packs enabled; run `synty-sync select` to choose (nothing will download).")
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		return err
+	}
+	dry := cmd == "status" || *dryRun
+	opts := syncer.Options{
+		LibraryRoot:  cfg.LibraryPath,
+		Filter:       cfg.Filter(),
+		OnlyGlob:     *only,
+		DryRun:       dry,
+		FullVerify:   !dry,
+		Concurrency:  cfg.Concurrency,
+		Now:          time.Now().UTC().Format(time.RFC3339),
+		PackSelected: func(slug string) bool { return enabled[slug] },
+	}
 	rep, err := syncer.Run(ctx, client, lf, lockPath, opts)
 	if err != nil {
 		return err
 	}
 	printReport(dry, cfg, rep)
+	return nil
+}
+
+const manifestName = "packs.toml"
+
+func selectPacks(ctx context.Context, client *portal.Client, manifestPath string) error {
+	packs, err := client.Enumerate(ctx)
+	if err != nil {
+		return err
+	}
+	man, err := manifest.Load(manifestPath)
+	if err != nil {
+		return err
+	}
+	man.Reconcile(packs)
+	chosen, err := web.Serve(ctx, "localhost:8787", packs, man.EnabledSet())
+	if err != nil {
+		return err
+	}
+	man.SetEnabled(chosen)
+	if err := manifest.Save(manifestPath, man); err != nil {
+		return err
+	}
+	fmt.Printf("saved %s: %d of %d packs enabled. Run `synty-sync sync` to download.\n",
+		manifestPath, len(chosen), len(packs))
 	return nil
 }
 
@@ -185,6 +227,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `synty-sync - mirror your Synty store library into a local cache
 
 usage:
+  synty-sync select [flags]   pick which packs to mirror (opens a local web page)
   synty-sync status [flags]   show what a sync would change (no downloads)
   synty-sync sync   [flags]   download the delta and update the lockfile
   synty-sync list   [flags]   print the current lockfile

@@ -176,6 +176,26 @@ func TestParseItemSkipsUnknownVariant(t *testing.T) {
 	}
 }
 
+func TestSourceSpritesUnderscoreCanonicalized(t *testing.T) {
+	// Fantasy Warrior HUD labels the variant "Source_Sprites" (underscore); it must
+	// canonicalize to "SourceSprites" so the SourceSprites filter matches both HUDs.
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>INTERFACE_Fantasy_Warrior_HUD_Source_Sprites | v3 <span class='sky-pilot-file-size'>(201 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/777?x=1'>Download</a></div>
+	</div>`)
+	files, err := ParseItemPage(html, "interface-fantasy-warrior-hud")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	f, ok := findFile(files, "INTERFACE_Fantasy_Warrior_HUD", "SourceSprites")
+	if !ok {
+		t.Fatalf("Source_Sprites not canonicalized to SourceSprites: %+v", files)
+	}
+	if f.FileID != 777 || f.Version != "v3" {
+		t.Errorf("entry = %+v", f)
+	}
+}
+
 func TestBundledFileSharedAcrossPacks(t *testing.T) {
 	// The same fileId 2344711 is bundled under Pirate (item_1), Dungeon (item_4),
 	// and Fantasy Kingdom (item_6); dedup keys on this.

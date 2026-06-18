@@ -55,13 +55,32 @@ the store, which is why it's the default for the monthly run.
 ## Commands
 
 ```bash
+synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # what a sync would change (no downloads, no writes)
 synty-sync sync     # download the delta and rewrite the lockfile
 synty-sync list     # print the current lockfile
 ```
 
 Useful flags: `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
-`--config <dir>` (where `config.toml` and the lockfile live; default `.`).
+`--config <dir>` (where `config.toml`, `packs.toml`, and the lockfile live; default `.`).
+
+## Selecting packs
+
+Selection is opt-in: a pack is only mirrored once you enable it. `synty-sync select`
+enumerates your library and opens a local web page listing every owned pack with its
+thumbnail and a checkbox; tick the ones you want, hit Save, and it writes `packs.toml`:
+
+```toml
+[[pack]]
+slug = "polygon-pirate-pack"
+name = "POLYGON - Pirate Pack"
+enabled = true
+```
+
+`packs.toml` is committed (it's a small, diffable allowlist). Newly-bought packs appear
+disabled on the next `select`, so buying a pack never silently downloads it. `sync` and
+`status` only act on enabled packs; with nothing enabled they do nothing and remind you to
+run `select`. You can also hand-edit `packs.toml` instead of using the web page.
 
 ## What it does
 

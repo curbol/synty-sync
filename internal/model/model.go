@@ -21,6 +21,7 @@ type Pack struct {
 	OrderID     int
 	OrderItemID int
 	ItemURL     string
+	IconURL     string // pack preview thumbnail (public CDN URL)
 }
 
 // FileEntry is one downloadable file on a pack's item page.
