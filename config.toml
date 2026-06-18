@@ -1,4 +1,4 @@
-# synty tool defaults (committed). No account PII here.
+# synty-sync tool defaults (committed). No account PII here.
 #
 # The customer id is account-identifying and is NOT committed. Provide it via the
 # SYNTY_CUSTOMER_ID environment variable or a gitignored config.local.toml:

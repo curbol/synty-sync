@@ -2,4 +2,4 @@
 config.local.toml
 
 # Built binary.
-/synty
+/synty-sync

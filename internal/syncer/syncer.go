@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/cache"
-	"github.com/curbol/hexed-haven/tools/synty/internal/lockfile"
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
-	"github.com/curbol/hexed-haven/tools/synty/internal/portal"
+	"github.com/curbol/synty-sync/internal/cache"
+	"github.com/curbol/synty-sync/internal/lockfile"
+	"github.com/curbol/synty-sync/internal/model"
+	"github.com/curbol/synty-sync/internal/portal"
 )
 
 // Class is the diff outcome for one selected file.

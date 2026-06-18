@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
+	"github.com/curbol/synty-sync/internal/model"
 )
 
 // variantKeywords anchor the token/variant split. The heading text has no reliable

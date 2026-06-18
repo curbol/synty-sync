@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
+	"github.com/curbol/synty-sync/internal/model"
 )
 
 // Config is the resolved tool configuration.

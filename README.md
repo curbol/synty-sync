@@ -1,14 +1,13 @@
-# synty
+# synty-sync
 
 A small Go CLI that mirrors your Synty store "Your Library" into a local cache,
 downloading only what changed since the last run. It is the download manager that
-direct Synty-store purchases don't get. Design: `../../docs/specs/synty-sync-design.md`.
+direct Synty-store purchases don't get. Design: `docs/design.md`.
 
 ## Build
 
 ```bash
-cd tools/synty
-go build -o synty .
+go build -o synty-sync .
 ```
 
 Requires Go 1.26+. No cgo (the Firefox cookie reader uses pure-Go sqlite).
@@ -22,7 +21,7 @@ or a gitignored local config:
 export SYNTY_CUSTOMER_ID=<your-customer-id>
 ```
 
-or `tools/synty/config.local.toml`:
+or `config.local.toml`:
 
 ```toml
 customer_id  = "<your-customer-id>"
@@ -36,18 +35,18 @@ Your customer id is the number in your library URL:
 
 The store gates downloads behind your logged-in browser session. By default the tool
 reads cookies straight from Firefox (`session_source = "firefox"`), so a logged-in
-browser means `synty sync` needs no pasting. Override the source with `--cookies`:
+browser means `synty-sync sync` needs no pasting. Override the source with `--cookies`:
 
 ```bash
 # Firefox (default): just run it
-synty status
+synty-sync status
 
 # Or paste a session: in DevTools > Network, right-click the library request >
 # Copy > Copy as cURL, save to a file, then:
-synty status --cookies session.curl
+synty-sync status --cookies session.curl
 
 # Or a Netscape cookies.txt export:
-synty status --cookies cookies.txt
+synty-sync status --cookies cookies.txt
 ```
 
 A captured session expires; the Firefox source refreshes itself whenever you browse
@@ -56,9 +55,9 @@ the store, which is why it's the default for the monthly run.
 ## Commands
 
 ```bash
-synty status   # what a sync would change (no downloads, no writes)
-synty sync     # download the delta and rewrite the lockfile
-synty list     # print the current lockfile
+synty-sync status   # what a sync would change (no downloads, no writes)
+synty-sync sync     # download the delta and rewrite the lockfile
+synty-sync list     # print the current lockfile
 ```
 
 Useful flags: `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,

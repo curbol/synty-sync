@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
+	"github.com/curbol/synty-sync/internal/model"
 )
 
 func TestDefaultsWhenNoFiles(t *testing.T) {

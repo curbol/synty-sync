@@ -1,9 +1,9 @@
-// Command synty mirrors the Synty store's "Your Library" into a local cache,
+// Command synty-sync mirrors the Synty store's "Your Library" into a local cache,
 // downloading only what changed. See README.md.
 //
-//	synty status   # what would change (no downloads)
-//	synty sync     # download the delta and update the lockfile
-//	synty list     # print the current lockfile
+//	synty-sync status   # what would change (no downloads)
+//	synty-sync sync     # download the delta and update the lockfile
+//	synty-sync list     # print the current lockfile
 package main
 
 import (
@@ -17,18 +17,18 @@ import (
 	"sort"
 	"time"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/config"
-	"github.com/curbol/hexed-haven/tools/synty/internal/lockfile"
-	"github.com/curbol/hexed-haven/tools/synty/internal/portal"
-	"github.com/curbol/hexed-haven/tools/synty/internal/session"
-	"github.com/curbol/hexed-haven/tools/synty/internal/syncer"
+	"github.com/curbol/synty-sync/internal/config"
+	"github.com/curbol/synty-sync/internal/lockfile"
+	"github.com/curbol/synty-sync/internal/portal"
+	"github.com/curbol/synty-sync/internal/session"
+	"github.com/curbol/synty-sync/internal/syncer"
 )
 
 const lockfileName = "synty-library.lock.json"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "synty:", err)
+		fmt.Fprintln(os.Stderr, "synty-sync:", err)
 		os.Exit(1)
 	}
 }
@@ -182,12 +182,12 @@ func list(lockPath string) error {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `synty - mirror your Synty store library into a local cache
+	fmt.Fprint(os.Stderr, `synty-sync - mirror your Synty store library into a local cache
 
 usage:
-  synty status [flags]   show what a sync would change (no downloads)
-  synty sync   [flags]   download the delta and update the lockfile
-  synty list   [flags]   print the current lockfile
+  synty-sync status [flags]   show what a sync would change (no downloads)
+  synty-sync sync   [flags]   download the delta and update the lockfile
+  synty-sync list   [flags]   print the current lockfile
 
 flags:
   -config <dir>       directory with config.toml and the lockfile (default ".")

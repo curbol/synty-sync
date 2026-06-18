@@ -1,4 +1,4 @@
-module github.com/curbol/hexed-haven/tools/synty
+module github.com/curbol/synty-sync
 
 go 1.26
 

@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/fixtures"
+	"github.com/curbol/synty-sync/internal/fixtures"
 )
 
 func main() {

@@ -11,7 +11,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
+	"github.com/curbol/synty-sync/internal/model"
 )
 
 // ErrExpiredSession is returned when the library page lacks the logged-in

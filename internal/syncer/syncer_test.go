@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/curbol/hexed-haven/tools/synty/internal/lockfile"
-	"github.com/curbol/hexed-haven/tools/synty/internal/model"
-	"github.com/curbol/hexed-haven/tools/synty/internal/portal"
+	"github.com/curbol/synty-sync/internal/lockfile"
+	"github.com/curbol/synty-sync/internal/model"
+	"github.com/curbol/synty-sync/internal/portal"
 )
 
 // --- pure classify tests ---
