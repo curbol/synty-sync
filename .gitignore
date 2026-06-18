@@ -1,5 +1,6 @@
 # Account-specific config (customer id, machine paths) — never committed.
 config.local.toml
+config.toml
 
 # Captured browser sessions (contain cookies) — never committed.
 session.curl

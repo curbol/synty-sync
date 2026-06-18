@@ -43,7 +43,7 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	cfgDir := fs.String("config", ".", "directory holding config.toml and the lockfile")
+	cfgDir := fs.String("config", "", "config/state dir (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
 	cookies := fs.String("cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
 	library := fs.String("library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
 	only := fs.String("only", "", "limit to packs whose slug matches this glob")
@@ -64,7 +64,8 @@ func run(args []string) error {
 		return err
 	}
 
-	cfg, err := config.Load(*cfgDir)
+	dir := config.ResolveDir(*cfgDir)
+	cfg, err := config.Load(dir)
 	if err != nil {
 		return err
 	}
@@ -77,14 +78,18 @@ func run(args []string) error {
 	if *customer != "" {
 		cfg.CustomerID = *customer
 	}
-	lockPath := filepath.Join(*cfgDir, lockfileName)
+	lockPath := filepath.Join(dir, lockfileName)
 
 	if cmd == "list" {
 		return list(lockPath)
 	}
 
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir %s: %w", dir, err)
+	}
+
 	if cfg.CustomerID == "" {
-		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.local.toml")
+		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
 	}
 	cookie, err := resolveCookie(cfg, *cookies)
 	if err != nil {
@@ -102,7 +107,7 @@ func run(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	manifestPath := filepath.Join(*cfgDir, manifestName)
+	manifestPath := filepath.Join(dir, manifestName)
 
 	if cmd == "select" {
 		return selectPacks(ctx, client, manifestPath)
@@ -237,13 +242,14 @@ usage:
   synty-sync list   [flags]   print the current lockfile
 
 flags:
-  -config <dir>       directory with config.toml and the lockfile (default ".")
+  -config <dir>       config/state dir (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
   -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
   -cookies <file>     cookies.txt or pasted-curl file (default: Firefox cookies)
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
 
-The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.local.toml.
+State (config.toml, packs.toml, lockfile) lives in the config dir, outside the tool.
+The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.toml there.
 `)
 }

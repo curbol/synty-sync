@@ -1,7 +1,7 @@
-// Package config resolves tool settings from layered sources: committed
-// config.toml defaults, a gitignored config.local.toml, then environment
-// overrides. The account-identifying customer id is never read from the committed
-// file; it comes from env or the local file only.
+// Package config resolves tool settings. The config/state directory follows XDG
+// with fallbacks; built-in defaults live in code; an optional config.toml in that
+// directory overrides them; environment variables and flags override that. No
+// machine-specific path is baked into the tool.
 package config
 
 import (
@@ -30,26 +30,54 @@ type fileConfig struct {
 	SessionSource   string   `toml:"session_source"`
 }
 
+// ResolveDir picks the config/state directory (where config.toml, packs.toml, and
+// the lockfile live): an explicit flag, else $SYNTY_CONFIG_DIR, else
+// $XDG_CONFIG_HOME/synty-sync, else ~/.config/synty-sync.
+func ResolveDir(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	if v := os.Getenv("SYNTY_CONFIG_DIR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "synty-sync")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", "synty-sync")
+	}
+	return "synty-sync"
+}
+
+// defaultLibraryPath is the cache location when nothing overrides it:
+// $XDG_DATA_HOME/synty-sync, else ~/.local/share/synty-sync. App data, not
+// ~/.cache, so an OS cache-cleaner won't wipe a multi-GB library.
+func defaultLibraryPath() string {
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		return filepath.Join(v, "synty-sync")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "synty-sync")
+	}
+	return "synty-library"
+}
+
 func defaults() Config {
 	return Config{
-		LibraryPath:     "~/code/synty-assets",
+		LibraryPath:     defaultLibraryPath(),
 		VariantIncludes: []string{"Godot_*", "SourceFiles"},
 		Concurrency:     4,
 		SessionSource:   "firefox",
 	}
 }
 
-// Load merges defaults, the committed config.toml in dir, the gitignored
-// config.local.toml in dir, then environment overrides (SYNTY_CUSTOMER_ID,
-// SYNTY_LIBRARY). Missing files are skipped.
+// Load merges built-in defaults, an optional config.toml in dir, then environment
+// overrides (SYNTY_CUSTOMER_ID, SYNTY_LIBRARY). A missing config.toml is fine.
 func Load(dir string) (Config, error) {
 	c := defaults()
-	for _, name := range []string{"config.toml", "config.local.toml"} {
+	p := filepath.Join(dir, "config.toml")
+	if _, err := os.Stat(p); err == nil {
 		var fc fileConfig
-		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err != nil {
-			continue
-		}
 		if _, err := toml.DecodeFile(p, &fc); err != nil {
 			return Config{}, err
 		}

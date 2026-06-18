@@ -14,21 +14,25 @@ Requires Go 1.26+. No cgo (the Firefox cookie reader uses pure-Go sqlite).
 
 ## One-time setup
 
-The customer id is account-identifying, so it is never committed. Provide it via the
-`--customer` flag, an env var, or a gitignored local config (precedence in that order):
+All per-user state — your config, pack selection, and lockfile — lives in a config
+directory *outside* this repo, resolved as:
+`--config <dir>` › `$SYNTY_CONFIG_DIR` › `$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`.
+
+Provide your customer id via the `--customer` flag, `SYNTY_CUSTOMER_ID`, or a
+`config.toml` in that directory (precedence in that order):
 
 ```bash
 synty-sync select --customer <your-customer-id>
 # or
 export SYNTY_CUSTOMER_ID=<your-customer-id>
+# or, persistently:
+mkdir -p ~/.config/synty-sync && cp config.example.toml ~/.config/synty-sync/config.toml
+$EDITOR ~/.config/synty-sync/config.toml   # set customer_id, library_path, etc.
 ```
 
-or `config.local.toml`:
-
-```toml
-customer_id  = "<your-customer-id>"
-library_path = "/home/you/code/synty-assets"   # where the cache lives (outside any repo)
-```
+The downloaded packs are cached at `$XDG_DATA_HOME/synty-sync`
+(`~/.local/share/synty-sync`) by default; override with `library_path`,
+`SYNTY_LIBRARY`, or `--library`.
 
 Your customer id is the number in your library URL:
 `https://syntystore.com/apps/downloads/orders/<customer-id>`.
@@ -64,7 +68,7 @@ synty-sync list     # print the current lockfile
 ```
 
 Useful flags: `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
-`--config <dir>` (where `config.toml`, `packs.toml`, and the lockfile live; default `.`).
+`--customer <id>`, `--config <dir>` (the config/state dir; default `~/.config/synty-sync`).
 
 ## Selecting packs
 
@@ -79,10 +83,11 @@ name = "POLYGON - Pirate Pack"
 enabled = true
 ```
 
-`packs.toml` is committed (it's a small, diffable allowlist). Newly-bought packs appear
-disabled on the next `select`, so buying a pack never silently downloads it. `sync` and
-`status` only act on enabled packs; with nothing enabled they do nothing and remind you to
-run `select`. You can also hand-edit `packs.toml` instead of using the web page.
+`packs.toml` lives in your config dir (not this repo) — a small, diffable allowlist you can
+keep under your own version control if you like. Newly-bought packs appear disabled on the
+next `select`, so buying a pack never silently downloads it. `sync` and `status` only act on
+enabled packs; with nothing enabled they do nothing and remind you to run `select`. You can
+also hand-edit `packs.toml` instead of using the web page.
 
 ## What it does
 
@@ -90,17 +95,17 @@ run `select`. You can also hand-edit `packs.toml` instead of using the web page.
   updates without downloading.
 - Downloads only new/changed/missing files into `<library>/<fileToken>/<filename>.zip`,
   deduping files bundled across packs (e.g. `GENERIC_Particle_FX`) so they download once.
-- Records everything in `synty-library.lock.json` (committed): owned packs, versions,
-  checksums, and which files are downloaded under the current filter. Its git history is
-  your changelog.
+- Records everything in `synty-library.lock.json` in your config dir: owned packs,
+  versions, checksums, and which files are downloaded under the current filter. Version it
+  yourself if you want a changelog; it also regenerates from a sync.
 - Warns for any owned pack that has no file matching the variant filter.
 
 ## Variant filter
 
 By default it downloads `Godot_*` and `SourceFiles` variants. Packs that ship only
 Unity/Unreal builds (the Sidekick character packs) or only `SourceSprites` (the HUDs)
-produce a "no downloadable variant" warning. To pull those, add to
-`config.local.toml`:
+produce a "no downloadable variant" warning. To pull those, set `variant_includes` in your
+`config.toml`:
 
 ```toml
 variant_includes = ["Godot_*", "SourceFiles", "SourceSprites", "Unity_2022_3"]
@@ -111,7 +116,8 @@ variant_includes = ["Godot_*", "SourceFiles", "SourceSprites", "Unity_2022_3"]
 The library cache is local and expendable. Current versions are always re-downloadable
 from the store, and a `sync` re-downloads any cached file that is missing or fails its
 checksum, so deleting the cache and re-syncing rebuilds it. Durability of the assets you
-actually ship lives in the game repo at promotion time (a later sub-project), not here.
+actually ship belongs in the consuming project (you promote the ones you use into it), not
+in this cache.
 
 ## Notes
 

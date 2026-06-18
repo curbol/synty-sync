@@ -1,0 +1,27 @@
+# Example config. Copy to your config dir and edit (all keys optional):
+#
+#   mkdir -p ~/.config/synty-sync
+#   cp config.example.toml ~/.config/synty-sync/config.toml
+#
+# Config dir resolution: --config <dir>  >  $SYNTY_CONFIG_DIR  >
+# $XDG_CONFIG_HOME/synty-sync  >  ~/.config/synty-sync.
+
+# Your Synty customer id (the number in your library URL). Or pass --customer /
+# set SYNTY_CUSTOMER_ID.
+# customer_id = "0000000000000"
+
+# Where downloaded packs are cached. Default: $XDG_DATA_HOME/synty-sync
+# (~/.local/share/synty-sync). Or set SYNTY_LIBRARY / pass --library.
+# library_path = "/path/to/your/synty-library"
+
+# Variant tokens to mirror (globs). Built-in default is ["Godot_*", "SourceFiles"].
+# Add "SourceSprites" for HUD/interface image packs, or a "Unity_*" for packs that
+# ship no Godot/source build.
+variant_includes = ["Godot_*", "SourceFiles", "SourceSprites"]
+
+# Cookie source: "firefox" (read the logged-in browser) or a path to a
+# cookies.txt / pasted-curl file.
+session_source = "firefox"
+
+# Max concurrent item-page fetches.
+concurrency = 4
