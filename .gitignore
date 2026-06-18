@@ -6,5 +6,10 @@ session.curl
 *.curl
 cookies.txt
 
+# Per-user library state belongs outside the tool repo (see --config); ignored here
+# defensively so it never lands in the repo even when run from this directory.
+packs.toml
+synty-library.lock.json
+
 # Built binary.
 /synty-sync
