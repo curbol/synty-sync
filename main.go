@@ -48,6 +48,7 @@ func run(args []string) error {
 	library := fs.String("library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
 	only := fs.String("only", "", "limit to packs whose slug matches this glob")
 	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
+	customer := fs.String("customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
 	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
 	switch cmd {
 	case "status", "sync", "list", "select", "-h", "--help", "help":
@@ -73,6 +74,9 @@ func run(args []string) error {
 	if *concurrency > 0 {
 		cfg.Concurrency = *concurrency
 	}
+	if *customer != "" {
+		cfg.CustomerID = *customer
+	}
 	lockPath := filepath.Join(*cfgDir, lockfileName)
 
 	if cmd == "list" {
@@ -80,7 +84,7 @@ func run(args []string) error {
 	}
 
 	if cfg.CustomerID == "" {
-		return fmt.Errorf("no customer id: set SYNTY_CUSTOMER_ID or customer_id in config.local.toml")
+		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.local.toml")
 	}
 	cookie, err := resolveCookie(cfg, *cookies)
 	if err != nil {
@@ -234,11 +238,12 @@ usage:
 
 flags:
   -config <dir>       directory with config.toml and the lockfile (default ".")
+  -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
   -cookies <file>     cookies.txt or pasted-curl file (default: Firefox cookies)
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
 
-The customer id comes from SYNTY_CUSTOMER_ID or config.local.toml (never committed).
+The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.local.toml.
 `)
 }

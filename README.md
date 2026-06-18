@@ -14,10 +14,12 @@ Requires Go 1.26+. No cgo (the Firefox cookie reader uses pure-Go sqlite).
 
 ## One-time setup
 
-The customer id is account-identifying, so it is never committed. Provide it via env
-or a gitignored local config:
+The customer id is account-identifying, so it is never committed. Provide it via the
+`--customer` flag, an env var, or a gitignored local config (precedence in that order):
 
 ```bash
+synty-sync select --customer <your-customer-id>
+# or
 export SYNTY_CUSTOMER_ID=<your-customer-id>
 ```
 
