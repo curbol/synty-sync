@@ -17,8 +17,9 @@ func TestDefaultsWhenNoConfig(t *testing.T) {
 	if c.Concurrency != 4 || c.SessionSource != "firefox" {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
-	if len(c.VariantIncludes) != 2 {
-		t.Errorf("variant includes: %v", c.VariantIncludes)
+	// No engine bias: variants must be configured, so the default is empty.
+	if len(c.VariantIncludes) != 0 {
+		t.Errorf("variant includes should default empty (no engine bias): %v", c.VariantIncludes)
 	}
 	// Library default is XDG-derived, never a baked-in personal path.
 	if c.LibraryPath == "" || strings.Contains(c.LibraryPath, "code/synty-assets") {

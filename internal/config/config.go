@@ -64,8 +64,10 @@ func defaultLibraryPath() string {
 
 func defaults() Config {
 	return Config{
-		LibraryPath:     defaultLibraryPath(),
-		VariantIncludes: []string{"Godot_*", "SourceFiles"},
+		LibraryPath: defaultLibraryPath(),
+		// No engine default: the right variant depends on the user's engine, so it
+		// must be configured (Godot_*, Unity_*, Unreal_*, SourceFiles, SourceSprites).
+		VariantIncludes: nil,
 		Concurrency:     4,
 		SessionSource:   "firefox",
 	}

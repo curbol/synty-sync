@@ -102,14 +102,20 @@ also hand-edit `packs.toml` instead of using the web page.
 
 ## Variant filter
 
-By default it downloads `Godot_*` and `SourceFiles` variants. Packs that ship only
-Unity/Unreal builds (the Sidekick character packs) or only `SourceSprites` (the HUDs)
-produce a "no downloadable variant" warning. To pull those, set `variant_includes` in your
-`config.toml`:
+The tool is engine-agnostic and has **no default engine** — you set the variants for
+your engine in `config.toml` (`sync`/`status` tell you if it's unset). Synty packs ship
+`Godot_*`, `Unity_*`, `Unreal_*`, plus engine-agnostic `SourceFiles` (raw source) and
+`SourceSprites` (HUD/interface images):
 
 ```toml
-variant_includes = ["Godot_*", "SourceFiles", "SourceSprites", "Unity_2022_3"]
+variant_includes = ["Godot_*", "SourceFiles"]            # Godot
+# variant_includes = ["Unity_*", "SourceFiles"]          # Unity
+# variant_includes = ["Unreal_*", "SourceFiles"]         # Unreal
+# add "SourceSprites" for HUD packs
 ```
+
+A pack with no file matching your variants produces a "no downloadable variant" warning
+(e.g. Sidekick character packs ship Unity-only; HUDs ship `SourceSprites`-only).
 
 ## Cache
 

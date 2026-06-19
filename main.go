@@ -113,6 +113,11 @@ func run(args []string) error {
 		return selectPacks(ctx, client, manifestPath)
 	}
 
+	if len(cfg.VariantIncludes) == 0 {
+		return fmt.Errorf("no variant_includes configured: set your engine's variants in %s, e.g.\n  variant_includes = [\"Godot_*\"]   (also Unity_*, Unreal_*, SourceFiles, SourceSprites)",
+			filepath.Join(dir, "config.toml"))
+	}
+
 	man, err := manifest.Load(manifestPath)
 	if err != nil {
 		return err

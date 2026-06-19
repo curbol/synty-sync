@@ -14,9 +14,13 @@
 # (~/.local/share/synty-sync). Or set SYNTY_LIBRARY / pass --library.
 # library_path = "/path/to/your/synty-library"
 
-# Variant tokens to mirror (globs). Built-in default is ["Godot_*", "SourceFiles"].
-# Add "SourceSprites" for HUD/interface image packs, or a "Unity_*" for packs that
-# ship no Godot/source build.
+# Variant tokens to mirror (globs). REQUIRED — there is no engine default. Set the
+# variants for your engine. Examples:
+#   Godot:   ["Godot_*", "SourceFiles"]
+#   Unity:   ["Unity_*", "SourceFiles"]
+#   Unreal:  ["Unreal_*", "SourceFiles"]
+# Add "SourceSprites" for HUD/interface image packs. SourceFiles is the raw
+# (engine-agnostic) source; drop it if you only want your engine's prebuilt packs.
 variant_includes = ["Godot_*", "SourceFiles", "SourceSprites"]
 
 # Cookie source: "firefox" (read the logged-in browser) or a path to a
