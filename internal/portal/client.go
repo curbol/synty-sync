@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
 )
@@ -50,16 +51,45 @@ func (c *Client) get(ctx context.Context, rawURL string) (*http.Response, error)
 	return c.HTTP.Do(req)
 }
 
+const httpAttempts = 4
+
+var httpBackoff = 500 * time.Millisecond // var so tests can shorten it
+
+// getBody fetches a page, retrying transient failures (network errors, 5xx) with
+// bounded exponential backoff. A 4xx fails fast (retrying won't help). The store
+// occasionally returns a one-off 500, which would otherwise abort the whole run.
 func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
-	resp, err := c.get(ctx, rawURL)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for i := 0; i < httpAttempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(httpBackoff << (i - 1)):
+			}
+		}
+		resp, err := c.get(ctx, rawURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+		}
+		return body, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("GET %s failed after %d attempts: %w", rawURL, httpAttempts, lastErr)
 }
 
 // withShop appends the shop app-proxy param (harmless to a test server).
