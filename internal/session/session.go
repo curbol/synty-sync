@@ -1,7 +1,7 @@
-// Package session builds the Cookie header for syntystore.com from one of three
-// sources: the user's Firefox cookie store (default, zero-paste), a Netscape
-// cookies.txt, or a pasted curl command. Only the storefront session matters, so
-// every syntystore.com cookie found is forwarded rather than guessing one.
+// Package session builds the Cookie header for syntystore.com from one of several
+// sources: a Gecko browser's cookie store (Firefox or Zen — default, zero-paste), a
+// Netscape cookies.txt, or a pasted curl command. Only the storefront session
+// matters, so every syntystore.com cookie found is forwarded rather than guessing one.
 package session
 
 import (
@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -74,21 +75,52 @@ func FromFile(path string) (string, error) {
 	return FromCookiesTxt(content)
 }
 
-// FromFirefox locates the default Firefox profile (or honours SYNTY_FIREFOX_PROFILE),
-// copies its (possibly locked) cookies.sqlite, and returns the syntystore.com header.
-func FromFirefox() (string, error) {
-	profile, err := locateFirefoxProfile()
+// browserBases maps a session source name to its Gecko profile base dir (relative
+// to home). Zen is a Firefox fork, so its cookies.sqlite reads identically.
+var browserBases = map[string]string{
+	"firefox": filepath.Join(".mozilla", "firefox"),
+	"zen":     filepath.Join(".config", "zen"),
+}
+
+// Resolve turns a session source into the syntystore.com Cookie header. The source
+// is a browser name ("firefox", "zen"; "" means firefox) read from its cookie store,
+// or a path to a cookies.txt / pasted-curl file.
+func Resolve(src string) (string, error) {
+	if src == "" {
+		src = "firefox"
+	}
+	if _, ok := browserBases[src]; ok {
+		return FromBrowser(src)
+	}
+	return FromFile(src)
+}
+
+// FromBrowser reads cookies from a Gecko browser's profile (Firefox or Zen),
+// honouring SYNTY_BROWSER_PROFILE as a direct profile-dir override.
+func FromBrowser(name string) (string, error) {
+	if p := os.Getenv("SYNTY_BROWSER_PROFILE"); p != "" {
+		return geckoCookieHeader(filepath.Join(p, "cookies.sqlite"))
+	}
+	rel, ok := browserBases[name]
+	if !ok {
+		return "", fmt.Errorf("unknown browser %q (use firefox, zen, or a cookies file path)", name)
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return firefoxCookieHeader(filepath.Join(profile, "cookies.sqlite"))
+	db, err := locateGeckoCookieDB(filepath.Join(home, rel))
+	if err != nil {
+		return "", err
+	}
+	return geckoCookieHeader(db)
 }
 
-func firefoxCookieHeader(dbPath string) (string, error) {
+func geckoCookieHeader(dbPath string) (string, error) {
 	if _, err := os.Stat(dbPath); err != nil {
-		return "", fmt.Errorf("firefox cookies.sqlite not found at %s: %w", dbPath, err)
+		return "", fmt.Errorf("cookies.sqlite not found at %s: %w", dbPath, err)
 	}
-	// Copy first: a running Firefox holds a lock on the live DB.
+	// Copy first: a running browser holds a lock on the live DB.
 	tmp, err := copyToTemp(dbPath)
 	if err != nil {
 		return "", err
@@ -103,7 +135,9 @@ func readSQLiteCookies(dbPath string) (string, error) {
 		return "", err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ?`,
+	// ORDER BY host so that for a name present on both ".syntystore.com" and
+	// "syntystore.com", the exact host is scanned last and wins the map.
+	rows, err := db.Query(`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ? ORDER BY host`,
 		"%."+cookieHost, cookieHost)
 	if err != nil {
 		return "", fmt.Errorf("query moz_cookies: %w", err)
@@ -171,35 +205,45 @@ func copyToTemp(src string) (string, error) {
 	return out.Name(), nil
 }
 
-func locateFirefoxProfile() (string, error) {
-	if p := os.Getenv("SYNTY_FIREFOX_PROFILE"); p != "" {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	base := filepath.Join(home, ".mozilla", "firefox")
-	// Prefer a *.default-release / *.default profile dir.
+// locateGeckoCookieDB finds the best cookies.sqlite under a Gecko profile base dir.
+// Profile folder names vary ("x.default-release", "y.Default (release)", …), so it
+// prefers a default+release profile, then any default, then the most-recently-used.
+func locateGeckoCookieDB(base string) (string, error) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return "", fmt.Errorf("firefox dir %s: %w (set SYNTY_FIREFOX_PROFILE)", base, err)
+		return "", fmt.Errorf("browser profile dir %s: %w (set SYNTY_BROWSER_PROFILE)", base, err)
 	}
-	var fallback string
+	type cand struct {
+		path      string
+		mod       time.Time
+		isDefault bool
+		isRelease bool
+	}
+	var cands []cand
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		name := e.Name()
-		if strings.HasSuffix(name, ".default-release") {
-			return filepath.Join(base, name), nil
+		db := filepath.Join(base, e.Name(), "cookies.sqlite")
+		fi, err := os.Stat(db)
+		if err != nil {
+			continue
 		}
-		if strings.Contains(name, ".default") {
-			fallback = filepath.Join(base, name)
+		low := strings.ToLower(e.Name())
+		cands = append(cands, cand{db, fi.ModTime(), strings.Contains(low, "default"), strings.Contains(low, "release")})
+	}
+	if len(cands) == 0 {
+		return "", fmt.Errorf("no cookies.sqlite under %s (set SYNTY_BROWSER_PROFILE)", base)
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+		if a.isDefault != b.isDefault {
+			return a.isDefault
 		}
-	}
-	if fallback != "" {
-		return fallback, nil
-	}
-	return "", fmt.Errorf("no default Firefox profile under %s (set SYNTY_FIREFOX_PROFILE)", base)
+		if a.isRelease != b.isRelease {
+			return a.isRelease
+		}
+		return a.mod.After(b.mod)
+	})
+	return cands[0].path, nil
 }

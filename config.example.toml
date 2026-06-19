@@ -23,8 +23,8 @@
 # (engine-agnostic) source; drop it if you only want your engine's prebuilt packs.
 variant_includes = ["Godot_*", "SourceFiles", "SourceSprites"]
 
-# Cookie source: "firefox" (read the logged-in browser) or a path to a
-# cookies.txt / pasted-curl file.
+# Session source: a Gecko browser to read cookies from ("firefox" or "zen"), or a
+# path to a cookies.txt / pasted-curl file.
 session_source = "firefox"
 
 # Max concurrent item-page fetches.

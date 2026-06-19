@@ -10,7 +10,7 @@ direct Synty-store purchases don't get. Design: `docs/design.md`.
 go build -o synty-sync .
 ```
 
-Requires Go 1.26+. No cgo (the Firefox cookie reader uses pure-Go sqlite).
+Requires Go 1.26+. No cgo (the browser cookie reader uses pure-Go sqlite).
 
 ## One-time setup
 
@@ -39,13 +39,17 @@ Your customer id is the number in your library URL:
 
 ## Session
 
-The store gates downloads behind your logged-in browser session. By default the tool
-reads cookies straight from Firefox (`session_source = "firefox"`), so a logged-in
-browser means `synty-sync sync` needs no pasting. Override the source with `--cookies`:
+The store gates downloads behind your logged-in browser session. The tool reads cookies
+straight from a Gecko browser — `session_source = "firefox"` (default) or `"zen"` (a
+Firefox fork, same cookie store) — so a logged-in browser means `synty-sync sync` needs
+no pasting. Override the source with `--cookies`:
 
 ```bash
-# Firefox (default): just run it
+# Read from the browser you set in config: just run it
 synty-sync status
+
+# Or pick a browser per-run:
+synty-sync status --cookies zen
 
 # Or paste a session: in DevTools > Network, right-click the library request >
 # Copy > Copy as cURL, save to a file, then:
@@ -55,8 +59,9 @@ synty-sync status --cookies session.curl
 synty-sync status --cookies cookies.txt
 ```
 
-A captured session expires; the Firefox source refreshes itself whenever you browse
-the store, which is why it's the default for the monthly run.
+Reading from the browser auto-refreshes the session whenever you browse the store, which
+is why it's the no-maintenance default. (A pasted curl/cookies.txt expires and must be
+re-grabbed.)
 
 ## Commands
 

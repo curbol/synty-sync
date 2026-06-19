@@ -179,10 +179,7 @@ func resolveCookie(cfg config.Config, override string) (string, error) {
 	if override != "" {
 		src = override
 	}
-	if src == "" || src == "firefox" {
-		return session.FromFirefox()
-	}
-	return session.FromFile(src)
+	return session.Resolve(src)
 }
 
 func printReport(dry bool, cfg config.Config, rep syncer.Report) {
@@ -249,7 +246,7 @@ usage:
 flags:
   -config <dir>       config/state dir (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
   -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
-  -cookies <file>     cookies.txt or pasted-curl file (default: Firefox cookies)
+  -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
