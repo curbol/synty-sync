@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/curbol/synty-sync/internal/model"
 )
 
 func TestDefaultsWhenNoConfig(t *testing.T) {
@@ -16,10 +14,6 @@ func TestDefaultsWhenNoConfig(t *testing.T) {
 	}
 	if c.Concurrency != 4 || c.SessionSource != "firefox" {
 		t.Errorf("unexpected defaults: %+v", c)
-	}
-	// No engine bias: variants must be configured, so the default is empty.
-	if len(c.VariantIncludes) != 0 {
-		t.Errorf("variant includes should default empty (no engine bias): %v", c.VariantIncludes)
 	}
 	// Library default is XDG-derived, never a baked-in personal path.
 	if c.LibraryPath == "" || strings.Contains(c.LibraryPath, "code/synty-assets") {
@@ -33,7 +27,6 @@ func TestDefaultsWhenNoConfig(t *testing.T) {
 func TestConfigFileThenEnv(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "config.toml"), []byte(`
-variant_includes = ["Godot_*"]
 concurrency = 2
 customer_id = "1234567890123"
 library_path = "/from/file"
@@ -45,9 +38,6 @@ library_path = "/from/file"
 	}
 	if c.Concurrency != 2 || c.CustomerID != "1234567890123" || c.LibraryPath != "/from/file" {
 		t.Errorf("config.toml not applied: %+v", c)
-	}
-	if len(c.VariantIncludes) != 1 {
-		t.Errorf("variant includes = %v, want from file", c.VariantIncludes)
 	}
 
 	t.Setenv("SYNTY_LIBRARY", "/from/env")
@@ -80,22 +70,5 @@ func TestResolveDir(t *testing.T) {
 	// fall back to ~/.config/synty-sync
 	if got := ResolveDir(""); !strings.HasSuffix(got, filepath.Join(".config", "synty-sync")) {
 		t.Errorf("home fallback: got %q", got)
-	}
-}
-
-func TestFilter(t *testing.T) {
-	c := Config{VariantIncludes: []string{"Godot_*", "SourceFiles", "SourceSprites"}}
-	f := c.Filter()
-	cases := map[model.Variant]bool{
-		"Godot_4_5_1":   true,
-		"SourceFiles":   true,
-		"SourceSprites": true,
-		"Unity_2022_3":  false,
-		"Unreal_5_3":    false,
-	}
-	for v, want := range cases {
-		if f(v) != want {
-			t.Errorf("filter(%s) = %v, want %v", v, f(v), want)
-		}
 	}
 }

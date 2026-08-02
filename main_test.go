@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,8 +28,20 @@ func TestRunHelp(t *testing.T) {
 }
 
 func TestRunListEmpty(t *testing.T) {
-	// list reads only the lockfile (none here -> empty), no network/session needed.
-	if err := run([]string{"list", "-config", t.TempDir()}); err != nil {
+	// list reads only the lockfile beside the manifest (none here -> empty), no
+	// network/session needed. An explicit --manifest is honored without the file existing.
+	tmp := t.TempDir()
+	if err := run([]string{"list", "-config", tmp, "-manifest", filepath.Join(tmp, "synty-sync.toml")}); err != nil {
 		t.Errorf("list: %v", err)
+	}
+}
+
+func TestRunStatusNoManifest(t *testing.T) {
+	// With no --manifest and nothing discoverable up from cwd, read commands error before
+	// any network/session. t.Chdir isolates cwd to an empty tree.
+	t.Chdir(t.TempDir())
+	err := run([]string{"status", "-config", t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "no synty-sync.toml") {
+		t.Errorf("status without a manifest: got %v, want no-manifest error", err)
 	}
 }

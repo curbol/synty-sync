@@ -26,8 +26,6 @@ import (
 	"github.com/curbol/synty-sync/internal/web"
 )
 
-const lockfileName = "synty-library.lock.json"
-
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "synty-sync:", err)
@@ -43,7 +41,8 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	cfgDir := fs.String("config", "", "config/state dir (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
+	cfgDir := fs.String("config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
+	manifestFlag := fs.String("manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
 	cookies := fs.String("cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
 	library := fs.String("library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
 	only := fs.String("only", "", "limit to packs whose slug matches this glob")
@@ -64,8 +63,8 @@ func run(args []string) error {
 		return err
 	}
 
-	dir := config.ResolveDir(*cfgDir)
-	cfg, err := config.Load(dir)
+	authDir := config.ResolveDir(*cfgDir)
+	cfg, err := config.Load(authDir)
 	if err != nil {
 		return err
 	}
@@ -78,14 +77,15 @@ func run(args []string) error {
 	if *customer != "" {
 		cfg.CustomerID = *customer
 	}
-	lockPath := filepath.Join(dir, lockfileName)
+
+	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
+	if err != nil {
+		return err
+	}
+	lockPath := manifest.LockPath(manifestPath)
 
 	if cmd == "list" {
 		return list(lockPath)
-	}
-
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create config dir %s: %w", dir, err)
 	}
 
 	if cfg.CustomerID == "" {
@@ -107,20 +107,17 @@ func run(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	manifestPath := filepath.Join(dir, manifestName)
 
 	if cmd == "select" {
 		return selectPacks(ctx, client, manifestPath)
 	}
 
-	if len(cfg.VariantIncludes) == 0 {
-		return fmt.Errorf("no variant_includes configured: set your engine's variants in %s, e.g.\n  variant_includes = [\"Godot_*\"]   (also Unity_*, Unreal_*, SourceFiles, SourceSprites)",
-			filepath.Join(dir, "config.toml"))
-	}
-
 	man, err := manifest.Load(manifestPath)
 	if err != nil {
 		return err
+	}
+	if len(man.VariantIncludes) == 0 {
+		return fmt.Errorf("no variant_includes in %s: add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\"]   (also Unity_*, Unreal_*, SourceFiles, SourceSprites)", manifestPath)
 	}
 	enabled := man.EnabledSet()
 	if len(enabled) == 0 {
@@ -133,7 +130,7 @@ func run(args []string) error {
 	dry := cmd == "status" || *dryRun
 	opts := syncer.Options{
 		LibraryRoot:  cfg.LibraryPath,
-		Filter:       cfg.Filter(),
+		Filter:       man.Filter(),
 		OnlyGlob:     *only,
 		DryRun:       dry,
 		FullVerify:   !dry,
@@ -149,7 +146,27 @@ func run(args []string) error {
 	return nil
 }
 
-const manifestName = "packs.toml"
+// resolveManifestPath locates the project manifest. An explicit --manifest is honored
+// verbatim (existence is not pre-checked, so `list` can derive a lockfile path beside a
+// not-yet-created manifest). Otherwise it is discovered by walking up from the working
+// directory; when nothing is found, `select` defaults to synty-sync.toml in the working
+// directory (it is about to create one), and the read commands error.
+func resolveManifestPath(flag, cmd string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if p, ok := manifest.Discover(wd); ok {
+		return p, nil
+	}
+	if cmd == "select" {
+		return filepath.Join(wd, manifest.FileName), nil
+	}
+	return "", fmt.Errorf("no %s found (searched up from %s); run `synty-sync select` or pass --manifest <path>", manifest.FileName, wd)
+}
 
 func selectPacks(ctx context.Context, client *portal.Client, manifestPath string) error {
 	packs, err := client.Enumerate(ctx)
@@ -171,6 +188,9 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	}
 	fmt.Printf("saved %s: %d of %d packs enabled. Run `synty-sync sync` to download.\n",
 		manifestPath, len(chosen), len(packs))
+	if len(man.VariantIncludes) == 0 {
+		fmt.Printf("note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
+	}
 	return nil
 }
 
@@ -244,14 +264,17 @@ usage:
   synty-sync list   [flags]   print the current lockfile
 
 flags:
-  -config <dir>       config/state dir (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
+  -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
+  -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
   -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
   -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
 
-State (config.toml, packs.toml, lockfile) lives in the config dir, outside the tool.
-The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.toml there.
+Auth is user-scoped: config.toml (customer id, session, cache default) lives in the
+config dir. The project manifest (synty-sync.toml: variant_includes + the pack
+allowlist) and its lockfile (synty-sync.lock.json beside it) are committed with the
+consuming project. The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.toml.
 `)
 }

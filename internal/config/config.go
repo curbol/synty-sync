@@ -10,29 +10,29 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/curbol/synty-sync/internal/model"
 )
 
-// Config is the resolved tool configuration.
+// Config is the resolved user-scoped tool configuration: account identity, session
+// source, and machine defaults. Project-scoped settings (engine variants, the pack
+// selection) live in the manifest, not here.
 type Config struct {
-	CustomerID      string
-	LibraryPath     string
-	VariantIncludes []string
-	Concurrency     int
-	SessionSource   string // "firefox" or a path to a cookies.txt / curl file
+	CustomerID    string
+	LibraryPath   string
+	Concurrency   int
+	SessionSource string // "firefox" or a path to a cookies.txt / curl file
 }
 
 type fileConfig struct {
-	CustomerID      string   `toml:"customer_id"`
-	LibraryPath     string   `toml:"library_path"`
-	VariantIncludes []string `toml:"variant_includes"`
-	Concurrency     int      `toml:"concurrency"`
-	SessionSource   string   `toml:"session_source"`
+	CustomerID    string `toml:"customer_id"`
+	LibraryPath   string `toml:"library_path"`
+	Concurrency   int    `toml:"concurrency"`
+	SessionSource string `toml:"session_source"`
 }
 
-// ResolveDir picks the config/state directory (where config.toml, packs.toml, and
-// the lockfile live): an explicit flag, else $SYNTY_CONFIG_DIR, else
-// $XDG_CONFIG_HOME/synty-sync, else ~/.config/synty-sync.
+// ResolveDir picks the user config directory (where config.toml lives): an explicit
+// flag, else $SYNTY_CONFIG_DIR, else $XDG_CONFIG_HOME/synty-sync, else
+// ~/.config/synty-sync. The project manifest and lockfile live with the project, not
+// here.
 func ResolveDir(flag string) string {
 	if flag != "" {
 		return flag
@@ -64,12 +64,9 @@ func defaultLibraryPath() string {
 
 func defaults() Config {
 	return Config{
-		LibraryPath: defaultLibraryPath(),
-		// No engine default: the right variant depends on the user's engine, so it
-		// must be configured (Godot_*, Unity_*, Unreal_*, SourceFiles, SourceSprites).
-		VariantIncludes: nil,
-		Concurrency:     4,
-		SessionSource:   "firefox",
+		LibraryPath:   defaultLibraryPath(),
+		Concurrency:   4,
+		SessionSource: "firefox",
 	}
 }
 
@@ -102,9 +99,6 @@ func overlay(c *Config, fc fileConfig) {
 	if fc.LibraryPath != "" {
 		c.LibraryPath = fc.LibraryPath
 	}
-	if len(fc.VariantIncludes) > 0 {
-		c.VariantIncludes = fc.VariantIncludes
-	}
 	if fc.Concurrency > 0 {
 		c.Concurrency = fc.Concurrency
 	}
@@ -120,18 +114,4 @@ func expandHome(p string) string {
 		}
 	}
 	return p
-}
-
-// Filter returns a predicate selecting variants whose token matches any include
-// glob. Archived variants are always excluded (callers check FileEntry.Archived).
-func (c Config) Filter() func(model.Variant) bool {
-	includes := c.VariantIncludes
-	return func(v model.Variant) bool {
-		for _, pat := range includes {
-			if ok, _ := filepath.Match(pat, string(v)); ok {
-				return true
-			}
-		}
-		return false
-	}
 }
