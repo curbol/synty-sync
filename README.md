@@ -14,21 +14,23 @@ Requires Go 1.26+. No cgo (the browser cookie reader uses pure-Go sqlite).
 
 ## One-time setup
 
-All per-user state — your config, pack selection, and lockfile — lives in a config
-directory *outside* this repo, resolved as:
-`--config <dir>` › `$SYNTY_CONFIG_DIR` › `$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`.
+Two kinds of state, kept apart:
 
-Provide your customer id via the `--customer` flag, `SYNTY_CUSTOMER_ID`, or a
-`config.toml` in that directory (precedence in that order):
+- **User config** (account identity, session, machine defaults) lives *outside* any
+  project, resolved as `--config <dir>` › `$SYNTY_CONFIG_DIR` › `$XDG_CONFIG_HOME/synty-sync`
+  › `~/.config/synty-sync`. Provide your customer id via `--customer`, `SYNTY_CUSTOMER_ID`,
+  or a `config.toml` there (precedence in that order):
 
-```bash
-synty-sync select --customer <your-customer-id>
-# or
-export SYNTY_CUSTOMER_ID=<your-customer-id>
-# or, persistently:
-mkdir -p ~/.config/synty-sync && cp config.example.toml ~/.config/synty-sync/config.toml
-$EDITOR ~/.config/synty-sync/config.toml   # set customer_id, library_path, etc.
-```
+  ```bash
+  mkdir -p ~/.config/synty-sync && cp config.example.toml ~/.config/synty-sync/config.toml
+  $EDITOR ~/.config/synty-sync/config.toml   # set customer_id, library_path, session_source
+  ```
+
+- **Project manifest** (`synty-sync.toml`: engine variants + pack selection) lives *in* the
+  project that consumes the assets, committed to its repo. synty-sync discovers it by walking
+  up from the working directory, or point at it with `--manifest`. Its lockfile
+  (`synty-sync.lock.json`) is written beside it. It carries no account identity. See
+  `synty-sync.example.toml`.
 
 The downloaded packs are cached at `$XDG_DATA_HOME/synty-sync`
 (`~/.local/share/synty-sync`) by default; override with `library_path`,
@@ -72,14 +74,16 @@ synty-sync sync     # download the delta and rewrite the lockfile
 synty-sync list     # print the current lockfile
 ```
 
-Useful flags: `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
-`--customer <id>`, `--config <dir>` (the config/state dir; default `~/.config/synty-sync`).
+Useful flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml`
+walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
+`--customer <id>`, `--config <dir>` (user config dir; default `~/.config/synty-sync`).
 
 ## Selecting packs
 
 Selection is opt-in: a pack is only mirrored once you enable it. `synty-sync select`
 enumerates your library and opens a local web page listing every owned pack with its
-thumbnail and a checkbox; tick the ones you want, hit Save, and it writes `packs.toml`:
+thumbnail and a checkbox; tick the ones you want, hit Save, and it writes the `[[pack]]`
+entries into `synty-sync.toml`:
 
 ```toml
 [[pack]]
@@ -88,11 +92,11 @@ name = "POLYGON - Pirate Pack"
 enabled = true
 ```
 
-`packs.toml` lives in your config dir (not this repo) — a small, diffable allowlist you can
-keep under your own version control if you like. Newly-bought packs appear disabled on the
-next `select`, so buying a pack never silently downloads it. `sync` and `status` only act on
-enabled packs; with nothing enabled they do nothing and remind you to run `select`. You can
-also hand-edit `packs.toml` instead of using the web page.
+`synty-sync.toml` is committed in the consuming project — a small, diffable manifest of the
+packs that project draws from. Newly-bought packs appear disabled on the next `select`, so
+buying a pack never silently downloads it. `sync` and `status` only act on enabled packs;
+with nothing enabled they do nothing and remind you to run `select`. You can also hand-edit
+`synty-sync.toml` instead of using the web page.
 
 ## What it does
 
@@ -100,15 +104,16 @@ also hand-edit `packs.toml` instead of using the web page.
   updates without downloading.
 - Downloads only new/changed/missing files into `<library>/<fileToken>/<filename>.zip`,
   deduping files bundled across packs (e.g. `GENERIC_Particle_FX`) so they download once.
-- Records everything in `synty-library.lock.json` in your config dir: owned packs,
-  versions, checksums, and which files are downloaded under the current filter. Version it
-  yourself if you want a changelog; it also regenerates from a sync.
+- Records everything in `synty-sync.lock.json` beside the manifest: owned packs,
+  versions, checksums, and which files are downloaded under the current filter. Commit it
+  for a changelog; it also regenerates from a sync.
 - Warns for any owned pack that has no file matching the variant filter.
 
 ## Variant filter
 
 The tool is engine-agnostic and has **no default engine** — you set the variants for
-your engine in `config.toml` (`sync`/`status` tell you if it's unset). Synty packs ship
+your engine in the project manifest `synty-sync.toml` (`sync`/`status` tell you if it's
+unset). Synty packs ship
 `Godot_*`, `Unity_*`, `Unreal_*`, plus engine-agnostic `SourceFiles` (raw source) and
 `SourceSprites` (HUD/interface images):
 

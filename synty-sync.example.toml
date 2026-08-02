@@ -1,0 +1,22 @@
+# Example PROJECT manifest. Commit this (as synty-sync.toml) in the repo that consumes
+# the assets. synty-sync discovers it by walking up from the working directory, or point
+# at it with --manifest. Its lockfile is written beside it as synty-sync.lock.json.
+#
+# This file is project-scoped and carries no account identity: your customer id and
+# session stay in the user config (~/.config/synty-sync/config.toml).
+
+# Variant tokens to mirror (globs). REQUIRED — there is no engine default. Set the
+# variants for your engine:
+#   Godot:   ["Godot_*", "SourceFiles"]
+#   Unity:   ["Unity_*", "SourceFiles"]
+#   Unreal:  ["Unreal_*", "SourceFiles"]
+# Add "SourceSprites" for HUD/interface image packs. SourceFiles is the raw
+# (engine-agnostic) source; drop it if you only want your engine's prebuilt packs.
+variant_includes = ["Godot_*", "SourceFiles"]
+
+# Pack selection. `synty-sync select` manages these via a local web page; hand-editing is
+# fine. New packs land disabled (opt-in), so buying a pack never silently downloads it.
+# [[pack]]
+#   slug = "polygon-pirate-pack"
+#   name = "POLYGON - Pirate Pack"
+#   enabled = true

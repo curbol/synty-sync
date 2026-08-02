@@ -140,7 +140,7 @@ func runOpts(lib string, dry bool) Options {
 func TestEndToEndSync(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "synty-library.lock.json")
+	lockPath := filepath.Join(t.TempDir(), "synty-sync.lock.json")
 
 	// First sync: everything new, bundled file deduped, Elven Warriors warns.
 	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))

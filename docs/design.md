@@ -68,13 +68,16 @@ Versionless rows (icons) are skipped. The `variant` token is the filter key
 ## CLI surface
 
 ```
-synty status     # steps 1-5: enumerate + diff, print what would change. No downloads.
-synty sync       # status, then download the delta, verify, rewrite the lockfile.
-synty list       # print the current lockfile as a readable table.
+synty-sync select   # pick which packs to mirror (opens a local web page)
+synty-sync status   # enumerate + diff, print what would change. No downloads.
+synty-sync sync     # status, then download the delta, verify, rewrite the lockfile.
+synty-sync list     # print the current lockfile as a readable table.
 ```
 
-Flags: `--cookies <curl|file>` (override session source), `--only <pack-glob>`,
-`--dry-run` (alias of `status` semantics on `sync`), `--concurrency <n>`, `--library <path>`.
+Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
+from cwd), `--config <dir>` (user config dir), `--cookies <curl|file>` (override session
+source), `--only <pack-glob>`, `--dry-run` (alias of `status` semantics on `sync`),
+`--concurrency <n>`, `--library <path>`.
 
 ## Run flow
 
@@ -101,16 +104,16 @@ monthly run becomes just `synty sync`, auto-refreshed whenever the user has brow
 Fallback: `--cookies <file>` accepts a pasted `curl` command or a `cookies.txt`, for
 portability or when the browser path doesn't apply.
 
-`customerId` is stable but account-identifying, so it is not committed: it comes from
-`SYNTY_CUSTOMER_ID` env or a gitignored `config.local.toml` (the committed config carries a
-placeholder). The gating cookie is the storefront session (`_shopify_essential` and
+`customerId` is stable but account-identifying, so it is never committed: it comes from
+`SYNTY_CUSTOMER_ID` env, `--customer`, or a gitignored `config.toml` in the user config dir.
+The gating cookie is the storefront session (`_shopify_essential` and
 siblings); the tool sends all `syntystore.com` cookies it finds rather than guessing the
 exact one.
 
 ## Lockfile
 
-Committed at `tools/synty/synty-library.lock.json`. JSON with sorted keys and stable
-formatting so a sync produces a minimal, readable diff. Keyed by a stable **pack slug**
+Committed beside the project manifest as `synty-sync.lock.json`. JSON with sorted keys and
+stable formatting so a sync produces a minimal, readable diff. Keyed by a stable **pack slug**
 derived from the library-list display name, because the file-label token is *not* stable
 within a pack (one pack's files can read `POLYGON_Pirate`, `POLYGON_Pirate_Pack`, and
 `POLYGON_Pirates_Pack`). Each pack holds a per-**file** map, not per-variant, because a
@@ -155,12 +158,12 @@ but not downloaded under the current filter. Git history of this file is the cha
 
 ## Cache
 
-Local working mirror outside the repo, default `~/code/synty-assets`. Current version only,
-and keyed by **file identity** (not owning pack), so a file bundled under several packs is
-stored once:
+Local working mirror outside the repo, default `$XDG_DATA_HOME/synty-sync`
+(`~/.local/share/synty-sync`). Current version only, and keyed by **file identity** (not
+owning pack), so a file bundled under several packs is stored once:
 
 ```
-~/code/synty-assets/<fileToken>/<original-filename>.zip
+<library>/<fileToken>/<original-filename>.zip
 ```
 
 The original filename comes from the final signed-URL path basename (it matches Synty's
@@ -172,7 +175,7 @@ no version archive: current versions are re-downloadable from Synty, and the ass
 on are made durable in the game repo at promotion (sub-project 2), not here. What makes the
 cache reconstructable in practice: `sync` reads the cache when diffing, so a tracked file that
 is missing or fails its sha check on disk re-downloads instead of being reported unchanged.
-The existing flat zips in `~/code/synty-assets` are migrated into this layout on first run
+The existing flat zips in the library are migrated into this layout on first run
 (matched by a normalized filename key, since the real names render the variant unlike the
 item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` collision suffixes).
 
@@ -204,11 +207,15 @@ interrupted download leaves only the temp file, so the next run re-fetches.
 
 ## Configuration
 
-`tools/synty/config.toml` (committed) holds non-account defaults: variant include patterns
-(`["Godot_*", "SourceFiles"]`), concurrency, session source, and the `libraryPath` default.
-The account-identifying `customerId` is not committed: it comes from `SYNTY_CUSTOMER_ID` env
-or a gitignored `config.local.toml` (committed config carries a placeholder). Machine paths
-also via env (`SYNTY_LIBRARY`). No secrets or account PII are ever committed.
+Two scopes. The **user config** (`~/.config/synty-sync/config.toml`, not committed to any
+project) holds account identity and machine defaults: `customer_id`, `session_source`,
+`library_path`, `concurrency`. It resolves via `--config` › `$SYNTY_CONFIG_DIR` ›
+`$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`, and the customer id may instead come
+from `SYNTY_CUSTOMER_ID` / `--customer`. The **project manifest** (`synty-sync.toml`,
+committed in the consuming repo, discovered by walking up from cwd or via `--manifest`) holds
+the project-scoped settings: `variant_includes` and the `[[pack]]` allowlist. The manifest
+schema has no account field, so no account PII can be committed through it. Machine paths also
+via env (`SYNTY_LIBRARY`).
 
 ## Testing
 

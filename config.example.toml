@@ -1,10 +1,14 @@
-# Example config. Copy to your config dir and edit (all keys optional):
+# Example USER config. Copy to your config dir and edit (all keys optional):
 #
 #   mkdir -p ~/.config/synty-sync
 #   cp config.example.toml ~/.config/synty-sync/config.toml
 #
 # Config dir resolution: --config <dir>  >  $SYNTY_CONFIG_DIR  >
 # $XDG_CONFIG_HOME/synty-sync  >  ~/.config/synty-sync.
+#
+# This file is user-scoped: account identity, session, and machine defaults. The engine
+# variants and pack selection are project-scoped and live in the project manifest
+# (synty-sync.toml) instead — see synty-sync.example.toml.
 
 # Your Synty customer id (the number in your library URL). Or pass --customer /
 # set SYNTY_CUSTOMER_ID.
@@ -13,15 +17,6 @@
 # Where downloaded packs are cached. Default: $XDG_DATA_HOME/synty-sync
 # (~/.local/share/synty-sync). Or set SYNTY_LIBRARY / pass --library.
 # library_path = "/path/to/your/synty-library"
-
-# Variant tokens to mirror (globs). REQUIRED — there is no engine default. Set the
-# variants for your engine. Examples:
-#   Godot:   ["Godot_*", "SourceFiles"]
-#   Unity:   ["Unity_*", "SourceFiles"]
-#   Unreal:  ["Unreal_*", "SourceFiles"]
-# Add "SourceSprites" for HUD/interface image packs. SourceFiles is the raw
-# (engine-agnostic) source; drop it if you only want your engine's prebuilt packs.
-variant_includes = ["Godot_*", "SourceFiles", "SourceSprites"]
 
 # Session source: a Gecko browser to read cookies from ("firefox" or "zen"), or a
 # path to a cookies.txt / pasted-curl file.

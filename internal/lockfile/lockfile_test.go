@@ -35,7 +35,7 @@ func sample() Lockfile {
 
 func TestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "synty-library.lock.json")
+	path := filepath.Join(dir, "synty-sync.lock.json")
 	in := sample()
 	if err := Save(path, in); err != nil {
 		t.Fatal(err)

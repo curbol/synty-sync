@@ -1,5 +1,4 @@
 # Account-specific config (customer id, machine paths) — never committed.
-config.local.toml
 config.toml
 
 # Captured browser sessions (contain cookies) — never committed.
@@ -7,10 +6,11 @@ session.curl
 *.curl
 cookies.txt
 
-# Per-user library state belongs outside the tool repo (see --config); ignored here
-# defensively so it never lands in the repo even when run from this directory.
-packs.toml
-synty-library.lock.json
+# A project manifest and its lockfile belong with the consuming project, not this tool
+# repo; ignored here defensively so running the tool from this directory never commits
+# them (the committed synty-sync.example.toml is not matched by the exact name).
+synty-sync.toml
+synty-sync.lock.json
 
 # Built binary.
 /synty-sync
