@@ -72,11 +72,33 @@ synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # what a sync would change (no downloads, no writes)
 synty-sync sync     # download the delta and rewrite the lockfile
 synty-sync list     # print the current lockfile
+synty-sync browse   # search & preview the local library in a web UI
 ```
 
 Useful flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml`
 walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
 `--customer <id>`, `--config <dir>` (user config dir; default `~/.config/synty-sync`).
+
+## Browsing the library
+
+`synty-sync browse` indexes the local library and opens a web page to search it by
+name, filter by type / vendor / engine variant, see thumbnails, click to enlarge
+(images, plus live 3D for GLB and FBX), and copy an asset's path. It reads inside
+`.zip` and `.unitypackage` archives, so individual models, sprites, and materials are
+searchable without unpacking anything.
+
+```bash
+synty-sync browse --root ~/code/raw-assets   # scan a whole asset tree
+synty-sync browse                            # defaults to the library dir
+```
+
+The scan root resolves as `--root` > `browse_root` (config.toml) / `SYNTY_BROWSE_ROOT`
+> the library dir, so set `browse_root` once to browse everything. Browse flags:
+`--addr <host:port>` (default `localhost:8788`), `--reindex` (rebuild the index),
+`--cache <dir>` (index / unpacked-archive cache; default `~/.cache/synty-sync`). The
+index is cached and refreshed incrementally, so only the first run pays the full scan.
+Textureless Synty source FBX render as neutral clay; animation-only FBX (no mesh) show
+an icon.
 
 ## Selecting packs
 
