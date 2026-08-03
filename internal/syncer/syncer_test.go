@@ -278,6 +278,53 @@ func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
 	}
 }
 
+func TestAdoptsExistingLayoutFileWithoutLockfile(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	// A zip already sitting in the <fileToken>/ layout that no lockfile records — the
+	// state after a lost/degraded lockfile against a populated cache.
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	layoutZip := filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
+	if err := os.WriteFile(layoutZip, []byte("LAYOUT-CONTENT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// fileId 2282645 (POLYGON_Pirate Godot_4_5_1 v1_0_1) is adopted from the layout, not re-downloaded.
+	for _, d := range rep.Downloaded {
+		if d.FileID == 2282645 {
+			t.Error("layout file 2282645 was re-downloaded; want adopted")
+		}
+	}
+	adopted := false
+	for _, d := range rep.Adopted {
+		if d.FileID == 2282645 {
+			adopted = true
+		}
+	}
+	if !adopted {
+		t.Errorf("fileId 2282645 not adopted from the layout: %+v", rep.Adopted)
+	}
+	// Adopted, not overwritten by a download.
+	lf, _ := lockfile.Load(lockPath)
+	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	if !f.Tracked || f.CachePath == "" {
+		t.Fatalf("adopted layout file not tracked: %+v", f)
+	}
+	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
+	if string(got) != "LAYOUT-CONTENT" {
+		t.Errorf("adopted content changed to %q (re-downloaded instead of adopted?)", got)
+	}
+}
+
 func TestPackSelectedLimitsToAllowlist(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()

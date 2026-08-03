@@ -168,6 +168,32 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 	}
 
+	// Adopt files already in the <fileToken>/ layout that no lockfile records, so a
+	// missing or degraded lockfile does not force a full re-download. Read-only (no move),
+	// so it runs for status too; the hash is skipped there to keep status cheap.
+	for _, id := range selOrder {
+		if _, done := adoptedByID[id]; done {
+			continue
+		}
+		if _, hasPrior := priorByID[id]; hasPrior {
+			continue // classify handles tracked files (Unchanged / Changed / CacheMissing)
+		}
+		f := selectedByID[id][0].file
+		rel, ok := cache.Locate(opts.LibraryRoot, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
+		if !ok {
+			continue
+		}
+		if opts.DryRun {
+			adoptedByID[id] = resolved{cachePath: rel}
+			continue
+		}
+		sha, size, err := cache.Hash(opts.LibraryRoot, rel)
+		if err != nil {
+			return Report{}, fmt.Errorf("hash adopted %s: %w", rel, err)
+		}
+		adoptedByID[id] = resolved{cachePath: rel, sha: sha, size: size, now: true}
+	}
+
 	for _, id := range selOrder {
 		rep := selectedByID[id][0].file
 		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}

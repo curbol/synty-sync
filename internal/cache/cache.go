@@ -164,3 +164,27 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	}
 	return results, nil
 }
+
+// Locate reports the layout-relative path of a cached file already present under
+// <fileToken>/ that matches the wanted file by normalized name (so variant-rendering and
+// (N) collision differences don't block a match), moving nothing. It lets a sync adopt
+// files already in the layout that no lockfile records, instead of re-downloading them.
+// The extension is stripped before normalizing, so both .zip and .unitypackage match.
+func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
+	dir := filepath.Join(libraryRoot, filepath.FromSlash(w.FileToken))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	want := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		base := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if normalizeName(base) == want {
+			return RelPath(w.FileToken, e.Name()), true
+		}
+	}
+	return "", false
+}

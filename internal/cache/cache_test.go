@@ -84,3 +84,44 @@ func TestMigrateNormalizedMatch(t *testing.T) {
 		t.Errorf("unmatched zip should remain: %v", err)
 	}
 }
+
+func TestLocate(t *testing.T) {
+	lib := t.TempDir()
+	layout := map[string]string{ // fileToken -> filename already under <fileToken>/
+		"POLYGON_Dungeon":               "POLYGON_Dungeon_Godot_4_5_1_v1_0_1.zip",
+		"POLYGON_Pirate":                "POLYGON_Pirate_Unity_2022_3_v1_6_1.unitypackage",     // Unity => .unitypackage
+		"INTERFACE_Fantasy_Warrior_HUD": "INTERFACE_Fantasy_Warrior_HUD_Source_Sprites_v3.zip", // Source_Sprites vs SourceSprites
+	}
+	for token, name := range layout {
+		dir := filepath.Join(lib, token)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("z"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		w    Wanted
+		want string // expected relPath; "" = not found
+	}{
+		{"zip", Wanted{FileToken: "POLYGON_Dungeon", Variant: "Godot_4_5_1", Version: "v1_0_1"}, "POLYGON_Dungeon/POLYGON_Dungeon_Godot_4_5_1_v1_0_1.zip"},
+		{"unitypackage", Wanted{FileToken: "POLYGON_Pirate", Variant: "Unity_2022_3", Version: "v1_6_1"}, "POLYGON_Pirate/POLYGON_Pirate_Unity_2022_3_v1_6_1.unitypackage"},
+		{"variant rendering diff", Wanted{FileToken: "INTERFACE_Fantasy_Warrior_HUD", Variant: "SourceSprites", Version: "v3"}, "INTERFACE_Fantasy_Warrior_HUD/INTERFACE_Fantasy_Warrior_HUD_Source_Sprites_v3.zip"},
+		{"wrong version", Wanted{FileToken: "POLYGON_Dungeon", Variant: "Godot_4_5_1", Version: "v2_0_0"}, ""},
+		{"missing dir", Wanted{FileToken: "NOPE", Variant: "Godot_4_5_1", Version: "v1"}, ""},
+	}
+	for _, c := range cases {
+		rel, ok := Locate(lib, c.w)
+		if c.want == "" {
+			if ok {
+				t.Errorf("%s: located %q, want not found", c.name, rel)
+			}
+			continue
+		}
+		if !ok || rel != c.want {
+			t.Errorf("%s: Locate = %q,%v; want %q,true", c.name, rel, ok, c.want)
+		}
+	}
+}
