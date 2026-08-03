@@ -129,6 +129,12 @@ func (ix *Index) ensureExtracted(archivePath string) (string, error) {
 
 	ix.extractMu.Lock()
 	err = ix.extractErr[fp]
+	if err != nil {
+		// Re-arm so a later request retries: a failure (e.g. transient disk-full)
+		// shouldn't poison this package for the whole process lifetime.
+		delete(ix.extractOnce, fp)
+		delete(ix.extractErr, fp)
+	}
 	ix.extractMu.Unlock()
 	return dest, err
 }

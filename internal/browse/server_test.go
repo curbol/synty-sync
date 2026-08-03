@@ -60,7 +60,11 @@ func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	root := t.TempDir()
 	cache := t.TempDir()
-	mk := func(p ...string) string { return filepath.Join(append([]string{root}, p...)...) }
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		return full
+	}
 
 	writeZip(t, mk("synty", "Foo_Pack", "Foo_Pack_SourceFiles_v3.zip"), map[string]string{
 		"SourceFiles/Heart.fbx": "FBXHEART",
@@ -180,6 +184,25 @@ func TestVariantFilterNonLossy(t *testing.T) {
 	for _, it := range src.Items {
 		if it.Variant != "SourceFiles" {
 			t.Errorf("variant filter leaked %q", it.Variant)
+		}
+	}
+}
+
+// A present-but-empty variant param filters to the loose/unknown bucket (the
+// frontend's "(loose / unknown)" option), distinct from an absent param (all).
+func TestEmptyVariantFilter(t *testing.T) {
+	srv := testServer(t)
+	all := getAssets(t, srv, "")
+	loose := getAssets(t, srv, "variant=")
+	if loose.Total == 0 {
+		t.Fatal("empty-variant filter returned nothing (expected the loose Sword.glb)")
+	}
+	if loose.Total >= all.Total {
+		t.Errorf("variant= did not narrow: %d vs all %d", loose.Total, all.Total)
+	}
+	for _, it := range loose.Items {
+		if it.Variant != "" {
+			t.Errorf("variant= returned a non-empty variant %q", it.Variant)
 		}
 	}
 }
