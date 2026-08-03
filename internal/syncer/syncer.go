@@ -288,6 +288,16 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string
 
 func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
+	// --only scopes what this run enumerates and downloads; it must not drop the rest of
+	// the lockfile. Carry forward prior packs outside the glob (the in-scope ones are
+	// rebuilt from live data below, overwriting these).
+	if opts.OnlyGlob != "" {
+		for slug, p := range prev.Packs {
+			if ok, _ := filepath.Match(opts.OnlyGlob, slug); !ok {
+				report.NewLockfile.Packs[slug] = p
+			}
+		}
+	}
 	for _, pf := range packFiles {
 		lp := lockfile.Pack{
 			DisplayName: pf.pack.DisplayName,

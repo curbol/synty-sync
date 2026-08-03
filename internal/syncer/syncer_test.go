@@ -303,6 +303,38 @@ func TestPackSelectedLimitsToAllowlist(t *testing.T) {
 	}
 }
 
+func TestOnlyGlobPreservesOtherLockfilePacks(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	// Full sync populates the lockfile with several packs.
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatal(err)
+	}
+	lf, _ := lockfile.Load(lockPath)
+	if _, ok := lf.Packs["polygon-dungeon-pack"]; !ok {
+		t.Fatalf("setup: dungeon pack should be in the lockfile after a full sync")
+	}
+
+	// A scoped sync (--only pirate) touches only pirate; it must not drop the
+	// out-of-scope packs from the lockfile.
+	opts := runOpts(lib, false)
+	opts.OnlyGlob = "polygon-pirate-pack"
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := lockfile.Load(lockPath)
+	if _, ok := after.Packs["polygon-pirate-pack"]; !ok {
+		t.Error("scoped pack missing after --only sync")
+	}
+	for _, slug := range []string{"polygon-dungeon-pack", "polygon-fantasy-kingdom-pack"} {
+		if _, ok := after.Packs[slug]; !ok {
+			t.Errorf("--only sync dropped out-of-scope pack %q from the lockfile", slug)
+		}
+	}
+}
+
 func TestExpiredSessionAborts(t *testing.T) {
 	srv := newServer(t, serverOpts{page1: logoutShell})
 	lib := t.TempDir()
