@@ -2594,11 +2594,18 @@ class AnimationParser {
 
 							if ( layerCurveNodes[ i ] === undefined ) {
 
-								const modelID = connections.get( child.ID ).parents.filter( function ( parent ) {
+								// Backport of upstream guard (three.js r185): some exporters (e.g. kevdev
+								// Human animations) produce curve nodes with no relationship-typed parent,
+								// so the filter is empty and [0].ID throws. Skip the curve instead.
+								const filteredParents = connections.get( child.ID ).parents.filter( function ( parent ) {
 
 									return parent.relationship !== undefined;
 
-								} )[ 0 ].ID;
+								} );
+
+								if ( filteredParents.length === 0 ) return;
+
+								const modelID = filteredParents[ 0 ].ID;
 
 								if ( modelID !== undefined ) {
 
@@ -2652,11 +2659,15 @@ class AnimationParser {
 
 							if ( layerCurveNodes[ i ] === undefined ) {
 
-								const deformerID = connections.get( child.ID ).parents.filter( function ( parent ) {
+								const filteredParents = connections.get( child.ID ).parents.filter( function ( parent ) {
 
 									return parent.relationship !== undefined;
 
-								} )[ 0 ].ID;
+								} );
+
+								if ( filteredParents.length === 0 ) return;
+
+								const deformerID = filteredParents[ 0 ].ID;
 
 								const morpherID = connections.get( deformerID ).parents[ 0 ].ID;
 								const geoID = connections.get( morpherID ).parents[ 0 ].ID;

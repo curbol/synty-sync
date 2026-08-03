@@ -149,6 +149,8 @@ header select {
 .lb-clipsel { max-width: 170px; background: var(--bg); color: var(--text); border: 1px solid var(--edge); border-radius: 5px; padding: 3px; }
 .lb-char { color: var(--muted); white-space: nowrap; }
 .lb-chg { background: transparent; color: var(--edge-hi); border: 0; cursor: pointer; text-decoration: underline; font-size: 12px; padding: 0; }
+.lb-pin { background: transparent; color: var(--muted); border: 0; cursor: pointer; font-size: 12px; padding: 0; }
+.lb-pin.on { color: #f0c419; }
 .lb-pick { display: flex; margin-top: 6px; }
 .lb-pick input { padding: 6px 9px; background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 6px; min-width: 190px; }
 .lb-view img { max-width: 100%; max-height: 90vh; object-fit: contain; }

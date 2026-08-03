@@ -88,10 +88,11 @@ name, filter by type / vendor / engine variant, see thumbnails, click to enlarge
 searchable without unpacking anything.
 
 Animated models play in the viewer with a scrub bar and clip selector. A mesh-less
-animation clip (Synty `ANIMATION_*` packs) plays on a character whose rig it matches,
-auto-picked from the library (override with the "change" control). Cross-rig cases
-that need true retargeting (e.g. an A-pose rig onto a T-pose body) are out of scope
-for the preview — bake those offline.
+animation clip (Synty `ANIMATION_*` packs, kevdev, etc.) plays on a character whose
+rig it matches, auto-picked from the same vendor's library assets. Use "change" to
+swap the body, or "pin" one as the default for its rig. Cross-rig cases that need
+true retargeting (e.g. an A-pose rig onto a T-pose body) are out of scope for the
+preview — bake those offline.
 
 ```bash
 synty-sync browse --root ~/code/raw-assets   # scan a whole asset tree
