@@ -137,6 +137,7 @@ func run(args []string) error {
 		Concurrency:  cfg.Concurrency,
 		Now:          time.Now().UTC().Format(time.RFC3339),
 		PackSelected: func(slug string) bool { return enabled[slug] },
+		Progress:     func(m string) { fmt.Fprintln(os.Stderr, m) },
 	}
 	rep, err := syncer.Run(ctx, client, lf, lockPath, opts)
 	if err != nil {

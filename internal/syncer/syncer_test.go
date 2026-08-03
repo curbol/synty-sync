@@ -382,6 +382,25 @@ func TestOnlyGlobPreservesOtherLockfilePacks(t *testing.T) {
 	}
 }
 
+func TestProgressReported(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	var msgs []string
+	opts := runOpts(lib, false)
+	opts.Progress = func(m string) { msgs = append(msgs, m) }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "pack") {
+		t.Errorf("no enumerate progress reported: %v", msgs)
+	}
+	if !strings.Contains(joined, "download") {
+		t.Errorf("no per-file download progress reported: %v", msgs)
+	}
+}
+
 func TestExpiredSessionAborts(t *testing.T) {
 	srv := newServer(t, serverOpts{page1: logoutShell})
 	lib := t.TempDir()

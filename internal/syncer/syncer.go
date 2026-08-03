@@ -92,6 +92,7 @@ type Options struct {
 	Attempts     int                    // download attempts (default 3)
 	Backoff      time.Duration          // base backoff between attempts (default 500ms)
 	PackSelected func(slug string) bool // manifest allowlist; nil = all packs
+	Progress     func(string)           // optional per-step progress sink; nil = silent
 }
 
 type resolved struct {
@@ -104,12 +105,19 @@ type resolved struct {
 // Run executes a sync (or status when DryRun) and returns a Report. The lockfile
 // is saved only on a non-dry run.
 func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath string, opts Options) (Report, error) {
+	progress := opts.Progress
+	if progress == nil {
+		progress = func(string) {}
+	}
+
+	progress("enumerating library…")
 	packs, err := c.Enumerate(ctx)
 	if err != nil {
 		return Report{}, err
 	}
 	packs = filterPacks(packs, opts.OnlyGlob, opts.PackSelected)
 
+	progress(fmt.Sprintf("%d packs selected; reading item pages…", len(packs)))
 	packFiles, err := fetchAll(ctx, c, packs, opts.Concurrency)
 	if err != nil {
 		return Report{}, err
@@ -187,6 +195,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			adoptedByID[id] = resolved{cachePath: rel}
 			continue
 		}
+		progress(fmt.Sprintf("adopt %s", f.Key()))
 		sha, size, err := cache.Hash(opts.LibraryRoot, rel)
 		if err != nil {
 			return Report{}, fmt.Errorf("hash adopted %s: %w", rel, err)
@@ -216,6 +225,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		case opts.DryRun:
 			// classify only; nothing resolved
 		default:
+			progress(fmt.Sprintf("download %s", rep.Key()))
 			r, err := downloadWithRetry(ctx, c, opts.LibraryRoot, rep, opts.Attempts, opts.Backoff)
 			if err != nil {
 				return Report{}, fmt.Errorf("download %s: %w", rep.Key(), err)
