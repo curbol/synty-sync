@@ -112,7 +112,7 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 	go srv.Serve(ln)
 	url := "http://" + ln.Addr().String()
 	fmt.Printf("select packs at %s  (Ctrl-C to cancel)\n", url)
-	openBrowser(url)
+	OpenBrowser(url)
 
 	select {
 	case chosen := <-result:
@@ -130,7 +130,9 @@ func shutdown(srv *http.Server) {
 	_ = srv.Shutdown(ctx)
 }
 
-func openBrowser(url string) {
+// OpenBrowser best-effort opens the default browser at url. Failure is ignored:
+// the caller has already printed the URL for the user to open manually.
+func OpenBrowser(url string) {
 	var cmd string
 	var args []string
 	switch runtime.GOOS {

@@ -17,6 +17,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/curbol/synty-sync/internal/assetindex"
+	"github.com/curbol/synty-sync/internal/browse"
 	"github.com/curbol/synty-sync/internal/config"
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/manifest"
@@ -49,8 +51,12 @@ func run(args []string) error {
 	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
 	customer := fs.String("customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
 	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
+	root := fs.String("root", "", "browse: asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)")
+	addr := fs.String("addr", "localhost:8788", "browse: server address (host:port)")
+	reindex := fs.Bool("reindex", false, "browse: rebuild the asset index from scratch")
+	browseCache := fs.String("cache", "", "browse: cache dir for the index and unpacked archives (default: $XDG_CACHE_HOME/synty-sync)")
 	switch cmd {
-	case "status", "sync", "list", "select", "-h", "--help", "help":
+	case "status", "sync", "list", "select", "browse", "-h", "--help", "help":
 	default:
 		usage()
 		return fmt.Errorf("unknown subcommand %q", cmd)
@@ -76,6 +82,13 @@ func run(args []string) error {
 	}
 	if *customer != "" {
 		cfg.CustomerID = *customer
+	}
+
+	// browse is a standalone read-only server over the local library: it needs no
+	// customer id, cookie, manifest, or lockfile, so it branches before manifest
+	// resolution (which errors when no synty-sync.toml is discoverable).
+	if cmd == "browse" {
+		return browseAssets(cfg, *root, *addr, *browseCache, *reindex)
 	}
 
 	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
@@ -195,6 +208,29 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	return nil
 }
 
+// browseAssets indexes the asset library and serves the browse UI. The scan root
+// resolves as --root > browse_root/SYNTY_BROWSE_ROOT > the library dir, so browsing
+// a broader tree (e.g. all vendors) just needs browse_root set or --root passed.
+func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool) error {
+	if root == "" {
+		root = cfg.BrowseRoot
+	}
+	if root == "" {
+		root = cfg.LibraryPath
+	}
+	cacheDir := config.ResolveCacheDir(cacheFlag)
+	cachePath := filepath.Join(cacheDir, "browse-index.json")
+
+	fmt.Fprintf(os.Stderr, "indexing %s …\n", root)
+	ix, err := assetindex.LoadOrBuild(root, cacheDir, cachePath, reindex)
+	if err != nil {
+		return fmt.Errorf("build asset index: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return browse.Serve(ctx, addr, ix)
+}
+
 func resolveCookie(cfg config.Config, override string) (string, error) {
 	src := cfg.SessionSource
 	if override != "" {
@@ -263,6 +299,7 @@ usage:
   synty-sync status [flags]   show what a sync would change (no downloads)
   synty-sync sync   [flags]   download the delta and update the lockfile
   synty-sync list   [flags]   print the current lockfile
+  synty-sync browse [flags]   search & preview the local library in a web UI
 
 flags:
   -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
@@ -272,6 +309,12 @@ flags:
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
+
+browse flags:
+  -root <dir>         asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)
+  -addr <host:port>   server address (default: localhost:8788)
+  -reindex            rebuild the asset index from scratch
+  -cache <dir>        index / unpacked-archive cache dir (default: $XDG_CACHE_HOME/synty-sync)
 
 Auth is user-scoped: config.toml (customer id, session, cache default) lives in the
 config dir. The project manifest (synty-sync.toml: variant_includes + the pack
