@@ -84,39 +84,55 @@ header select {
 }
 .thumb img { width: 100%; height: 100%; object-fit: contain; }
 .thumb .icon { width: 44px; height: 44px; opacity: 0.55; }
-.thumb .ext-badge {
+.thumb .ext-badge, .thumb .vendor-badge {
   position: absolute;
   bottom: 4px;
-  right: 4px;
   font-size: 10px;
-  text-transform: uppercase;
-  background: rgba(0,0,0,0.6);
+  background: rgba(0,0,0,0.62);
   color: var(--muted);
   padding: 1px 5px;
   border-radius: 4px;
-}
-.card .body { padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; }
-.card .name {
-  font-size: 12px;
-  word-break: break-word;
-  line-height: 1.25;
-  max-height: 3em;
+  max-width: 60%;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.card .sub { font-size: 10px; color: var(--muted); display: flex; justify-content: space-between; gap: 6px; }
-.card .sub .cat { text-transform: capitalize; }
-.card .copy {
-  margin-top: 2px;
-  font-size: 11px;
-  padding: 3px 6px;
-  background: var(--edge);
-  color: var(--text);
+.thumb .ext-badge { right: 4px; text-transform: uppercase; }
+.thumb .vendor-badge { left: 4px; }
+
+/* Copy icon: hover-revealed, top-right; ✓ tick on success via ::after. */
+.card .copy-icon {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 4px;
   border: 0;
   border-radius: 5px;
+  background: rgba(0,0,0,0.62);
+  color: var(--text);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity .1s;
 }
-.card .copy:hover { background: #333949; }
-.card .copy.done { background: #1f7a3f; }
+.card:hover .copy-icon, .card:focus-within .copy-icon { opacity: 1; }
+.card .copy-icon svg { width: 100%; height: 100%; display: block; }
+.card .copy-icon.done { background: #1f7a3f; }
+.card .copy-icon.done svg { display: none; }
+.card .copy-icon.done::after { content: '✓'; color: #fff; font-size: 14px; }
+
+/* Name: end-anchored so the unique tail + extension stay visible (full on hover). */
+.card .name {
+  padding: 7px 8px;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
 
 .empty { text-align: center; color: var(--muted); padding: 40px; }
 #sentinel { height: 1px; }
@@ -172,7 +188,7 @@ header select {
 .lb-placeholder { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--muted); padding: 24px; text-align: center; }
 .lb-placeholder .icon { width: 80px; height: 80px; opacity: 0.4; }
 .lb-meta { flex: 0 0 320px; padding: 18px; overflow: auto; }
-.lb-meta h2 { font-size: 16px; margin: 0 0 12px; word-break: break-word; }
+.lb-meta h2 { font-size: 16px; margin: 0 0 12px; padding-right: 34px; word-break: break-word; }
 .lb-meta dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0 0 16px; font-size: 12px; }
 .lb-meta dt { color: var(--muted); }
 .lb-meta dd { margin: 0; word-break: break-word; }
