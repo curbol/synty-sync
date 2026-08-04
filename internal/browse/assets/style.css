@@ -122,14 +122,18 @@ header select {
 .card .copy-icon.done svg { display: none; }
 .card .copy-icon.done::after { content: '✓'; color: #fff; font-size: 14px; }
 
-/* Name: end-anchored so the unique tail + extension stay visible (full on hover). */
+/* Name: up to 2 lines, end-anchored so the unique tail + extension stay visible
+   (full name on hover). */
 .card .name {
   padding: 7px 8px;
   font-size: 12px;
   line-height: 1.3;
-  white-space: nowrap;
+  min-height: 2.6em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
   direction: rtl;
   text-align: left;
 }
