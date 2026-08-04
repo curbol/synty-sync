@@ -122,20 +122,15 @@ header select {
 .card .copy-icon.done svg { display: none; }
 .card .copy-icon.done::after { content: '✓'; color: #fff; font-size: 14px; }
 
-/* Name: up to 2 lines, end-anchored so the unique tail + extension stay visible
-   (full name on hover). */
+/* Name: a hard two-line box (never three). The text is middle-truncated in JS so
+   the unique tail + extension always land inside these two lines; full on hover. */
 .card .name {
   padding: 7px 8px;
   font-size: 12px;
   line-height: 1.3;
-  min-height: 2.6em;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  height: calc(1.3em * 2 + 14px); /* two lines + vertical padding */
   overflow: hidden;
   overflow-wrap: anywhere;
-  direction: rtl;
-  text-align: left;
 }
 
 .empty { text-align: center; color: var(--muted); padding: 40px; }
