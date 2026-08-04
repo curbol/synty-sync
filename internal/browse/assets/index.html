@@ -21,6 +21,9 @@
   <select id="type" title="type"></select>
   <select id="vendor" title="vendor"></select>
   <select id="variant" title="variant"></select>
+  <label class="grouptoggle" title="collapse identical copies across variants/packs into one card">
+    <input type="checkbox" id="group" checked> group dupes
+  </label>
   <span id="count" class="count"></span>
 </header>
 
@@ -40,6 +43,7 @@
         <code id="lb-path"></code>
         <button id="lb-copybtn">Copy path</button>
       </div>
+      <div id="lb-copies" class="lb-copies"></div>
     </div>
   </div>
 </div>

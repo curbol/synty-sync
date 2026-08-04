@@ -43,20 +43,36 @@ type facetValue struct {
 	Count int    `json:"count"`
 }
 
-// assetDTO is the client-facing view of an asset: everything the UI needs, without
-// the internal Source locator (the id is the only handle the client gets).
+// assetDTO is the client-facing view of an asset: the representative's display
+// fields plus every identical copy (same file across variants/packs) so the UI can
+// show one card and expose all paths. Count/Copies are 1/[self] when ungrouped.
 type assetDTO struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	RelPath  string    `json:"relPath"`
+	CopyPath string    `json:"copyPath"`
+	Category string    `json:"category"`
+	Ext      string    `json:"ext"`
+	Vendor   string    `json:"vendor"`
+	Pack     string    `json:"pack"`
+	Variant  string    `json:"variant"`
+	Size     int64     `json:"size"`
+	Thumb    string    `json:"thumb"`
+	Count    int       `json:"count"`
+	Copies   []copyDTO `json:"copies"`
+}
+
+// copyDTO is one occurrence of an asset (its variant/pack and the path to copy).
+type copyDTO struct {
 	ID       string `json:"id"`
-	Name     string `json:"name"`
-	RelPath  string `json:"relPath"`
-	CopyPath string `json:"copyPath"`
-	Category string `json:"category"`
-	Ext      string `json:"ext"`
+	Variant  string `json:"variant"`
 	Vendor   string `json:"vendor"`
 	Pack     string `json:"pack"`
-	Variant  string `json:"variant"`
-	Size     int64  `json:"size"`
-	Thumb    string `json:"thumb"`
+	CopyPath string `json:"copyPath"`
+}
+
+func copyOf(a assetindex.Asset) copyDTO {
+	return copyDTO{ID: a.ID, Variant: a.Variant, Vendor: a.Vendor, Pack: a.Pack, CopyPath: a.CopyPath}
 }
 
 func toDTO(a assetindex.Asset) assetDTO {
@@ -64,7 +80,22 @@ func toDTO(a assetindex.Asset) assetDTO {
 		ID: a.ID, Name: a.Name, RelPath: a.RelPath, CopyPath: a.CopyPath,
 		Category: string(a.Category), Ext: a.Ext, Vendor: a.Vendor, Pack: a.Pack,
 		Variant: a.Variant, Size: a.Size, Thumb: string(a.Thumb),
+		Count: 1, Copies: []copyDTO{copyOf(a)},
 	}
+}
+
+// thumbRank ranks thumbnail kinds so a group picks the copy with the best preview
+// (a Unity copy with a preview.png beats a SourceFiles copy with only geometry).
+func thumbRank(t assetindex.ThumbKind) int {
+	switch t {
+	case assetindex.ThumbImage, assetindex.ThumbPreview:
+		return 4
+	case assetindex.ThumbGLB:
+		return 3
+	case assetindex.ThumbFBX:
+		return 2
+	}
+	return 0
 }
 
 // newServer wires an index and its precomputed facets to the embedded frontend.
@@ -154,20 +185,62 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		matched = append(matched, a)
 	}
 
-	total := len(matched)
+	// Group identical copies (same file name + size) into one entry unless disabled,
+	// so the same asset shipped across variants/packs shows once with all its paths.
+	grouped := groupItems(matched)
+	if r.URL.Query().Get("group") == "0" {
+		grouped = make([]assetDTO, len(matched))
+		for i, a := range matched {
+			grouped[i] = toDTO(a)
+		}
+	}
+
+	total := len(grouped)
 	lo := min(offset, total)
 	hi := min(lo+limit, total)
-	items := make([]assetDTO, 0, hi-lo)
-	for _, a := range matched[lo:hi] {
-		items = append(items, toDTO(a))
-	}
 
 	writeJSON(w, map[string]any{
 		"total":  total,
 		"offset": lo,
-		"items":  items,
+		"items":  grouped[lo:hi],
 		"facets": s.facets,
 	})
+}
+
+// groupItems collapses assets that are the same file (name + size) into one DTO,
+// keeping first-seen order, choosing the best-thumbnail copy as the representative,
+// and listing every copy.
+func groupItems(assets []assetindex.Asset) []assetDTO {
+	type group struct {
+		rep    assetindex.Asset
+		copies []assetindex.Asset
+	}
+	byKey := map[string]*group{}
+	var order []string
+	for _, a := range assets {
+		key := a.Name + "\x00" + strconv.FormatInt(a.Size, 10)
+		g := byKey[key]
+		if g == nil {
+			g = &group{rep: a}
+			byKey[key] = g
+			order = append(order, key)
+		} else if thumbRank(a.Thumb) > thumbRank(g.rep.Thumb) {
+			g.rep = a
+		}
+		g.copies = append(g.copies, a)
+	}
+	out := make([]assetDTO, 0, len(order))
+	for _, key := range order {
+		g := byKey[key]
+		d := toDTO(g.rep)
+		d.Count = len(g.copies)
+		d.Copies = make([]copyDTO, len(g.copies))
+		for i, c := range g.copies {
+			d.Copies[i] = copyOf(c)
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 func (s *server) handleContent(w http.ResponseWriter, r *http.Request) {

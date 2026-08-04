@@ -43,6 +43,19 @@ header select {
   max-width: 190px;
 }
 .count { color: var(--muted); flex: 0 0 auto; min-width: 96px; text-align: right; }
+.grouptoggle { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; flex: 0 0 auto; }
+
+.count-badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 600; background: var(--edge-hi); color: #fff; padding: 1px 6px; border-radius: 4px; }
+
+.lb-copies { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.lb-copies-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.lb-copyall { background: var(--edge-hi); color: #fff; border: 0; border-radius: 5px; padding: 4px 9px; cursor: pointer; font-size: 11px; }
+.lb-copyall.done { background: #1f7a3f; }
+.lb-copyrow { display: flex; flex-direction: column; gap: 3px; background: var(--bg); border: 1px solid var(--edge); border-radius: 6px; padding: 6px 8px; }
+.lb-copyrow-label { color: var(--muted); font-size: 11px; }
+.lb-copyrow code { font-size: 10px; color: var(--text); word-break: break-all; }
+.lb-copyrow-btn { align-self: flex-start; background: var(--edge); color: var(--text); border: 0; border-radius: 5px; padding: 3px 9px; cursor: pointer; font-size: 11px; }
+.lb-copyrow-btn:hover, .lb-copyrow-btn.done { background: #333949; }
 
 #grid {
   display: grid;

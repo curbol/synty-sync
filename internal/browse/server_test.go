@@ -98,6 +98,10 @@ type assetsResp struct {
 	Items  []struct {
 		ID, Name, Category, Ext, Variant, CopyPath string
 		Thumb                                      string
+		Count                                      int
+		Copies                                     []struct {
+			Variant, Pack, CopyPath string
+		}
 	}
 	Facets struct {
 		Categories, Vendors, Variants []struct {
@@ -190,6 +194,58 @@ func TestVariantFilterNonLossy(t *testing.T) {
 
 // A present-but-empty variant param filters to the loose/unknown bucket (the
 // frontend's "(loose / unknown)" option), distinct from an absent param (all).
+// The same file shipped in two variants collapses to one grouped item exposing
+// both copy-paths; group=0 shows them separately.
+func TestGroupDuplicates(t *testing.T) {
+	root := t.TempDir()
+	cache := t.TempDir()
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		return full
+	}
+	writeZip(t, mk("synty", "Dup_Pack", "Dup_Pack_SourceFiles_v3.zip"), map[string]string{
+		"SourceFiles/Coin.fbx": "COINDATA",
+	})
+	writeUnity(t, mk("synty", "Dup_Pack", "Dup_Pack_Unity_2022_3_v1_0_0.unitypackage"), []struct {
+		guid, pathname, asset string
+		preview               bool
+	}{
+		{"g1", "Assets/Dup/Coin.fbx", "COINDATA", false}, // same name + bytes -> same size
+	})
+	ix, err := assetindex.Build(root, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newServer(ix)
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+
+	grouped := getAssets(t, srv, "q=Coin")
+	if grouped.Total != 1 {
+		t.Fatalf("grouped total = %d, want 1", grouped.Total)
+	}
+	it := grouped.Items[0]
+	if it.Count != 2 || len(it.Copies) != 2 {
+		t.Fatalf("group count = %d, copies = %d, want 2/2", it.Count, len(it.Copies))
+	}
+	variants := map[string]bool{}
+	for _, c := range it.Copies {
+		variants[c.Variant] = true
+		if c.CopyPath == "" {
+			t.Error("copy has no path")
+		}
+	}
+	if !variants["SourceFiles"] || !variants["Unity_2022_3"] {
+		t.Errorf("copies missing a variant: %v", variants)
+	}
+
+	ungrouped := getAssets(t, srv, "q=Coin&group=0")
+	if ungrouped.Total != 2 {
+		t.Errorf("ungrouped total = %d, want 2", ungrouped.Total)
+	}
+}
+
 func TestEmptyVariantFilter(t *testing.T) {
 	srv := testServer(t)
 	all := getAssets(t, srv, "")

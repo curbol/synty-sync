@@ -113,6 +113,10 @@ name, filter by type / vendor / engine variant, see thumbnails, click to enlarge
 `.zip` and `.unitypackage` archives, so individual models, sprites, and materials are
 searchable without unpacking anything.
 
+The same file shipped across engine variants or bundled in several packs collapses
+into one card (a `×N` badge); the enlarged view lists every copy's path with a
+copy-all. Toggle "group dupes" off to see each occurrence separately.
+
 Animated models play in the viewer with a scrub bar and clip selector. A mesh-less
 animation clip (Synty `ANIMATION_*` packs, kevdev, etc.) plays on a character whose
 rig it matches, auto-picked from the same vendor's library assets. Use "change" to
