@@ -4,13 +4,39 @@ A small Go CLI that mirrors your Synty store "Your Library" into a local cache,
 downloading only what changed since the last run. It is the download manager that
 direct Synty-store purchases don't get. Design: `docs/design.md`.
 
-## Build
+## Install
+
+Grab the latest release binary into `~/.local/bin` (private repo, so it uses your
+`gh` login or `GITHUB_TOKEN`):
+
+```bash
+gh api repos/curbol/synty-sync/contents/install.sh --jq .content | base64 -d | bash
+```
+
+Then update in place anytime:
+
+```bash
+synty-sync update           # latest release
+synty-sync update 0.2.0     # a specific version
+synty-sync version          # what's installed
+```
+
+`update` self-replaces the running binary; it needs a release build (a dev build
+tells you to use the installer). Releases are cut by pushing a `v*` tag — a GitHub
+Actions workflow builds the cross-platform binaries and publishes them:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+## Build from source
 
 ```bash
 go build -o synty-sync .
 ```
 
-Requires Go 1.26+. No cgo (the browser cookie reader uses pure-Go sqlite).
+Requires Go 1.26+. No cgo (the browser cookie reader uses pure-Go sqlite). To stamp
+a version into a local build: `go build -ldflags "-X main.version=0.2.0" -o synty-sync .`
 
 ## One-time setup
 

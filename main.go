@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
@@ -23,10 +24,15 @@ import (
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/manifest"
 	"github.com/curbol/synty-sync/internal/portal"
+	"github.com/curbol/synty-sync/internal/selfupdate"
 	"github.com/curbol/synty-sync/internal/session"
 	"github.com/curbol/synty-sync/internal/syncer"
 	"github.com/curbol/synty-sync/internal/web"
 )
+
+// version is the release version, set at build time via
+// -ldflags "-X main.version=<v>". It is "dev" for local builds.
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -56,7 +62,7 @@ func run(args []string) error {
 	reindex := fs.Bool("reindex", false, "browse: rebuild the asset index from scratch")
 	browseCache := fs.String("cache", "", "browse: cache dir for the index and unpacked archives (default: $XDG_CACHE_HOME/synty-sync)")
 	switch cmd {
-	case "status", "sync", "list", "select", "browse", "-h", "--help", "help":
+	case "status", "sync", "list", "select", "browse", "update", "version", "-h", "--help", "help", "--version", "-v":
 	default:
 		usage()
 		return fmt.Errorf("unknown subcommand %q", cmd)
@@ -65,8 +71,16 @@ func run(args []string) error {
 		usage()
 		return nil
 	}
+	if cmd == "version" || cmd == "--version" || cmd == "-v" {
+		printVersion()
+		return nil
+	}
 	if err := fs.Parse(rest); err != nil {
 		return err
+	}
+
+	if cmd == "update" {
+		return selfupdate.Run(version, fs.Arg(0))
 	}
 
 	authDir := config.ResolveDir(*cfgDir)
@@ -231,6 +245,10 @@ func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool)
 	return browse.Serve(ctx, addr, ix)
 }
 
+func printVersion() {
+	fmt.Printf("synty-sync %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
 func resolveCookie(cfg config.Config, override string) (string, error) {
 	src := cfg.SessionSource
 	if override != "" {
@@ -300,6 +318,8 @@ usage:
   synty-sync sync   [flags]   download the delta and update the lockfile
   synty-sync list   [flags]   print the current lockfile
   synty-sync browse [flags]   search & preview the local library in a web UI
+  synty-sync update [ver]     update to the latest release (or a specific version)
+  synty-sync version          print the version
 
 flags:
   -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
