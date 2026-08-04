@@ -181,7 +181,9 @@ func downloadAndReplace(token, assetURL string) error {
 		return fmt.Errorf("resolving binary path: %w", err)
 	}
 
-	tmp, err := os.MkdirTemp("", "synty-sync-update-*")
+	// Stage next to the target binary so the final rename stays on one filesystem
+	// (a temp dir under /tmp is often a separate device, and rename can't cross it).
+	tmp, err := os.MkdirTemp(filepath.Dir(exe), ".synty-sync-update-*")
 	if err != nil {
 		return err
 	}
@@ -207,10 +209,14 @@ func downloadAndReplace(token, assetURL string) error {
 	}
 	defer os.Remove(backup)
 	if err := os.Rename(binPath, exe); err != nil {
-		if restoreErr := os.Rename(backup, exe); restoreErr != nil {
-			return fmt.Errorf("install failed: %w; restore also failed: %w", err, restoreErr)
+		// Rename should stay on one device now, but fall back to an in-place copy
+		// for any exotic mount (overlay, bind) where it still can't.
+		if cerr := copyFile(binPath, exe); cerr != nil {
+			if restoreErr := copyFile(backup, exe); restoreErr != nil {
+				return fmt.Errorf("install failed: %w; restore also failed: %w", err, restoreErr)
+			}
+			return fmt.Errorf("install failed (original restored): %w", err)
 		}
-		return fmt.Errorf("install failed (original restored): %w", err)
 	}
 	return nil
 }
