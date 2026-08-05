@@ -194,6 +194,7 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 			grouped[i] = toDTO(a)
 		}
 	}
+	sortItems(grouped, r.URL.Query().Get("sort"))
 
 	total := len(grouped)
 	lo := min(offset, total)
@@ -205,6 +206,23 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		"items":  grouped[lo:hi],
 		"facets": s.facets,
 	})
+}
+
+// sortItems orders results: "path" keeps assets grouped by their location
+// (vendor/pack/folder); the default is case-insensitive by name.
+func sortItems(items []assetDTO, mode string) {
+	switch mode {
+	case "path":
+		sort.Slice(items, func(i, j int) bool { return items[i].RelPath < items[j].RelPath })
+	default:
+		sort.Slice(items, func(i, j int) bool {
+			ni, nj := strings.ToLower(items[i].Name), strings.ToLower(items[j].Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return items[i].RelPath < items[j].RelPath
+		})
+	}
 }
 
 // groupItems collapses assets that are the same file (name + size) into one DTO,

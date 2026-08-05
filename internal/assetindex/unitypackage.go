@@ -90,7 +90,7 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 	var assets []Asset
 	for _, guid := range order {
 		e := entries[guid]
-		if !e.hasAsset || e.pathname == "" || !safeEntry(e.pathname) {
+		if !e.hasAsset || e.pathname == "" || !safeEntry(e.pathname) || skipEntry(e.pathname) {
 			continue
 		}
 		src := Source{Kind: SourceUnityPackage, ArchivePath: archivePath, Guid: guid, Pathname: e.pathname, HasPreview: e.hasPreview}

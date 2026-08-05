@@ -2,6 +2,7 @@ package assetindex
 
 import (
 	"io/fs"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -29,6 +30,16 @@ func deriveVariant(packDir, filename string) string {
 // (Unity .meta, Godot .import), so they never clutter the index.
 func isSidecar(ext string) bool {
 	return ext == "meta" || ext == "import"
+}
+
+// skipEntry reports archive entries that aren't browseable assets: dot-files
+// (.editorconfig, .gitignore, …) and engine sidecars, matching the loose-file walk.
+func skipEntry(name string) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(base, ".") {
+		return true
+	}
+	return isSidecar(strings.ToLower(strings.TrimPrefix(path.Ext(base), ".")))
 }
 
 // libEntry is one file discovered by walking the library: either an archive (to

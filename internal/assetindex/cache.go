@@ -10,11 +10,16 @@ import (
 	"sync"
 )
 
+// indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
+// classified), so a cached index from older logic is rebuilt rather than reused.
+const indexVersion = 2
+
 // Index is the in-memory, on-disk-cacheable catalog of a library. Content requests
 // resolve through byID (never by reconstructing a path from client input), and the
 // unpacked-archive cache under CacheDir is keyed by each archive's fingerprint so a
 // changed archive re-extracts.
 type Index struct {
+	Version      int               `json:"version"`
 	Root         string            `json:"root"`
 	Assets       []Asset           `json:"assets"`
 	ArchivePrint map[string]string `json:"archivePrint"` // abs archive path -> fingerprint
@@ -49,7 +54,7 @@ func Build(root, cacheDir string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	ix := &Index{Root: absRoot, cacheDir: cacheDir, ArchivePrint: map[string]string{}}
+	ix := &Index{Version: indexVersion, Root: absRoot, cacheDir: cacheDir, ArchivePrint: map[string]string{}}
 	var assets []Asset
 	for _, e := range entries {
 		if e.kind == SourceLoose {
@@ -150,7 +155,7 @@ func LoadOrBuild(root, cacheDir, cachePath string, reindex bool) (*Index, error)
 		return nil, err
 	}
 	if !reindex {
-		if ix, err := Load(cachePath, cacheDir); err == nil && ix.Root == absRoot {
+		if ix, err := Load(cachePath, cacheDir); err == nil && ix.Root == absRoot && ix.Version == indexVersion {
 			if err := ix.Refresh(); err != nil {
 				return nil, err
 			}

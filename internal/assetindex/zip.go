@@ -36,7 +36,7 @@ func zipAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset, 
 
 	var assets []Asset
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || !safeEntry(f.Name) {
+		if f.FileInfo().IsDir() || !safeEntry(f.Name) || skipEntry(f.Name) {
 			continue
 		}
 		src := Source{Kind: SourceZip, ArchivePath: archivePath, Entry: f.Name}
