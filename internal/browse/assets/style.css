@@ -243,7 +243,6 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.card .name .l2 { color: var(--muted); }
 
 .empty { text-align: center; color: var(--muted); padding: 48px; }
 #sentinel { height: 1px; }
