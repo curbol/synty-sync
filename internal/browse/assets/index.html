@@ -18,9 +18,9 @@
 <header>
   <h1>synty-sync</h1>
   <input id="q" type="search" placeholder="search assets…" autocomplete="off" autofocus>
-  <select id="type" title="type"></select>
-  <select id="vendor" title="vendor"></select>
-  <select id="variant" title="variant"></select>
+  <div class="ms" id="type" title="type"><button type="button" class="ms-btn"></button><div class="ms-pop" hidden></div></div>
+  <div class="ms" id="vendor" title="vendor"><button type="button" class="ms-btn"></button><div class="ms-pop" hidden></div></div>
+  <div class="ms" id="variant" title="variant"><button type="button" class="ms-btn"></button><div class="ms-pop" hidden></div></div>
   <select id="sort" title="sort order">
     <option value="name">name A–Z</option>
     <option value="path">by pack</option>
@@ -43,10 +43,7 @@
     <div class="lb-meta">
       <h2 id="lb-name"></h2>
       <dl id="lb-fields"></dl>
-      <div class="lb-copy">
-        <code id="lb-path"></code>
-        <button id="lb-copybtn">Copy path</button>
-      </div>
+      <div id="lb-character" class="lb-character"></div>
       <div id="lb-copies" class="lb-copies"></div>
     </div>
   </div>

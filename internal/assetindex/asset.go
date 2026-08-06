@@ -18,12 +18,16 @@ type Category string
 const (
 	CategoryModel     Category = "model"
 	CategoryImage     Category = "image"
+	CategoryUI        Category = "ui"
+	CategoryTexture   Category = "texture"
 	CategoryMaterial  Category = "material"
 	CategoryScene     Category = "scene"
 	CategoryAnimation Category = "animation"
 	CategoryAudio     Category = "audio"
 	CategoryScript    Category = "script"
+	CategoryData      Category = "data"
 	CategoryDoc       Category = "doc"
+	CategoryFont      Category = "font"
 	CategoryOther     Category = "other"
 )
 
@@ -32,6 +36,7 @@ const (
 //	image   — the asset itself is a browser image; <img src=/api/content>
 //	glb/fbx — a 3D model; render client-side with three.js from /api/content
 //	preview — a Unity-rendered preview.png exists; <img src=/api/thumb>
+//	font    — a font file; load with FontFace from /api/content and render sample text
 //	none    — no thumbnail; show a category icon
 type ThumbKind string
 
@@ -41,6 +46,7 @@ const (
 	ThumbGLB     ThumbKind = "glb"
 	ThumbFBX     ThumbKind = "fbx"
 	ThumbPreview ThumbKind = "preview"
+	ThumbFont    ThumbKind = "font"
 )
 
 // SourceKind discriminates where an asset's bytes live.
@@ -117,6 +123,9 @@ func copyPath(s Source) string {
 func newAsset(s Source, name, relPath, vendor, pack, variant string, size int64) Asset {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
 	cat, thumb := Classify(ext)
+	if cat == CategoryImage {
+		cat = refineImage(relPath)
+	}
 	if s.Kind == SourceUnityPackage && s.HasPreview {
 		thumb = ThumbPreview
 	}

@@ -157,26 +157,26 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	typ := r.URL.Query().Get("type")
-	vendor := r.URL.Query().Get("vendor")
-	variant := r.URL.Query().Get("variant")
-	hasVariant := r.URL.Query().Has("variant")
-	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
-	limit := atoiDefault(r.URL.Query().Get("limit"), defaultLimit)
+	query := r.URL.Query()
+	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	types := valueSet(query["type"])
+	vendors := valueSet(query["vendor"])
+	variants := valueSet(query["variant"])
+	offset := atoiDefault(query.Get("offset"), 0)
+	limit := atoiDefault(query.Get("limit"), defaultLimit)
 	if limit <= 0 || limit > maxLimit {
 		limit = defaultLimit
 	}
 
 	var matched []assetindex.Asset
 	for _, a := range s.ix.Assets {
-		if typ != "" && string(a.Category) != typ {
+		if types != nil && !types[string(a.Category)] {
 			continue
 		}
-		if vendor != "" && a.Vendor != vendor {
+		if vendors != nil && !vendors[a.Vendor] {
 			continue
 		}
-		if hasVariant && a.Variant != variant {
+		if variants != nil && !variants[a.Variant] {
 			continue
 		}
 		if q != "" && !strings.Contains(strings.ToLower(a.Name), q) {
@@ -188,13 +188,13 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	// Group identical copies (same file name + size) into one entry unless disabled,
 	// so the same asset shipped across variants/packs shows once with all its paths.
 	grouped := groupItems(matched)
-	if r.URL.Query().Get("group") == "0" {
+	if query.Get("group") == "0" {
 		grouped = make([]assetDTO, len(matched))
 		for i, a := range matched {
 			grouped[i] = toDTO(a)
 		}
 	}
-	sortItems(grouped, r.URL.Query().Get("sort"))
+	sortItems(grouped, query.Get("sort"))
 
 	total := len(grouped)
 	lo := min(offset, total)
@@ -324,16 +324,17 @@ func buildFacets(ix *assetindex.Index) facets {
 	}
 }
 
-// sortedFacet turns a value->count map into a slice sorted by descending count then
-// value, for a stable filter UI.
+// sortedFacet turns a value->count map into a slice sorted alphabetically by value
+// (case-insensitive), so a specific option is easy to find in the filter UI.
 func sortedFacet(m map[string]int) []facetValue {
 	out := make([]facetValue, 0, len(m))
 	for v, c := range m {
 		out = append(out, facetValue{Value: v, Count: c})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count != out[j].Count {
-			return out[i].Count > out[j].Count
+		li, lj := strings.ToLower(out[i].Value), strings.ToLower(out[j].Value)
+		if li != lj {
+			return li < lj
 		}
 		return out[i].Value < out[j].Value
 	})
@@ -343,6 +344,20 @@ func sortedFacet(m map[string]int) []facetValue {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// valueSet turns the repeated values of a filter param into a membership set, or nil
+// when the param was absent (meaning no filter on that facet). A present-but-empty
+// value ("", e.g. variant=) stays in the set and selects the loose/unknown bucket.
+func valueSet(vals []string) map[string]bool {
+	if vals == nil {
+		return nil
+	}
+	set := make(map[string]bool, len(vals))
+	for _, v := range vals {
+		set[v] = true
+	}
+	return set
 }
 
 func atoiDefault(s string, def int) int {

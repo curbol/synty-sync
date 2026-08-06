@@ -727,6 +727,8 @@ class FBXTreeParser {
 
 				const relationships = connections.get( parseInt( nodeID ) );
 
+				if ( relationships === undefined ) continue; // deformer with no connections (some Synty morph rigs)
+
 				if ( deformerNode.attrType === 'Skin' ) {
 
 					const skeleton = this.parseSkeleton( relationships, DeformerNodes );

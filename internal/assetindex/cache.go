@@ -12,7 +12,7 @@ import (
 
 // indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
 // classified), so a cached index from older logic is rebuilt rather than reused.
-const indexVersion = 2
+const indexVersion = 4
 
 // Index is the in-memory, on-disk-cacheable catalog of a library. Content requests
 // resolve through byID (never by reconstructing a path from client input), and the

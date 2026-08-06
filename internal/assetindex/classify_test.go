@@ -22,6 +22,18 @@ func TestClassify(t *testing.T) {
 		{"wav", CategoryAudio, ThumbNone},
 		{"cs", CategoryScript, ThumbNone},
 		{"pdf", CategoryDoc, ThumbNone},
+		{"json", CategoryDoc, ThumbNone},
+		{"asset", CategoryData, ThumbNone},
+		{"meta", CategoryData, ThumbNone},
+		{"res", CategoryData, ThumbNone},
+		{"playable", CategoryData, ThumbNone},
+		{"terrainlayer", CategoryData, ThumbNone},
+		{"preset", CategoryData, ThumbNone},
+		{"lighting", CategoryData, ThumbNone},
+		{"mesh", CategoryData, ThumbNone},
+		{"sk", CategoryData, ThumbNone},
+		{"ttf", CategoryFont, ThumbFont},
+		{"otf", CategoryFont, ThumbFont},
 		{"xyz", CategoryOther, ThumbNone},
 	}
 	for _, c := range cases {
@@ -29,6 +41,53 @@ func TestClassify(t *testing.T) {
 		if gotCat != c.cat || gotThumb != c.thumb {
 			t.Errorf("Classify(%q) = (%s,%s), want (%s,%s)", c.ext, gotCat, gotThumb, c.cat, c.thumb)
 		}
+	}
+}
+
+func TestRefineImage(t *testing.T) {
+	cases := []struct {
+		relPath string
+		want    Category
+	}{
+		// UI: INTERFACE-pack sprite/icon/branding paths, and generic UI folders.
+		{"synty/INTERFACE_Dark_Fantasy_HUD/x.zip::Source_Sprites/Core/Icons_Input/ICON_Input_Stick.png", CategoryUI},
+		{"synty/INTERFACE_Fantasy_Menus/x.zip::Source_Sprites/Core/Branding/SPR_Logo.png", CategoryUI},
+		{"pack/UI/button_01.png", CategoryUI},
+		{"pack/HUD/minimap.png", CategoryUI},
+		// UI wins over a texture folder when both are present in the path.
+		{"pack/UI/Textures/icon.png", CategoryUI},
+		// texture: /textures/ tree, sibling folders, and map suffixes.
+		{"synty/POLYGON_Nature/x.zip::Textures/PolygonNature_Texture_01.png", CategoryTexture},
+		{"pack/Textures/Wall_Normal.png", CategoryTexture},
+		{"pack/Decals/blood_01.png", CategoryTexture},
+		{"pack/Materials/rock_emissive.png", CategoryTexture},
+		// image: the remainder (no UI token, no texture folder/suffix).
+		{"pack/Misc/fx_circle_01.png", CategoryImage},
+		{"pack/color_palette.png", CategoryImage},
+		// "build" contains the substring "ui" but is not a UI token boundary.
+		{"pack/Buildings/wall.png", CategoryImage},
+	}
+	for _, c := range cases {
+		if got := refineImage(c.relPath); got != c.want {
+			t.Errorf("refineImage(%q) = %s, want %s", c.relPath, got, c.want)
+		}
+	}
+}
+
+func TestNewAssetRefinesImageCategory(t *testing.T) {
+	ui := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "Source_Sprites/Icons/ICON_x.png"},
+		"ICON_x.png", "synty/INTERFACE_Pack/x.zip::Source_Sprites/Icons/ICON_x.png", "synty", "INTERFACE_Pack", "SourceSprites", 10)
+	if ui.Category != CategoryUI {
+		t.Errorf("ui image category = %s, want ui", ui.Category)
+	}
+	if ui.Thumb != ThumbImage {
+		t.Errorf("ui png thumb = %s, want image (still renderable)", ui.Thumb)
+	}
+
+	tex := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "Textures/Wall_Normal.png"},
+		"Wall_Normal.png", "synty/POLYGON_Pack/x.zip::Textures/Wall_Normal.png", "synty", "POLYGON_Pack", "SourceFiles", 10)
+	if tex.Category != CategoryTexture {
+		t.Errorf("texture image category = %s, want texture", tex.Category)
 	}
 }
 

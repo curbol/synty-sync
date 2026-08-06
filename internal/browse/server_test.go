@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -171,6 +172,65 @@ func TestTypeFilter(t *testing.T) {
 			t.Errorf("type=image returned %q (%s)", it.Name, it.Category)
 		}
 	}
+}
+
+// Repeated type params union their categories, so "model AND image" shows both.
+func TestMultiValueTypeFilter(t *testing.T) {
+	srv := testServer(t)
+	r := getAssets(t, srv, "type=image&type=model")
+	if r.Total == 0 {
+		t.Fatal("no results for multi-type filter")
+	}
+	seen := map[string]bool{}
+	for _, it := range r.Items {
+		if it.Category != "image" && it.Category != "model" {
+			t.Errorf("multi-type returned %q (%s)", it.Name, it.Category)
+		}
+		seen[it.Category] = true
+	}
+	if !seen["image"] || !seen["model"] {
+		t.Errorf("multi-type missing a category: %v", seen)
+	}
+}
+
+// Repeated variant params union their buckets, including the empty (loose) bucket.
+func TestMultiValueVariantFilter(t *testing.T) {
+	srv := testServer(t)
+	r := getAssets(t, srv, "variant=SourceFiles&variant=")
+	sf, loose := false, false
+	for _, it := range r.Items {
+		switch it.Variant {
+		case "SourceFiles":
+			sf = true
+		case "":
+			loose = true
+		default:
+			t.Errorf("multi-variant returned unexpected variant %q (%s)", it.Variant, it.Name)
+		}
+	}
+	if !sf || !loose {
+		t.Errorf("multi-variant missing a bucket: sourcefiles=%v loose=%v", sf, loose)
+	}
+}
+
+// Facet dropdowns are ordered alphabetically by value (case-insensitive), not by
+// count, so a specific option is easy to find.
+func TestFacetsSortedByName(t *testing.T) {
+	srv := testServer(t)
+	r := getAssets(t, srv, "")
+	assertSorted := func(name string, vals []struct {
+		Value string
+		Count int
+	}) {
+		for i := 1; i < len(vals); i++ {
+			if strings.ToLower(vals[i-1].Value) > strings.ToLower(vals[i].Value) {
+				t.Errorf("%s facets not alphabetical: %q before %q", name, vals[i-1].Value, vals[i].Value)
+			}
+		}
+	}
+	assertSorted("category", r.Facets.Categories)
+	assertSorted("vendor", r.Facets.Vendors)
+	assertSorted("variant", r.Facets.Variants)
 }
 
 // Two Heart-named assets exist in different variants; each is reachable by its
