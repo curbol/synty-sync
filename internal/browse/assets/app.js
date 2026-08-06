@@ -640,8 +640,18 @@ function openLightbox(a) {
   lb.name.textContent = a.name;
   // The metadata carries the shared file properties; every location (one or many)
   // lives in the copies list below, so there's a single copy system either way.
+  const bitmap = /^(png|jpe?g|gif|webp|bmp)$/i.test(a.ext || '');
   const fields = [['Category', a.category], ['Format', a.ext || '—'], ['Size', humanSize(a.size)]];
-  lb.fields.innerHTML = fields.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHTML(v)}</dd>`).join('');
+  if (bitmap) fields.push(['Dimensions', '…']);
+  lb.fields.innerHTML = fields.map(([k, v]) => `<dt>${k}</dt><dd data-field="${k}">${escapeHTML(v)}</dd>`).join('');
+  // Read real pixel dimensions off the source image itself (not any Unity preview).
+  if (bitmap) {
+    const probe = new Image();
+    const dd = () => lb.fields.querySelector('dd[data-field="Dimensions"]');
+    probe.onload = () => { const el = dd(); if (el) el.textContent = `${probe.naturalWidth} × ${probe.naturalHeight}`; };
+    probe.onerror = () => { const el = dd(); if (el) el.textContent = '—'; };
+    probe.src = contentURL(a.id);
+  }
   lb.character.replaceChildren(); // the viewer fills this for clip-only animations
   renderCopies(a);
 
