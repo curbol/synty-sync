@@ -306,6 +306,43 @@ func TestGroupDuplicates(t *testing.T) {
 	}
 }
 
+// The same sprite shipped in a zip and a unitypackage often differs only by a
+// separator Synty's Unity export inserts (Gem09 vs Gem_09); grouping should still
+// fold them together since the bytes (size) match.
+func TestGroupNameVariants(t *testing.T) {
+	root := t.TempDir()
+	cache := t.TempDir()
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		return full
+	}
+	writeZip(t, mk("synty", "HUD", "HUD_SourceSprites_v3.zip"), map[string]string{
+		"Source_Sprites/SPR_Gem09.png": "SAMEPNGBYTES",
+	})
+	writeUnity(t, mk("synty", "HUD", "HUD_Unity_2022_1_v1_0_0.unitypackage"), []struct {
+		guid, pathname, asset string
+		preview               bool
+	}{
+		{"g1", "Assets/Synty/HUD/SPR_Gem_09.png", "SAMEPNGBYTES", false},
+	})
+	ix, err := assetindex.Build(root, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newServer(ix)
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+
+	grouped := getAssets(t, srv, "q=Gem")
+	if grouped.Total != 1 {
+		t.Fatalf("grouped total = %d, want 1 (SPR_Gem09 and SPR_Gem_09 are the same file)", grouped.Total)
+	}
+	if grouped.Items[0].Count != 2 {
+		t.Fatalf("group count = %d, want 2", grouped.Items[0].Count)
+	}
+}
+
 func TestEmptyVariantFilter(t *testing.T) {
 	srv := testServer(t)
 	all := getAssets(t, srv, "")

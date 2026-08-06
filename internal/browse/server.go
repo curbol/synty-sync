@@ -225,9 +225,24 @@ func sortItems(items []assetDTO, mode string) {
 	}
 }
 
-// groupItems collapses assets that are the same file (name + size) into one DTO,
-// keeping first-seen order, choosing the best-thumbnail copy as the representative,
-// and listing every copy.
+// groupNameKey folds file names that differ only by separators/case, so the same
+// file collapses even when a variant renamed it. Synty's Unity export inserts an
+// underscore before a trailing number (SPR_..._Gem09.png -> ..._Gem_09.png), which
+// otherwise leaves the identical sprite showing as two cards. Pairing this with the
+// byte size in the group key keeps genuinely different files apart.
+func groupNameKey(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// groupItems collapses assets that are the same file (normalized name + size) into
+// one DTO, keeping first-seen order, choosing the best-thumbnail copy as the
+// representative, and listing every copy.
 func groupItems(assets []assetindex.Asset) []assetDTO {
 	type group struct {
 		rep    assetindex.Asset
@@ -236,7 +251,7 @@ func groupItems(assets []assetindex.Asset) []assetDTO {
 	byKey := map[string]*group{}
 	var order []string
 	for _, a := range assets {
-		key := a.Name + "\x00" + strconv.FormatInt(a.Size, 10)
+		key := groupNameKey(a.Name) + "\x00" + strconv.FormatInt(a.Size, 10)
 		g := byKey[key]
 		if g == nil {
 			g = &group{rep: a}
