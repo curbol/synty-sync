@@ -335,17 +335,31 @@ const loadingManager = new THREE.LoadingManager();
 loadingManager.setURLModifier((url) => (url.includes('/api/content') ? url : BLANK_PIXEL));
 const CLAY = new THREE.MeshStandardMaterial({ color: 0xc7ccd6, roughness: 0.72, metalness: 0.0 });
 
+// normalizeClip rebases a clip to its first real keyframe. Synty source FBX keep each
+// clip at its position on a shared master timeline, so a clip can begin with seconds
+// of empty (static) lead-in that no real import would play; trimming it makes playback
+// and posed thumbnails start on the actual motion. A no-op for clips already at 0.
+function normalizeClip(clip) {
+  let tMin = Infinity;
+  for (const tr of clip.tracks) if (tr.times.length) tMin = Math.min(tMin, tr.times[0]);
+  if (!isFinite(tMin) || tMin <= 1e-3) return clip;
+  for (const tr of clip.tracks) { const t = tr.times; for (let i = 0; i < t.length; i++) t[i] -= tMin; }
+  clip.resetDuration();
+  return clip;
+}
+
 // loadModel returns the display root with its animation clips attached as
 // root.animations (GLTFLoader keeps clips on gltf.animations, not the scene).
 async function loadModel(url, ext) {
   if (ext === 'glb' || ext === 'gltf') {
     const gltf = await new GLTFLoader(loadingManager).loadAsync(url);
     const root = gltf.scene;
-    root.animations = gltf.animations || [];
+    root.animations = (gltf.animations || []).map(normalizeClip);
     return root;
   }
   const obj = await new FBXLoader(loadingManager).loadAsync(url);
   obj.traverse((o) => { if (o.isMesh) o.material = CLAY; });
+  if (obj.animations) obj.animations = obj.animations.map(normalizeClip);
   return obj;
 }
 
