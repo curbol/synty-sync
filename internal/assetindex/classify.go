@@ -61,8 +61,16 @@ var (
 // refineImage narrows a file already classified as an image to ui, texture, or plain
 // image using its path. UI containers win (a HUD sprite is UI even if the pack also
 // ships textures), then texture folders and material-map suffixes, else a plain image.
+//
+// It matches only the file's path inside its archive (after "::"), never the
+// pack/archive name: a pack called "POLYGON_Icons" must not make its textures read as
+// UI. Loose files (no "::") are matched whole.
 func refineImage(relPath string) Category {
-	p := strings.ToLower(relPath)
+	p := relPath
+	if i := strings.LastIndex(p, "::"); i >= 0 {
+		p = p[i+len("::"):]
+	}
+	p = strings.ToLower(p)
 	switch {
 	case uiTokenRe.MatchString(p):
 		return CategoryUI

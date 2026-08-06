@@ -66,6 +66,13 @@ func TestRefineImage(t *testing.T) {
 		{"pack/color_palette.png", CategoryImage},
 		// "build" contains the substring "ui" but is not a UI token boundary.
 		{"pack/Buildings/wall.png", CategoryImage},
+		// The pack/archive NAME must not drive classification: POLYGON_Icons ships 3D
+		// props, and a file under its Textures/ folder is a texture even though "Icons"
+		// is in the pack name. Only the path inside the archive (after "::") counts.
+		{"synty/POLYGON_Icons/POLYGON_Icons_Unity_2022_3_v1_2_1.unitypackage::Assets/Synty/PolygonGeneric/Textures/Alts/Generic_01_A.png", CategoryTexture},
+		// A genuine UI sprite inside an archive still reads as UI from its entry path,
+		// even when the pack name carries no UI token.
+		{"synty/POLYGON_Kit/POLYGON_Kit.unitypackage::Assets/UI/HUD/health_bar.png", CategoryUI},
 	}
 	for _, c := range cases {
 		if got := refineImage(c.relPath); got != c.want {
