@@ -386,3 +386,98 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   .lb-panel { flex-direction: column; }
   .lb-meta { flex-basis: auto; }
 }
+
+/* ---- tags ---- */
+
+/* A thin colored strip along the card's bottom edge: one segment per tag, no text,
+   so it reads at a glance without covering the preview. */
+.sliver-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; display: flex; gap: 1px; z-index: 1; }
+.sliver-bar[hidden] { display: none; }
+.sliver { flex: 1 1 0; min-width: 4px; }
+.sliver:first-child { border-bottom-left-radius: 3px; }
+.sliver:last-child { border-bottom-right-radius: 3px; }
+.sliver-more { flex: 0 0 6px; background: repeating-linear-gradient(45deg, var(--muted), var(--muted) 2px, transparent 2px, transparent 4px); font-size: 0; }
+
+/* Tag add: hover-revealed, top-right just left of the copy icon. Hidden unless
+   tagging is on, and when the asset has no content fingerprint. */
+.tag-add {
+  position: absolute;
+  top: 6px;
+  right: 34px;
+  width: 24px;
+  height: 24px;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(10, 8, 6, 0.72);
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s;
+  backdrop-filter: blur(2px);
+  display: none;
+}
+body.tags-on .tag-add { display: block; }
+body.tags-on .tag-add.nofp { display: none; }
+.card:hover .tag-add, .card:focus-within .tag-add { opacity: 1; }
+.tag-add svg { width: 100%; height: 100%; display: block; }
+
+/* The tag filter lives in a .ms dropdown; header + rows layer on the shared styles. */
+.tag-pop-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 2px 4px 6px; border-bottom: 1px solid var(--edge); margin-bottom: 4px; }
+.tag-mode, .tag-manage { background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+.tag-mode { font-weight: 700; letter-spacing: 0.04em; min-width: 44px; }
+.tag-mode:hover, .tag-manage:hover { border-color: var(--edge-hi); }
+.tag-pop-empty { color: var(--muted); font-size: 12px; padding: 6px 4px; }
+.tag-dot { flex: none; width: 10px; height: 10px; border-radius: 3px; }
+.tag-manage-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; }
+.tag-color { flex: none; width: 20px; height: 20px; padding: 0; border: 1px solid var(--edge); border-radius: 5px; background: none; cursor: pointer; }
+.tag-name { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 5px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.tag-name:focus { outline: none; border-color: var(--accent); }
+.tag-del { flex: none; background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px; }
+.tag-del:hover { color: #e2777a; }
+
+/* Floating menu for assigning/creating tags, from a card or the lightbox. Above the
+   lightbox (z-index 20). */
+.tag-menu {
+  position: fixed;
+  z-index: 40;
+  width: 230px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--edge-hi);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+.tag-menu-list { display: flex; flex-direction: column; }
+.tag-menu-opt { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.tag-menu-opt:hover { background: var(--edge); }
+.tag-menu-opt input { flex: none; margin: 0; accent-color: var(--accent); }
+.tag-menu-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-menu-empty { color: var(--muted); font-size: 12px; padding: 6px; }
+.tag-menu-new { width: 100%; box-sizing: border-box; margin-top: 6px; background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+.tag-menu-new:focus { outline: none; border-color: var(--accent); }
+
+/* Lightbox tag chips. --tc is the tag color, set per chip and repainted on recolor. */
+.lb-tags { margin: 0 0 18px; }
+.lb-tags[hidden] { display: none; }
+.lb-tags-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.lb-tag-add { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 12px; }
+.lb-tag-add:hover:not(:disabled) { text-decoration: underline; }
+.lb-tag-add:disabled { color: var(--muted); cursor: default; }
+.tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip {
+  --tc: var(--muted);
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--tc);
+  border-left: 4px solid var(--tc);
+  border-radius: 7px;
+  padding: 3px 6px 3px 8px;
+  font-size: 12px;
+}
+.tag-chip-color { flex: none; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: none; cursor: pointer; }
+.tag-chip-label { color: var(--text); word-break: break-word; }
+.tag-chip-x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; }
+.tag-chip-x:hover { color: #e2777a; }

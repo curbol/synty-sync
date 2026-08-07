@@ -25,6 +25,8 @@ function query(extra = {}) {
   // No boxes checked = no param = no filter; each checked value is appended so the
   // backend unions them. An empty value is the variant "(loose / unknown)" bucket.
   for (const f of FILTERS) for (const v of filters[f.id].getSelected()) p.append(f.id, v);
+  for (const t of tagFilter.selected) p.append('tag', t);
+  if (tagFilter.selected.size) p.set('tagmode', tagFilter.mode);
   p.set('sort', els.sort.value);
   if (!els.group.checked) p.set('group', '0');
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
@@ -154,6 +156,292 @@ function populateFacets(facets) {
   for (const f of FILTERS) filters[f.id].setOptions(facets[f.key]);
 }
 
+// ---- tags ----
+
+const TAG_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 12 22l-8-8V4h10l6.6 6.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.2"/></svg>';
+const MAX_SLIVERS = 6;
+
+const tagState = { enabled: false, colors: new Map(), counts: new Map() };
+
+function tagColor(id) { return tagState.colors.get(id) || '#9aa0aa'; }
+function hex6(c) { return /^#[0-9a-fA-F]{6}$/.test(c) ? c : '#9aa0aa'; }
+
+// applyPalette syncs the local palette from any tag API response, so a newly
+// created or recolored tag is known before its slivers/chips render.
+function applyPalette(p) {
+  if (!p) return;
+  tagState.enabled = !!p.enabled;
+  tagState.colors = new Map((p.tags || []).map((t) => [t.id, t.color]));
+  tagState.counts = new Map((p.tags || []).map((t) => [t.id, t.count]));
+  document.body.classList.toggle('tags-on', tagState.enabled);
+  tagFilter.root.hidden = !tagState.enabled;
+  tagFilter.setOptions();
+  restyleTags();
+}
+
+async function loadPalette() {
+  try { applyPalette(await (await fetch('/api/tags')).json()); } catch { /* tagging stays off */ }
+}
+
+// apiAssign toggles a tag across a card's whole fingerprint set and returns the
+// resulting union of tag ids for that set.
+async function apiAssign(fingerprints, tag, on) {
+  const res = await fetch('/api/assign', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fingerprints, tag, on }),
+  });
+  const data = await res.json();
+  applyPalette(data.palette);
+  return data.tags || [];
+}
+
+async function apiTag(method, body) {
+  const res = await fetch('/api/tags', {
+    method, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  applyPalette(await res.json());
+}
+
+// restyleTags repaints every rendered sliver and chip after a recolor.
+function restyleTags() {
+  for (const s of document.querySelectorAll('.sliver[data-tag]')) s.style.background = tagColor(s.dataset.tag);
+  for (const c of document.querySelectorAll('.tag-chip[data-tag]')) c.style.setProperty('--tc', tagColor(c.dataset.tag));
+}
+
+// renderSlivers fills a card's tag strip: one colored segment per tag (no text) plus
+// a +N overflow marker, hidden when the card has no tags.
+function renderSlivers(bar, a) {
+  bar.replaceChildren();
+  const tags = a.tags || [];
+  bar.hidden = tags.length === 0;
+  const title = tags.join(', ');
+  for (const t of tags.slice(0, MAX_SLIVERS)) {
+    const s = document.createElement('span');
+    s.className = 'sliver';
+    s.dataset.tag = t;
+    s.style.background = tagColor(t);
+    s.title = title;
+    bar.appendChild(s);
+  }
+  if (tags.length > MAX_SLIVERS) {
+    const more = document.createElement('span');
+    more.className = 'sliver-more';
+    more.textContent = '+' + (tags.length - MAX_SLIVERS);
+    more.title = title;
+    bar.appendChild(more);
+  }
+}
+
+// hasFingerprints reports whether a card can be tagged at all.
+function hasFingerprints(a) { return Array.isArray(a.fingerprints) && a.fingerprints.length > 0; }
+
+// ---- tag menu (assign / create-on-the-fly, from a card or the lightbox) ----
+
+let tagMenu = null;
+function closeTagMenu() { if (tagMenu) { tagMenu.remove(); tagMenu = null; } }
+
+// openTagMenu shows a checkbox list of existing tags (toggling assigns/unassigns
+// across the card's whole fingerprint set) plus a field to create-and-assign. It
+// calls onChange after any change so the caller repaints its slivers/chips.
+function openTagMenu(anchor, a, onChange) {
+  closeTagMenu();
+  const menu = document.createElement('div');
+  menu.className = 'tag-menu';
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  const list = document.createElement('div');
+  list.className = 'tag-menu-list';
+
+  const rebuild = () => {
+    list.replaceChildren();
+    const have = new Set(a.tags || []);
+    const ids = [...tagState.colors.keys()].sort((x, y) => x.localeCompare(y));
+    if (ids.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'tag-menu-empty';
+      hint.textContent = 'No tags yet — type one below.';
+      list.appendChild(hint);
+    }
+    for (const id of ids) {
+      const row = document.createElement('label');
+      row.className = 'tag-menu-opt';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = have.has(id);
+      cb.addEventListener('change', async () => {
+        a.tags = await apiAssign(a.fingerprints, id, cb.checked);
+        onChange();
+      });
+      const dot = document.createElement('span');
+      dot.className = 'tag-dot';
+      dot.style.background = tagColor(id);
+      const lbl = document.createElement('span');
+      lbl.className = 'tag-menu-label';
+      lbl.textContent = id;
+      row.append(cb, dot, lbl);
+      list.appendChild(row);
+    }
+  };
+  rebuild();
+
+  const input = document.createElement('input');
+  input.className = 'tag-menu-new';
+  input.type = 'text';
+  input.placeholder = 'new tag (e.g. hero, biome:forest)…';
+  input.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter') return;
+    const name = input.value.trim();
+    if (!name) return;
+    input.value = '';
+    a.tags = await apiAssign(a.fingerprints, name, true);
+    rebuild();
+    onChange();
+  });
+
+  menu.append(list, input);
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8) + 'px';
+  menu.style.left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8) + 'px';
+  tagMenu = menu;
+  setTimeout(() => input.focus(), 0);
+}
+
+// ---- tag filter (header): select tags to filter by, with an AND/OR toggle and an
+// inline manage mode to rename / recolor / delete tags library-wide. ----
+
+const tagFilter = {
+  root: document.getElementById('tagfilter'),
+  selected: new Set(),
+  mode: 'or',
+  manage: false,
+  init() {
+    this.btn = this.root.querySelector('.ms-btn');
+    this.pop = this.root.querySelector('.ms-pop');
+    this.label = document.createElement('span');
+    this.label.className = 'ms-btn-label';
+    const caret = document.createElement('span');
+    caret.className = 'ms-caret';
+    caret.textContent = '▾';
+    this.btn.append(this.label, caret);
+    this.btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = this.pop.hidden;
+      for (const ms of multiSelects) ms.setOpen(false);
+      this.setOpen(open);
+    });
+    this.pop.addEventListener('click', (e) => e.stopPropagation());
+    this.renderButton();
+  },
+  setOpen(open) {
+    this.pop.hidden = !open;
+    this.root.classList.toggle('open', open);
+    if (open) this.render();
+  },
+  renderButton() {
+    const n = this.selected.size;
+    this.btn.classList.toggle('active', n > 0);
+    this.label.textContent = n === 0 ? 'tags' : (n === 1 ? [...this.selected][0] : n + ' tags');
+  },
+  // setOptions runs after any palette change: drop selections for deleted tags and
+  // repaint the open popover.
+  setOptions() {
+    for (const id of [...this.selected]) if (!tagState.colors.has(id)) this.selected.delete(id);
+    if (!this.pop.hidden) this.render();
+    this.renderButton();
+  },
+  render() {
+    this.pop.replaceChildren();
+    const head = document.createElement('div');
+    head.className = 'tag-pop-head';
+    const modeBtn = document.createElement('button');
+    modeBtn.type = 'button';
+    modeBtn.className = 'tag-mode';
+    const setModeLabel = () => {
+      modeBtn.textContent = this.mode === 'and' ? 'ALL' : 'ANY';
+      modeBtn.title = 'match ' + (this.mode === 'and' ? 'all selected tags (AND)' : 'any selected tag (OR)');
+    };
+    setModeLabel();
+    modeBtn.addEventListener('click', () => {
+      this.mode = this.mode === 'and' ? 'or' : 'and';
+      setModeLabel();
+      if (this.selected.size) reset();
+    });
+    const manageBtn = document.createElement('button');
+    manageBtn.type = 'button';
+    manageBtn.className = 'tag-manage';
+    manageBtn.textContent = this.manage ? 'done' : 'manage';
+    manageBtn.addEventListener('click', () => { this.manage = !this.manage; this.render(); });
+    head.append(modeBtn, manageBtn);
+    this.pop.appendChild(head);
+
+    const ids = [...tagState.colors.keys()].sort((x, y) => x.localeCompare(y));
+    if (ids.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'tag-pop-empty';
+      empty.textContent = 'No tags yet.';
+      this.pop.appendChild(empty);
+      return;
+    }
+    for (const id of ids) this.pop.appendChild(this.manage ? this.manageRow(id) : this.filterRow(id));
+  },
+  filterRow(id) {
+    const row = document.createElement('label');
+    row.className = 'ms-opt';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = this.selected.has(id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) this.selected.add(id); else this.selected.delete(id);
+      this.renderButton();
+      reset();
+    });
+    const dot = document.createElement('span');
+    dot.className = 'tag-dot';
+    dot.style.background = tagColor(id);
+    const text = document.createElement('span');
+    text.className = 'ms-opt-label';
+    text.textContent = id;
+    const count = document.createElement('span');
+    count.className = 'ms-opt-count';
+    count.textContent = tagState.counts.get(id) || 0;
+    row.append(cb, dot, text, count);
+    return row;
+  },
+  manageRow(id) {
+    const row = document.createElement('div');
+    row.className = 'tag-manage-row';
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.className = 'tag-color';
+    color.value = hex6(tagColor(id));
+    color.addEventListener('change', () => apiTag('PATCH', { id, color: color.value }));
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'tag-name';
+    name.value = id;
+    const commit = async () => {
+      const v = name.value.trim();
+      if (v && v !== id) { await apiTag('PATCH', { id, newId: v }); reset(); }
+    };
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { name.blur(); } });
+    name.addEventListener('blur', commit);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'tag-del';
+    del.textContent = '🗑';
+    del.title = 'delete tag';
+    del.addEventListener('click', async () => {
+      if (confirm('Delete tag "' + id + '"? It will be removed from all assets.')) { await apiTag('DELETE', { id }); reset(); }
+    });
+    row.append(color, name, del);
+    return row;
+  },
+};
+tagFilter.init();
+
+document.addEventListener('click', () => { closeTagMenu(); tagFilter.setOpen(false); });
+
 // ---- cards ----
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
@@ -208,6 +496,27 @@ function card(a) {
     });
   });
   thumb.appendChild(copy);
+
+  // Tag affordances: a colored sliver strip (one per tag) along the bottom edge so
+  // it never covers the preview, and a hover add button. Both are CSS-gated on
+  // body.tags-on; the add button also hides when the asset has no fingerprint.
+  const bar = document.createElement('div');
+  bar.className = 'sliver-bar';
+  renderSlivers(bar, a);
+  thumb.appendChild(bar);
+  a._rerender = () => renderSlivers(bar, a);
+
+  const tagBtn = document.createElement('button');
+  tagBtn.type = 'button';
+  tagBtn.className = 'tag-add';
+  tagBtn.innerHTML = TAG_SVG;
+  tagBtn.title = 'tags';
+  if (!hasFingerprints(a)) tagBtn.classList.add('nofp');
+  tagBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openTagMenu(tagBtn, a, () => renderSlivers(bar, a));
+  });
+  thumb.appendChild(tagBtn);
 
   const name = document.createElement('div');
   name.className = 'name';
@@ -631,6 +940,7 @@ const lb = {
   view: document.getElementById('lb-view'),
   name: document.getElementById('lb-name'),
   fields: document.getElementById('lb-fields'),
+  tags: document.getElementById('lb-tags'),
   character: document.getElementById('lb-character'),
   copies: document.getElementById('lb-copies'),
 };
@@ -653,6 +963,7 @@ function openLightbox(a) {
     probe.src = contentURL(a.id);
   }
   lb.character.replaceChildren(); // the viewer fills this for clip-only animations
+  renderLbTags(a);
   renderCopies(a);
 
   lb.view.replaceChildren();
@@ -668,6 +979,74 @@ function openLightbox(a) {
     lb.view.appendChild(iconEl(a.category));
   }
   lb.root.hidden = false;
+}
+
+// renderLbTags shows the card's tags as colored chips (each recolorable and
+// removable) with an add control, all targeting the card's whole fingerprint set.
+// Hidden entirely when tagging is disabled.
+function renderLbTags(a) {
+  lb.tags.replaceChildren();
+  lb.tags.hidden = !tagState.enabled;
+  if (!tagState.enabled) return;
+
+  const head = document.createElement('div');
+  head.className = 'lb-tags-head';
+  const heading = document.createElement('span');
+  heading.textContent = 'Tags';
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'lb-tag-add';
+  add.textContent = '+ add';
+  if (hasFingerprints(a)) {
+    add.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openTagMenu(add, a, () => { renderLbTags(a); a._rerender && a._rerender(); });
+    });
+  } else {
+    add.disabled = true;
+    add.title = 'this asset has no content fingerprint, so it cannot be tagged';
+  }
+  head.append(heading, add);
+
+  const chips = document.createElement('div');
+  chips.className = 'tag-chips';
+  for (const id of (a.tags || [])) chips.appendChild(lbTagChip(a, id));
+
+  lb.tags.append(head, chips);
+}
+
+function lbTagChip(a, id) {
+  const chip = document.createElement('span');
+  chip.className = 'tag-chip';
+  chip.dataset.tag = id;
+  chip.style.setProperty('--tc', tagColor(id));
+
+  const color = document.createElement('input');
+  color.type = 'color';
+  color.className = 'tag-chip-color';
+  color.value = hex6(tagColor(id));
+  color.title = 'change color';
+  color.addEventListener('click', (e) => e.stopPropagation());
+  color.addEventListener('change', () => apiTag('PATCH', { id, color: color.value }));
+
+  const label = document.createElement('span');
+  label.className = 'tag-chip-label';
+  label.textContent = id;
+
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'tag-chip-x';
+  x.textContent = '×';
+  x.title = 'remove tag';
+  x.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    a.tags = await apiAssign(a.fingerprints, id, false);
+    renderLbTags(a);
+    a._rerender && a._rerender();
+  });
+
+  chip.append(color, label, x);
+  return chip;
 }
 
 // renderCopies lists where the file lives — one row for a unique file, or every
@@ -1024,4 +1403,5 @@ new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting)) fetchPage();
 }, { rootMargin: '600px' }).observe(els.sentinel);
 
+loadPalette();
 fetchPage();
