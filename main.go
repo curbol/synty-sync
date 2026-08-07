@@ -61,6 +61,7 @@ func run(args []string) error {
 	addr := fs.String("addr", "localhost:8788", "browse: server address (host:port)")
 	reindex := fs.Bool("reindex", false, "browse: rebuild the asset index from scratch")
 	browseCache := fs.String("cache", "", "browse: cache dir for the index and unpacked archives (default: $XDG_CACHE_HOME/synty-sync)")
+	tagsFlag := fs.String("tags", "", "browse: tag store path (default: synty-sync.tags.toml beside the discovered manifest)")
 	switch cmd {
 	case "status", "sync", "list", "select", "browse", "update", "version", "-h", "--help", "help", "--version", "-v":
 	default:
@@ -99,10 +100,11 @@ func run(args []string) error {
 	}
 
 	// browse is a standalone read-only server over the local library: it needs no
-	// customer id, cookie, manifest, or lockfile, so it branches before manifest
-	// resolution (which errors when no synty-sync.toml is discoverable).
+	// customer id, cookie, or lockfile, so it branches before the manifest is
+	// required. It still discovers the manifest best-effort to locate the tag store
+	// (tagging stays off when none is found).
 	if cmd == "browse" {
-		return browseAssets(cfg, *root, *addr, *browseCache, *reindex)
+		return browseAssets(cfg, *root, *addr, *browseCache, *reindex, resolveTagsPath(*tagsFlag, *manifestFlag))
 	}
 
 	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
@@ -222,10 +224,30 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	return nil
 }
 
+// resolveTagsPath locates the browse tag store: an explicit --tags wins; otherwise
+// it is the synty-sync.tags.toml beside the manifest (an explicit --manifest, or one
+// discovered by walking up from cwd). Returns "" when no manifest neighborhood
+// exists, which leaves tagging disabled — browse never requires a manifest.
+func resolveTagsPath(tagsFlag, manifestFlag string) string {
+	if tagsFlag != "" {
+		return tagsFlag
+	}
+	if manifestFlag != "" {
+		return manifest.TagsPath(manifestFlag)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		if p, ok := manifest.Discover(wd); ok {
+			return manifest.TagsPath(p)
+		}
+	}
+	return ""
+}
+
 // browseAssets indexes the asset library and serves the browse UI. The scan root
 // resolves as --root > browse_root/SYNTY_BROWSE_ROOT > the library dir, so browsing
 // a broader tree (e.g. all vendors) just needs browse_root set or --root passed.
-func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool) error {
+// tagsPath is the resolved tag store ("" disables tagging).
+func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool, tagsPath string) error {
 	if root == "" {
 		root = cfg.BrowseRoot
 	}
@@ -240,9 +262,12 @@ func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool)
 	if err != nil {
 		return fmt.Errorf("build asset index: %w", err)
 	}
+	if tagsPath == "" {
+		fmt.Fprintln(os.Stderr, "tags: disabled (no synty-sync.toml found; run from your project or pass --tags/--manifest)")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return browse.Serve(ctx, addr, ix)
+	return browse.Serve(ctx, addr, ix, tagsPath)
 }
 
 func printVersion() {

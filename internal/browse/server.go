@@ -15,8 +15,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/curbol/synty-sync/internal/assetindex"
+	"github.com/curbol/synty-sync/internal/tagstore"
 	"github.com/curbol/synty-sync/internal/web"
 )
 
@@ -30,6 +32,13 @@ type server struct {
 	ix     *assetindex.Index
 	facets facets
 	static http.Handler
+
+	// Tagging is enabled only when a tag-store path was resolved (a project
+	// manifest neighborhood exists). tagsMu guards every access to store.
+	tagsEnabled bool
+	tagsPath    string
+	tagsMu      sync.RWMutex
+	store       *tagstore.Store
 }
 
 type facets struct {
@@ -60,28 +69,37 @@ type assetDTO struct {
 	Thumb    string    `json:"thumb"`
 	Count    int       `json:"count"`
 	Copies   []copyDTO `json:"copies"`
+	// Fingerprints are the group's distinct content identities; tag operations on
+	// the card target this whole set. Tags is the union of tag ids over them.
+	Fingerprints []string `json:"fingerprints"`
+	Tags         []string `json:"tags"`
 }
 
 // copyDTO is one occurrence of an asset (its variant/pack and the path to copy).
 type copyDTO struct {
-	ID       string `json:"id"`
-	Variant  string `json:"variant"`
-	Vendor   string `json:"vendor"`
-	Pack     string `json:"pack"`
-	CopyPath string `json:"copyPath"`
+	ID          string `json:"id"`
+	Variant     string `json:"variant"`
+	Vendor      string `json:"vendor"`
+	Pack        string `json:"pack"`
+	CopyPath    string `json:"copyPath"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 func copyOf(a assetindex.Asset) copyDTO {
-	return copyDTO{ID: a.ID, Variant: a.Variant, Vendor: a.Vendor, Pack: a.Pack, CopyPath: a.CopyPath}
+	return copyDTO{ID: a.ID, Variant: a.Variant, Vendor: a.Vendor, Pack: a.Pack, CopyPath: a.CopyPath, Fingerprint: a.Fingerprint}
 }
 
 func toDTO(a assetindex.Asset) assetDTO {
-	return assetDTO{
+	d := assetDTO{
 		ID: a.ID, Name: a.Name, RelPath: a.RelPath, CopyPath: a.CopyPath,
 		Category: string(a.Category), Ext: a.Ext, Vendor: a.Vendor, Pack: a.Pack,
 		Variant: a.Variant, Size: a.Size, Thumb: string(a.Thumb),
 		Count: 1, Copies: []copyDTO{copyOf(a)},
 	}
+	if a.Fingerprint != "" {
+		d.Fingerprints = []string{a.Fingerprint}
+	}
+	return d
 }
 
 // thumbRank ranks thumbnail kinds so a group picks the copy with the best preview
@@ -98,13 +116,21 @@ func thumbRank(t assetindex.ThumbKind) int {
 	return 0
 }
 
-// newServer wires an index and its precomputed facets to the embedded frontend.
-func newServer(ix *assetindex.Index) (*server, error) {
+// newServer wires an index, its precomputed facets, and the tag store to the
+// embedded frontend. tagsPath is "" when no manifest neighborhood was found, which
+// disables tagging (the UI still browses read-only). A nil store is treated as empty.
+func newServer(ix *assetindex.Index, store *tagstore.Store, tagsPath string) (*server, error) {
 	static, err := fs.Sub(assetsFS, "assets")
 	if err != nil {
 		return nil, err
 	}
-	return &server{ix: ix, facets: buildFacets(ix), static: http.FileServerFS(static)}, nil
+	if store == nil {
+		store = tagstore.New()
+	}
+	return &server{
+		ix: ix, facets: buildFacets(ix), static: http.FileServerFS(static),
+		tagsEnabled: tagsPath != "", tagsPath: tagsPath, store: store,
+	}, nil
 }
 
 // handler builds the route mux; shared by Serve and tests.
@@ -115,12 +141,26 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/assets", s.handleAssets)
 	mux.HandleFunc("/api/content", s.handleContent)
 	mux.HandleFunc("/api/thumb", s.handleThumb)
+	mux.HandleFunc("GET /api/tags", s.handleTags)
+	mux.HandleFunc("POST /api/tags", s.handleTagCreate)
+	mux.HandleFunc("PATCH /api/tags", s.handleTagPatch)
+	mux.HandleFunc("DELETE /api/tags", s.handleTagDelete)
+	mux.HandleFunc("POST /api/assign", s.handleAssign)
 	return mux
 }
 
-// Serve runs the browse UI at addr until ctx is cancelled (Ctrl-C).
-func Serve(ctx context.Context, addr string, ix *assetindex.Index) error {
-	s, err := newServer(ix)
+// Serve runs the browse UI at addr until ctx is cancelled (Ctrl-C). tagsPath, when
+// non-empty, is the committed tag store loaded and written as tags change.
+func Serve(ctx context.Context, addr string, ix *assetindex.Index, tagsPath string) error {
+	store := tagstore.New()
+	if tagsPath != "" {
+		loaded, err := tagstore.Load(tagsPath)
+		if err != nil {
+			return fmt.Errorf("load tags %s: %w", tagsPath, err)
+		}
+		store = loaded
+	}
+	s, err := newServer(ix, store, tagsPath)
 	if err != nil {
 		return err
 	}
@@ -133,6 +173,9 @@ func Serve(ctx context.Context, addr string, ix *assetindex.Index) error {
 	go srv.Serve(ln)
 	url := "http://" + ln.Addr().String()
 	fmt.Printf("browse %d assets at %s  (Ctrl-C to stop)\n", len(ix.Assets), url)
+	if s.tagsEnabled {
+		fmt.Printf("tags: %s\n", tagsPath)
+	}
 	web.OpenBrowser(url)
 
 	<-ctx.Done()
@@ -194,6 +237,11 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 			grouped[i] = toDTO(a)
 		}
 	}
+	// Resolve each card's tags (the union over its fingerprints) and then filter by
+	// the requested tags, so a card matches on its whole tag set. The count/total
+	// below reflect the post-filter result set.
+	s.resolveTags(grouped)
+	grouped = filterByTags(grouped, query["tag"], query.Get("tagmode"))
 	sortItems(grouped, query.Get("sort"))
 
 	total := len(grouped)
@@ -268,11 +316,26 @@ func groupItems(assets []assetindex.Asset) []assetDTO {
 		d := toDTO(g.rep)
 		d.Count = len(g.copies)
 		d.Copies = make([]copyDTO, len(g.copies))
+		fps := map[string]bool{}
 		for i, c := range g.copies {
 			d.Copies[i] = copyOf(c)
+			if c.Fingerprint != "" {
+				fps[c.Fingerprint] = true
+			}
 		}
+		d.Fingerprints = sortedSet(fps)
 		out = append(out, d)
 	}
+	return out
+}
+
+// sortedSet returns the set's keys sorted.
+func sortedSet(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 

@@ -84,7 +84,7 @@ func testServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := newServer(ix)
+	s, err := newServer(ix, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestGroupDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer(ix)
+	s, _ := newServer(ix, nil, "")
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 
@@ -330,7 +330,7 @@ func TestGroupNameVariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer(ix)
+	s, _ := newServer(ix, nil, "")
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 
