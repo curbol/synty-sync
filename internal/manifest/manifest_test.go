@@ -131,3 +131,16 @@ func TestLockPath(t *testing.T) {
 		}
 	}
 }
+
+func TestTagsPath(t *testing.T) {
+	cases := map[string]string{
+		filepath.Join("proj", "synty-sync.toml"): filepath.Join("proj", "synty-sync.tags.toml"),
+		"synty-sync.toml":                        "synty-sync.tags.toml",
+		"foo.toml":                               "foo.tags.toml",
+	}
+	for in, want := range cases {
+		if got := TagsPath(in); got != want {
+			t.Errorf("TagsPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

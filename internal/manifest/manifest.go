@@ -57,6 +57,12 @@ func LockPath(manifestPath string) string {
 	return strings.TrimSuffix(manifestPath, ".toml") + ".lock.json"
 }
 
+// TagsPath returns the tag-store path paired with a manifest: the manifest path with
+// its .toml suffix replaced by .tags.toml (synty-sync.toml -> synty-sync.tags.toml).
+func TagsPath(manifestPath string) string {
+	return strings.TrimSuffix(manifestPath, ".toml") + ".tags.toml"
+}
+
 // Filter returns a predicate selecting variants whose token matches any of the
 // manifest's include globs.
 func (m Manifest) Filter() func(model.Variant) bool {
