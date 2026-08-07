@@ -165,9 +165,9 @@ func TestSaveIsSortedAndDeterministic(t *testing.T) {
 	if strings.Index(text, "fp-a") > strings.Index(text, "fp-b") {
 		t.Errorf("assignments not sorted by fingerprint:\n%s", text)
 	}
-	// Each assignment's tags sorted: alpha before zebra within fp-a.
-	if strings.Index(text, `"alpha"`) > strings.Index(text, `"zebra", "alpha"`)+1 && strings.Contains(text, `"zebra", "alpha"`) {
-		t.Errorf("assignment tags not sorted:\n%s", text)
+	// Each assignment's tags are sorted: fp-a lists alpha before zebra.
+	if !strings.Contains(text, `tags = ["alpha", "zebra"]`) {
+		t.Errorf("assignment tags not sorted (want [\"alpha\", \"zebra\"]):\n%s", text)
 	}
 	// Deterministic: a second save of an equivalently-built store is byte-identical.
 	path2 := filepath.Join(dir, "second-"+FileName)

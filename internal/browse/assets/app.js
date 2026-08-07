@@ -185,11 +185,14 @@ async function loadPalette() {
 
 // apiAssign toggles a tag across a card's whole fingerprint set and returns the
 // resulting union of tag ids for that set.
+// apiAssign returns the set's resulting union tags, or null on failure so a caller
+// leaves the card's displayed tags untouched rather than wiping them.
 async function apiAssign(fingerprints, tag, on) {
   const res = await fetch('/api/assign', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fingerprints, tag, on }),
   });
+  if (!res.ok) return null;
   const data = await res.json();
   applyPalette(data.palette);
   return data.tags || [];
@@ -203,10 +206,11 @@ async function apiTag(method, body) {
   applyPalette(await res.json());
 }
 
-// restyleTags repaints every rendered sliver and chip after a recolor.
+// restyleTags repaints every rendered sliver, chip, and filter dot after a recolor.
 function restyleTags() {
   for (const s of document.querySelectorAll('.sliver[data-tag]')) s.style.background = tagColor(s.dataset.tag);
   for (const c of document.querySelectorAll('.tag-chip[data-tag]')) c.style.setProperty('--tc', tagColor(c.dataset.tag));
+  for (const d of document.querySelectorAll('.tag-dot[data-tag]')) d.style.background = tagColor(d.dataset.tag);
 }
 
 // renderSlivers fills a card's tag strip: one colored segment per tag (no text) plus
@@ -269,7 +273,9 @@ function openTagMenu(anchor, a, onChange) {
       cb.type = 'checkbox';
       cb.checked = have.has(id);
       cb.addEventListener('change', async () => {
-        a.tags = await apiAssign(a.fingerprints, id, cb.checked);
+        const t = await apiAssign(a.fingerprints, id, cb.checked);
+        if (t === null) { cb.checked = !cb.checked; return; }
+        a.tags = t;
         onChange();
       });
       const dot = document.createElement('span');
@@ -293,7 +299,8 @@ function openTagMenu(anchor, a, onChange) {
     const name = input.value.trim();
     if (!name) return;
     input.value = '';
-    a.tags = await apiAssign(a.fingerprints, name, true);
+    const t = await apiAssign(a.fingerprints, name, true);
+    if (t !== null) a.tags = t;
     rebuild();
     onChange();
   });
@@ -398,6 +405,7 @@ const tagFilter = {
     });
     const dot = document.createElement('span');
     dot.className = 'tag-dot';
+    dot.dataset.tag = id;
     dot.style.background = tagColor(id);
     const text = document.createElement('span');
     text.className = 'ms-opt-label';
@@ -1043,7 +1051,9 @@ function lbTagChip(a, id) {
   x.title = 'remove tag';
   x.addEventListener('click', async (e) => {
     e.stopPropagation();
-    a.tags = await apiAssign(a.fingerprints, id, false);
+    const t = await apiAssign(a.fingerprints, id, false);
+    if (t === null) return;
+    a.tags = t;
     renderLbTags(a);
     a._rerender && a._rerender();
   });
