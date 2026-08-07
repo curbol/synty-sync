@@ -117,6 +117,25 @@ The same file shipped across engine variants or bundled in several packs collaps
 into one card (a `×N` badge); the enlarged view lists every copy's path with a
 copy-all. Toggle "group dupes" off to see each occurrence separately.
 
+### Tagging
+
+Tag assets to organize the library your way. Hover a card and hit the tag button to
+assign existing tags or type a new one (created on the spot with a random color); the
+enlarged view has the same controls plus a color swatch on each tag. Tagged assets
+show a thin colored sliver per tag along the card's bottom edge, and the header **tags**
+filter narrows the grid to the tags you pick, with an **ANY / ALL** toggle (match any
+selected tag, or only assets carrying all of them) and a **manage** mode to rename,
+recolor, or delete tags. A tag is just a label; `key:value` labels (e.g. `biome:forest`)
+are a convention, not enforced.
+
+Tags live in `synty-sync.tags.toml` beside the project manifest, committed to the
+consuming project so they travel with it and diff cleanly. They key on each asset's
+**content**, so a tag follows the file across packs and survives a `sync` — an unchanged
+file keeps its tags, and a file Synty re-exports starts fresh. Tagging needs a project
+manifest to sit next to (discovered by walking up from the working directory, or
+`--tags <path>` / `--manifest <path>`); with no manifest found, browse still runs and
+the tag controls are simply hidden.
+
 Animated models play in the viewer with a scrub bar and clip selector. A mesh-less
 animation clip (Synty `ANIMATION_*` packs, kevdev, etc.) plays on a character whose
 rig it matches, auto-picked from the same vendor's library assets. Use "change" to
@@ -143,8 +162,11 @@ duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its
 locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixel
 `width` / `height` for images, and every duplicate copy. `?guid=` resolves a scene or
 prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
-extraction is one request rather than tar-scraping the archive. `GET /api/content?id=`
-streams an asset's bytes and `GET /api/thumb?id=` its Unity preview.
+extraction is one request rather than tar-scraping the archive. Each asset also carries
+its content `fingerprints` and current `tags`. `GET /api/content?id=` streams an asset's
+bytes and `GET /api/thumb?id=` its Unity preview. When tagging is enabled, `GET /api/tags`
+returns the palette, `POST/PATCH/DELETE /api/tags` create/rename/recolor/delete a tag, and
+`POST /api/assign` toggles a tag across an asset's fingerprint set.
 
 ## Selecting packs
 

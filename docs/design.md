@@ -220,6 +220,35 @@ the project-scoped settings: `variant_includes` and the `[[pack]]` allowlist. Th
 schema has no account field, so no account PII can be committed through it. Machine paths also
 via env (`SYNTY_LIBRARY`).
 
+## Tag store
+
+`synty-sync.tags.toml`, a third project-scoped file committed beside the manifest and
+lockfile (discovered the same way; `--tags` / `--manifest` override), records user tags for
+the `browse` UI. It holds a palette of `[[tag]]` definitions (`id` = the label text, which is
+its identity; `color` = `#rrggbb`) and `[[assignment]]` rows mapping a content **fingerprint**
+to its tag ids, both sorted for minimal diffs:
+
+```toml
+[[tag]]
+  id = "hero"
+  color = "#e11d48"
+[[assignment]]
+  fingerprint = "crc32:1a2b3c4d:41700000"
+  tags = ["biome:forest", "hero"]
+```
+
+Assignments key on an asset's content, not its location or the browse `id` (which embeds a
+machine-absolute path and a version-bearing archive name, so it is neither portable nor stable
+across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries and loose files (the
+CRC is free from the zip central directory) and `uguid:<guid>` for unitypackage entries (Unity's
+stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag set once
+applies to every copy and survives a `sync` for unchanged files. The store never prunes to a
+currently-scanned set: assignments for fingerprints outside the current view are preserved, so
+tags survive a disabled pack, a narrowed `--root`, or another machine. `browse` is otherwise
+read-only; this is its one write surface, guarded by a mutex and written atomically. Tagging is
+disabled (the UI hides it) when no manifest neighborhood is found, so `browse` still needs no
+manifest.
+
 ## Testing
 
 - The two real portal pages already captured are checked in as parser fixtures (with the

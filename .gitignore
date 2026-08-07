@@ -6,11 +6,13 @@ session.curl
 *.curl
 cookies.txt
 
-# A project manifest and its lockfile belong with the consuming project, not this tool
-# repo; ignored here defensively so running the tool from this directory never commits
-# them (the committed synty-sync.example.toml is not matched by the exact name).
+# A project manifest, its lockfile, and its tag store belong with the consuming
+# project, not this tool repo; ignored here defensively so running the tool from this
+# directory never commits them (the committed synty-sync.example.toml is not matched
+# by the exact name).
 synty-sync.toml
 synty-sync.lock.json
+synty-sync.tags.toml
 
 # Built binary.
 /synty-sync

@@ -73,7 +73,15 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   asset's bytes and thumbnail on demand. HTTP-free — the `browse` server queries it.
 - `browse` — serves the `browse` web UI to search and preview the library, querying an
   `assetindex.Index` and streaming asset bytes and thumbnails (three.js 3D previews,
-  copy-path). Read-only over the local library; no session.
+  copy-path). Read-only over the local library except for asset tagging, its one write
+  surface (see `tagstore`); no session. It discovers the project manifest (best-effort,
+  never required) only to locate the tag store beside it.
+- `tagstore` — `synty-sync.tags.toml`, a committed project file beside the manifest: a
+  palette of user tags (label + color) and per-asset **assignments keyed by content
+  fingerprint** (see the invariant below). Pure model + atomic, sorted TOML IO like
+  `manifest`; the `browse` server loads it, mutates it under a mutex, and re-saves on each
+  tag change. Rename onto an existing tag merges; the store never prunes assignments to a
+  scanned set, so tags survive a resync / another machine.
 - `selfupdate` — the `update` subcommand: fetches a GitHub release, downloads the
   current-platform binary, and atomically replaces the running executable. The repo is
   private, so it resolves a token from `GITHUB_TOKEN` / `GH_TOKEN` / the `gh` CLI.
@@ -90,10 +98,16 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
+- **Tags key on content, not the browse `id`.** `Asset.Fingerprint`
+  (`crc32:<hex>:<size>` for zip/loose, `uguid:<guid>` for unitypackage) is the tag identity;
+  it is portable and stable across updates, unlike `Asset.ID` (a machine-absolute,
+  version-bearing locator hash used only to serve bytes). Bump `assetindex.indexVersion` when
+  the fingerprint scheme or any indexed field changes so stale caches rebuild.
 - **No PII in the repo.** The customer id, emails, cookies, and session captures
   (`config.toml`, `*.curl`, `cookies.txt`) live in the config dir outside this repo. The
-  project manifest and lockfile (`synty-sync.toml`, `synty-sync.lock.json`) belong with the
-  consuming project and are gitignored here defensively. The `internal/fixtures` guard test
+  project manifest, lockfile, and tag store (`synty-sync.toml`, `synty-sync.lock.json`,
+  `synty-sync.tags.toml`) belong with the consuming project and are gitignored here
+  defensively. The `internal/fixtures` guard test
   fails the build if real PII leaks into committed `testdata/`. Never commit these or
   hard-code a customer id / paths.
 
