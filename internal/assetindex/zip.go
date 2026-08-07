@@ -40,13 +40,20 @@ func zipAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset, 
 			continue
 		}
 		src := Source{Kind: SourceZip, ArchivePath: archivePath, Entry: f.Name}
-		assets = append(assets, newAsset(src,
+		a := newAsset(src,
 			path.Base(f.Name),
 			archiveRel(displayRel, f.Name),
 			vendor, pack, variant,
 			int64(f.UncompressedSize64),
 			crcFingerprint(f.CRC32, int64(f.UncompressedSize64)),
-		))
+		)
+		if isDimExt(a.Ext) {
+			if rc, err := f.Open(); err == nil {
+				a.Width, a.Height = imageDims(readHead(rc), a.Ext)
+				rc.Close()
+			}
+		}
+		assets = append(assets, a)
 	}
 	return assets, nil
 }

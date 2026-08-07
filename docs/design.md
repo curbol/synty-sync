@@ -72,6 +72,9 @@ synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # enumerate + diff, print what would change. No downloads.
 synty-sync sync     # status, then download the delta, verify, rewrite the lockfile.
 synty-sync list     # print the current lockfile as a readable table.
+synty-sync browse   # local web UI to search and preview the mirrored library.
+synty-sync update   # self-replace the running binary from the latest GitHub release.
+synty-sync version  # print the installed version.
 ```
 
 Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
@@ -85,7 +88,7 @@ source), `--only <pack-glob>`, `--dry-run` (alias of `status` semantics on `sync
 1. Load session            -> Cookie header for syntystore.com
 2. Enumerate library       -> walk line_items_page until empty; collect pack item URLs
 3. Read each item page     -> [{pack, variant, version, sizeBytes, fileId, orderId, orderItemId}]
-4. Apply variant filter    -> keep wanted variants (default: Godot_*, SourceFiles)
+4. Apply variant filter    -> keep variants matching variant_includes (no default; set in the manifest)
 5. Diff vs lockfile        -> new | changed (version differs) | unchanged
 6. Download delta          -> 302 -> CloudFront -> temp file -> sha256 -> atomic rename
 7. Rewrite lockfile        -> current version/sha per (pack, variant); print summary

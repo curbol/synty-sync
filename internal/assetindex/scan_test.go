@@ -95,6 +95,49 @@ func byName(assets []Asset) map[string][]Asset {
 	return m
 }
 
+func TestScanImageDimensions(t *testing.T) {
+	root := t.TempDir()
+	mk := func(parts ...string) string {
+		p := filepath.Join(append([]string{root}, parts...)...)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		return p
+	}
+
+	// A loose png, a png inside a zip, and a png inside a unitypackage — each a
+	// distinct size so the source can't be confused. The unitypackage helper writes
+	// pathname before asset (the reverse of real Unity order), so a pass here proves
+	// dimension recovery is order-independent.
+	os.WriteFile(mk("v", "P", "Loose.png"), encodePNG(t, 12, 5), 0o644)
+	writeZip(t, mk("v", "P", "P_SourceFiles_v3.zip"), map[string]string{
+		"SourceFiles/Zipped.png": string(encodePNG(t, 7, 9)),
+		"SourceFiles/Model.fbx":  "FBXNOTPNG",
+	})
+	writeUnityPackage(t, mk("v", "P", "P_Unity_2022_3_v1_0_0.unitypackage"), []unityGUID{
+		{guid: "aaa", pathname: "Assets/P/Packed.png", asset: string(encodePNG(t, 3, 4))},
+	})
+
+	assets, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := byName(assets)
+
+	want := map[string][2]int{"Loose.png": {12, 5}, "Zipped.png": {7, 9}, "Packed.png": {3, 4}}
+	for name, wh := range want {
+		got := idx[name]
+		if len(got) != 1 {
+			t.Fatalf("%s count = %d, want 1", name, len(got))
+		}
+		if got[0].Width != wh[0] || got[0].Height != wh[1] {
+			t.Errorf("%s dims = %dx%d, want %dx%d", name, got[0].Width, got[0].Height, wh[0], wh[1])
+		}
+	}
+	// A non-image entry carries no dimensions.
+	if m := idx["Model.fbx"]; len(m) != 1 || m[0].Width != 0 || m[0].Height != 0 {
+		t.Errorf("Model.fbx dims = %dx%d, want 0x0", m[0].Width, m[0].Height)
+	}
+}
+
 func TestScanFixtureLibrary(t *testing.T) {
 	root := t.TempDir()
 	mk := func(parts ...string) string {

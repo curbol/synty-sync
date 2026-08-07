@@ -1,7 +1,9 @@
 package assetindex
 
 import (
+	"io"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -112,10 +114,25 @@ func enumerateArchive(e libEntry) ([]Asset, error) {
 }
 
 // looseAsset builds the single asset for a loose file entry, reading the file to
-// compute its content fingerprint. Build/Refresh reuse a cached loose asset via
-// LoosePrint so this read only happens for new or changed files.
+// compute its content fingerprint and, for an image, its pixel dimensions.
+// Build/Refresh reuse a cached loose asset via LoosePrint so these reads only
+// happen for new or changed files.
 func looseAsset(e libEntry) Asset {
-	return newAsset(Source{Kind: SourceLoose, FilePath: e.path}, e.name, e.rel, e.vendor, e.pack, "", e.size, looseFingerprint(e.path))
+	a := newAsset(Source{Kind: SourceLoose, FilePath: e.path}, e.name, e.rel, e.vendor, e.pack, "", e.size, looseFingerprint(e.path))
+	if isDimExt(a.Ext) {
+		if f, err := os.Open(e.path); err == nil {
+			a.Width, a.Height = imageDims(readHead(f), a.Ext)
+			f.Close()
+		}
+	}
+	return a
+}
+
+// readHead reads up to dimsHeadBytes from r, enough to recover an image's
+// dimensions without pulling a whole file into memory.
+func readHead(r io.Reader) []byte {
+	head, _ := io.ReadAll(io.LimitReader(r, dimsHeadBytes))
+	return head
 }
 
 // Scan walks the library root and returns every browseable asset: loose files and
