@@ -253,17 +253,28 @@ function openTagMenu(anchor, a, onChange) {
   const menu = document.createElement('div');
   menu.className = 'tag-menu';
   menu.addEventListener('click', (e) => e.stopPropagation());
+
+  const input = document.createElement('input');
+  input.className = 'tag-menu-new';
+  input.type = 'text';
+  input.placeholder = 'Search or add a tag…';
+
   const list = document.createElement('div');
   list.className = 'tag-menu-list';
 
   const rebuild = () => {
     list.replaceChildren();
     const have = new Set(a.tags || []);
-    const ids = [...tagState.colors.keys()].sort((x, y) => x.localeCompare(y));
+    const q = input.value.trim().toLowerCase();
+    const ids = [...tagState.colors.keys()]
+      .filter((id) => !q || id.toLowerCase().includes(q))
+      .sort((x, y) => x.localeCompare(y));
     if (ids.length === 0) {
       const hint = document.createElement('div');
       hint.className = 'tag-menu-empty';
-      hint.textContent = 'No tags yet — type one below.';
+      hint.textContent = q
+        ? 'Enter to create "' + input.value.trim() + '"'
+        : (tagState.colors.size ? 'No matches.' : 'No tags yet. Type to create one.');
       list.appendChild(hint);
     }
     for (const id of ids) {
@@ -290,10 +301,7 @@ function openTagMenu(anchor, a, onChange) {
   };
   rebuild();
 
-  const input = document.createElement('input');
-  input.className = 'tag-menu-new';
-  input.type = 'text';
-  input.placeholder = 'new tag (e.g. hero, biome:forest)…';
+  input.addEventListener('input', rebuild);
   input.addEventListener('keydown', async (e) => {
     if (e.key !== 'Enter') return;
     const name = input.value.trim();
@@ -305,7 +313,7 @@ function openTagMenu(anchor, a, onChange) {
     onChange();
   });
 
-  menu.append(list, input);
+  menu.append(input, list);
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
   menu.style.top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8) + 'px';

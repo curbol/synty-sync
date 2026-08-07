@@ -442,21 +442,21 @@ body.tags-on .tag-add.nofp { display: none; }
   position: fixed;
   z-index: 40;
   width: 230px;
-  max-height: 320px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--edge-hi);
   border-radius: 10px;
   padding: 6px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
 }
-.tag-menu-list { display: flex; flex-direction: column; }
+.tag-menu-list { display: flex; flex-direction: column; max-height: 260px; overflow: auto; }
 .tag-menu-opt { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
 .tag-menu-opt:hover { background: var(--edge); }
 .tag-menu-opt input { flex: none; margin: 0; accent-color: var(--accent); }
 .tag-menu-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-menu-empty { color: var(--muted); font-size: 12px; padding: 6px; }
-.tag-menu-new { width: 100%; box-sizing: border-box; margin-top: 6px; background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+.tag-menu-new { width: 100%; box-sizing: border-box; margin-bottom: 6px; background: var(--bg); border: 1px solid var(--edge); color: var(--text); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
 .tag-menu-new:focus { outline: none; border-color: var(--accent); }
 
 /* Lightbox tag chips. --tc is the tag color, set per chip and repainted on recolor. */
