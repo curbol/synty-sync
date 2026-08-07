@@ -26,18 +26,19 @@ suite is fully offline (no network, no real session): portal tests run against
 
 ## Architecture
 
-A subcommand CLI. `main.go` `run()` parses flags, resolves config → session cookie →
-`portal.Client`, then dispatches. Four subcommands: `select`, `status`, `sync`, `list`.
-`status` is `sync` with `DryRun` (classify only, no downloads, no lockfile write) — both
-go through `syncer.Run`.
+A subcommand CLI. `main.go` `run()` parses flags and dispatches seven subcommands:
+`select`, `status`, `sync`, `list`, `browse`, `update`, `version`. `select`/`status`/`sync`
+resolve config → session cookie → `portal.Client`; `list` needs only the lockfile; `browse`
+needs only config (a read-only server over the local library); `update` and `version` need
+neither. `status` is `sync` with `DryRun` (classify only, no downloads, no lockfile write) —
+both go through `syncer.Run`.
 
 Layered `internal/` packages, each with a package doc comment stating its contract:
 
 - `config` — resolves settings by precedence: built-in defaults → `config.toml` → env
   (`SYNTY_CUSTOMER_ID`, `SYNTY_LIBRARY`) → flags. Config/state dir is XDG-resolved
   (`ResolveDir`); library cache dir defaults to `$XDG_DATA_HOME/synty-sync`. No
-  machine-specific path is baked in. There is **no default engine variant** — the user
-  must set `variant_includes`.
+  machine-specific path is baked in.
 - `session` — builds the syntystore.com `Cookie` header from a Gecko browser cookie DB
   (Firefox or Zen, the zero-paste default), a `cookies.txt`, or a pasted-curl file.
   Forwards every syntystore.com cookie rather than guessing the session one.
@@ -57,13 +58,25 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `cache` — the local mirror, keyed by **file identity, not owning pack**, so a file
   bundled across packs is stored once. Atomic temp-file + sha256 write (`Store`);
   `Verify`/`Exists`/`Hash`/`Remove`; `Migrate` folds pre-existing flat zips into the layout.
-- `lockfile` — `synty-library.lock.json`: the authoritative record of owned packs,
-  versions, checksums, and which files are downloaded. Stable formatting for minimal diffs.
-- `manifest` — `packs.toml`, the pack-selection allowlist. New packs land **disabled**
-  (opt-in), so buying a pack never silently downloads it. `sync`/`status` act only on
-  enabled packs.
+- `lockfile` — `synty-sync.lock.json` (beside the manifest, committed with the consuming
+  project): the authoritative record of owned packs, versions, checksums, and which files
+  are downloaded. Stable formatting for minimal diffs.
+- `manifest` — `synty-sync.toml`, the committed project manifest (discovered by walking up
+  from cwd, lives with the consuming project, carries no account identity): the engine
+  `variant_includes` filter (no default — the user must set it) plus the pack-selection
+  allowlist. New packs land **disabled** (opt-in), so buying a pack never silently downloads
+  it. `sync`/`status` act only on enabled packs.
 - `web` — serves the local pack-selection page for `select` (checkbox grid, returns the
   chosen set).
+- `assetindex` — scans the local library into a searchable index of individual assets,
+  seeing inside `.zip` and `.unitypackage` archives as well as loose files; serves each
+  asset's bytes and thumbnail on demand. HTTP-free — the `browse` server queries it.
+- `browse` — serves the `browse` web UI to search and preview the library, querying an
+  `assetindex.Index` and streaming asset bytes and thumbnails (three.js 3D previews,
+  copy-path). Read-only over the local library; no session.
+- `selfupdate` — the `update` subcommand: fetches a GitHub release, downloads the
+  current-platform binary, and atomically replaces the running executable. The repo is
+  private, so it resolves a token from `GITHUB_TOKEN` / `GH_TOKEN` / the `gh` CLI.
 - `fixtures` + `cmd/scrubfixtures` — regenerate PII-free `testdata/` from git-excluded raw
   captures via an ordered replacement map.
 
@@ -77,11 +90,12 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
-- **No PII in the repo.** The customer id, emails, cookies, and per-user state
-  (`config.toml`, `packs.toml`, the lockfile, `*.curl`, `cookies.txt`) are gitignored and
-  live in the config dir outside this repo. The `internal/fixtures` guard test fails the
-  build if real PII leaks into committed `testdata/`. Never commit these or hard-code a
-  customer id / paths.
+- **No PII in the repo.** The customer id, emails, cookies, and session captures
+  (`config.toml`, `*.curl`, `cookies.txt`) live in the config dir outside this repo. The
+  project manifest and lockfile (`synty-sync.toml`, `synty-sync.lock.json`) belong with the
+  consuming project and are gitignored here defensively. The `internal/fixtures` guard test
+  fails the build if real PII leaks into committed `testdata/`. Never commit these or
+  hard-code a customer id / paths.
 
 ## Editing testdata
 

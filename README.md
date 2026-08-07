@@ -137,6 +137,15 @@ index is cached and refreshed incrementally, so only the first run pays the full
 Textureless Synty source FBX render as neutral clay; animation-only FBX (no mesh) show
 an icon.
 
+The page is backed by a small read-only JSON API you can script against. `GET /api/assets`
+takes `q`, repeatable `type` / `vendor` / `variant` / `guid` filters, `group=0` to keep
+duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its `source`
+locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixel
+`width` / `height` for images, and every duplicate copy. `?guid=` resolves a scene or
+prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
+extraction is one request rather than tar-scraping the archive. `GET /api/content?id=`
+streams an asset's bytes and `GET /api/thumb?id=` its Unity preview.
+
 ## Selecting packs
 
 Selection is opt-in: a pack is only mirrored once you enable it. `synty-sync select`
