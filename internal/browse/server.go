@@ -47,39 +47,45 @@ type facetValue struct {
 // fields plus every identical copy (same file across variants/packs) so the UI can
 // show one card and expose all paths. Count/Copies are 1/[self] when ungrouped.
 type assetDTO struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	RelPath  string    `json:"relPath"`
-	CopyPath string    `json:"copyPath"`
-	Category string    `json:"category"`
-	Ext      string    `json:"ext"`
-	Vendor   string    `json:"vendor"`
-	Pack     string    `json:"pack"`
-	Variant  string    `json:"variant"`
-	Size     int64     `json:"size"`
-	Thumb    string    `json:"thumb"`
-	Count    int       `json:"count"`
-	Copies   []copyDTO `json:"copies"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	RelPath  string            `json:"relPath"`
+	CopyPath string            `json:"copyPath"`
+	Category string            `json:"category"`
+	Ext      string            `json:"ext"`
+	Vendor   string            `json:"vendor"`
+	Pack     string            `json:"pack"`
+	Variant  string            `json:"variant"`
+	Size     int64             `json:"size"`
+	Width    int               `json:"width,omitempty"`
+	Height   int               `json:"height,omitempty"`
+	Thumb    string            `json:"thumb"`
+	Source   assetindex.Source `json:"source"`
+	Count    int               `json:"count"`
+	Copies   []copyDTO         `json:"copies"`
 }
 
-// copyDTO is one occurrence of an asset (its variant/pack and the path to copy).
+// copyDTO is one occurrence of an asset (its variant/pack, the path to copy, and its
+// structured source locator so a consumer can resolve it without parsing copyPath).
 type copyDTO struct {
-	ID       string `json:"id"`
-	Variant  string `json:"variant"`
-	Vendor   string `json:"vendor"`
-	Pack     string `json:"pack"`
-	CopyPath string `json:"copyPath"`
+	ID       string            `json:"id"`
+	Variant  string            `json:"variant"`
+	Vendor   string            `json:"vendor"`
+	Pack     string            `json:"pack"`
+	CopyPath string            `json:"copyPath"`
+	Source   assetindex.Source `json:"source"`
 }
 
 func copyOf(a assetindex.Asset) copyDTO {
-	return copyDTO{ID: a.ID, Variant: a.Variant, Vendor: a.Vendor, Pack: a.Pack, CopyPath: a.CopyPath}
+	return copyDTO{ID: a.ID, Variant: a.Variant, Vendor: a.Vendor, Pack: a.Pack, CopyPath: a.CopyPath, Source: a.Source}
 }
 
 func toDTO(a assetindex.Asset) assetDTO {
 	return assetDTO{
 		ID: a.ID, Name: a.Name, RelPath: a.RelPath, CopyPath: a.CopyPath,
 		Category: string(a.Category), Ext: a.Ext, Vendor: a.Vendor, Pack: a.Pack,
-		Variant: a.Variant, Size: a.Size, Thumb: string(a.Thumb),
+		Variant: a.Variant, Size: a.Size, Width: a.Width, Height: a.Height,
+		Thumb: string(a.Thumb), Source: a.Source,
 		Count: 1, Copies: []copyDTO{copyOf(a)},
 	}
 }
@@ -162,6 +168,7 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	types := valueSet(query["type"])
 	vendors := valueSet(query["vendor"])
 	variants := valueSet(query["variant"])
+	guids := valueSet(query["guid"])
 	offset := atoiDefault(query.Get("offset"), 0)
 	limit := atoiDefault(query.Get("limit"), defaultLimit)
 	if limit <= 0 || limit > maxLimit {
@@ -177,6 +184,9 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if variants != nil && !variants[a.Variant] {
+			continue
+		}
+		if guids != nil && !guids[a.Source.Guid] {
 			continue
 		}
 		if q != "" && !strings.Contains(strings.ToLower(a.Name), q) {

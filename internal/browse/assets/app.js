@@ -641,11 +641,14 @@ function openLightbox(a) {
   // The metadata carries the shared file properties; every location (one or many)
   // lives in the copies list below, so there's a single copy system either way.
   const bitmap = /^(png|jpe?g|gif|webp|bmp)$/i.test(a.ext || '');
+  const hasDims = a.width > 0 && a.height > 0;
   const fields = [['Category', a.category], ['Format', a.ext || '—'], ['Size', humanSize(a.size)]];
-  if (bitmap) fields.push(['Dimensions', '…']);
+  if (hasDims) fields.push(['Dimensions', `${a.width} × ${a.height}`]);
+  else if (bitmap) fields.push(['Dimensions', '…']);
   lb.fields.innerHTML = fields.map(([k, v]) => `<dt>${k}</dt><dd data-field="${k}">${escapeHTML(v)}</dd>`).join('');
-  // Read real pixel dimensions off the source image itself (not any Unity preview).
-  if (bitmap) {
+  // The index carries dimensions for images it could measure; probe the bytes only
+  // as a fallback (a copy dropped from the index, or a format the scanner skipped).
+  if (!hasDims && bitmap) {
     const probe = new Image();
     const dd = () => lb.fields.querySelector('dd[data-field="Dimensions"]');
     probe.onload = () => { const el = dd(); if (el) el.textContent = `${probe.naturalWidth} × ${probe.naturalHeight}`; };

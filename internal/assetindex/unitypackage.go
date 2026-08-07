@@ -12,10 +12,15 @@ import (
 )
 
 // unityEntry accumulates the members of one GUID directory as the tar streams by.
+// head holds the asset payload's leading bytes so image dimensions can be recovered
+// once the pathname (and thus the extension) is known — the two members arrive in
+// either order across Unity versions, so the bytes are buffered rather than decoded
+// inline.
 type unityEntry struct {
 	pathname   string
 	hasAsset   bool
 	assetSize  int64
+	head       []byte
 	hasPreview bool
 }
 
@@ -76,6 +81,7 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 		case "asset":
 			e.hasAsset = true
 			e.assetSize = hdr.Size
+			e.head = readHead(tr)
 		case "pathname":
 			b, err := io.ReadAll(tr)
 			if err != nil {
@@ -94,12 +100,16 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 			continue
 		}
 		src := Source{Kind: SourceUnityPackage, ArchivePath: archivePath, Guid: guid, Pathname: e.pathname, HasPreview: e.hasPreview}
-		assets = append(assets, newAsset(src,
+		a := newAsset(src,
 			path.Base(e.pathname),
 			archiveRel(displayRel, e.pathname),
 			vendor, pack, variant,
 			e.assetSize,
-		))
+		)
+		if isDimExt(a.Ext) {
+			a.Width, a.Height = imageDims(e.head, a.Ext)
+		}
+		assets = append(assets, a)
 	}
 	return assets, nil
 }

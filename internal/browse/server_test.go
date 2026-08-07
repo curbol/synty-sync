@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -93,6 +95,11 @@ func testServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+type sourceJSON struct {
+	Kind, ArchivePath, Entry, Guid, Pathname string
+	HasPreview                               bool
+}
+
 type assetsResp struct {
 	Total  int
 	Offset int
@@ -100,8 +107,11 @@ type assetsResp struct {
 		ID, Name, Category, Ext, Variant, CopyPath string
 		Thumb                                      string
 		Count                                      int
+		Width, Height                              int
+		Source                                     sourceJSON
 		Copies                                     []struct {
 			Variant, Pack, CopyPath string
+			Source                  sourceJSON
 		}
 	}
 	Facets struct {
@@ -388,6 +398,98 @@ func idByName(t *testing.T, srv *httptest.Server, name string) string {
 	}
 	t.Fatalf("asset %q not found", name)
 	return ""
+}
+
+func pngBytes(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, w, h))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// The API carries an image's pixel dimensions, so a consumer gets WxH (and aspect)
+// without decoding the bytes client-side.
+func TestDimensionsExposed(t *testing.T) {
+	root := t.TempDir()
+	cache := t.TempDir()
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		return full
+	}
+	os.WriteFile(mk("v", "Pack", "Banner.png"), pngBytes(t, 40, 8), 0o644)
+
+	ix, err := assetindex.Build(root, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newServer(ix)
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+
+	r := getAssets(t, srv, "q=Banner")
+	if len(r.Items) != 1 {
+		t.Fatalf("Banner results = %d, want 1", len(r.Items))
+	}
+	if r.Items[0].Width != 40 || r.Items[0].Height != 8 {
+		t.Errorf("Banner dims = %dx%d, want 40x8", r.Items[0].Width, r.Items[0].Height)
+	}
+}
+
+// Each item and copy exposes its structured source locator, so a consumer can read
+// an asset's kind/guid/pathname without string-sniffing copyPath.
+func TestSourceExposed(t *testing.T) {
+	srv := testServer(t)
+	r := getAssets(t, srv, "q=Rock")
+	if len(r.Items) != 1 {
+		t.Fatalf("Rock results = %d, want 1", len(r.Items))
+	}
+	src := r.Items[0].Source
+	if src.Kind != "unitypackage" || src.Guid != "ccc" || src.Pathname != "Assets/Foo/Rock.fbx" {
+		t.Errorf("Rock source = %+v", src)
+	}
+	if len(r.Items[0].Copies) != 1 || r.Items[0].Copies[0].Source.Guid != "ccc" {
+		t.Errorf("Rock copy source = %+v", r.Items[0].Copies)
+	}
+
+	// A zip entry exposes its archive path + entry; a loose file its kind.
+	loose := getAssets(t, srv, "q=Sword")
+	if len(loose.Items) != 1 || loose.Items[0].Source.Kind != "loose" {
+		t.Errorf("Sword source = %+v", loose.Items)
+	}
+}
+
+// A guid query resolves a scene/prefab's sprite reference (a bare guid) back to its
+// asset — the core of composition extraction.
+func TestGuidFilter(t *testing.T) {
+	srv := testServer(t)
+	r := getAssets(t, srv, "guid=ccc")
+	if r.Total != 1 || r.Items[0].Name != "Rock.fbx" {
+		t.Fatalf("guid=ccc → %d items %v, want 1 Rock.fbx", r.Total, names(r))
+	}
+	if r.Items[0].Source.Guid != "ccc" {
+		t.Errorf("resolved item guid = %q", r.Items[0].Source.Guid)
+	}
+	// Multiple guids union.
+	multi := getAssets(t, srv, "guid=aaa&guid=ccc")
+	if multi.Total != 2 {
+		t.Errorf("guid=aaa,ccc → %d, want 2 (%v)", multi.Total, names(multi))
+	}
+	// An unknown guid matches nothing (never falls back to all).
+	none := getAssets(t, srv, "guid=nope")
+	if none.Total != 0 {
+		t.Errorf("guid=nope → %d, want 0", none.Total)
+	}
+}
+
+func names(r assetsResp) []string {
+	var out []string
+	for _, it := range r.Items {
+		out = append(out, it.Name)
+	}
+	return out
 }
 
 func TestContentBytesAndHeaders(t *testing.T) {

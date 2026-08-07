@@ -83,6 +83,8 @@ type Asset struct {
 	Pack     string    `json:"pack"`
 	Variant  string    `json:"variant,omitempty"`
 	Size     int64     `json:"size"`
+	Width    int       `json:"width,omitempty"`
+	Height   int       `json:"height,omitempty"`
 	Thumb    ThumbKind `json:"thumb"`
 	Source   Source    `json:"source"`
 }
