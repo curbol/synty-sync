@@ -83,7 +83,7 @@ func TestRefineImage(t *testing.T) {
 
 func TestNewAssetRefinesImageCategory(t *testing.T) {
 	ui := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "Source_Sprites/Icons/ICON_x.png"},
-		"ICON_x.png", "synty/INTERFACE_Pack/x.zip::Source_Sprites/Icons/ICON_x.png", "synty", "INTERFACE_Pack", "SourceSprites", 10)
+		"ICON_x.png", "synty/INTERFACE_Pack/x.zip::Source_Sprites/Icons/ICON_x.png", "synty", "INTERFACE_Pack", "SourceSprites", 10, "")
 	if ui.Category != CategoryUI {
 		t.Errorf("ui image category = %s, want ui", ui.Category)
 	}
@@ -92,7 +92,7 @@ func TestNewAssetRefinesImageCategory(t *testing.T) {
 	}
 
 	tex := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "Textures/Wall_Normal.png"},
-		"Wall_Normal.png", "synty/POLYGON_Pack/x.zip::Textures/Wall_Normal.png", "synty", "POLYGON_Pack", "SourceFiles", 10)
+		"Wall_Normal.png", "synty/POLYGON_Pack/x.zip::Textures/Wall_Normal.png", "synty", "POLYGON_Pack", "SourceFiles", 10, "")
 	if tex.Category != CategoryTexture {
 		t.Errorf("texture image category = %s, want texture", tex.Category)
 	}
@@ -101,7 +101,7 @@ func TestNewAssetRefinesImageCategory(t *testing.T) {
 func TestNewAssetDerivesFields(t *testing.T) {
 	// A loose fbx: model category, fbx thumb, copyPath is the absolute file path.
 	a := newAsset(Source{Kind: SourceLoose, FilePath: "/lib/synty/Pack/Foo.FBX"},
-		"Foo.FBX", "synty/Pack/Foo.FBX", "synty", "Pack", "SourceFiles", 123)
+		"Foo.FBX", "synty/Pack/Foo.FBX", "synty", "Pack", "SourceFiles", 123, "")
 	if a.Category != CategoryModel || a.Thumb != ThumbFBX {
 		t.Errorf("category/thumb = %s/%s", a.Category, a.Thumb)
 	}
@@ -117,7 +117,7 @@ func TestNewAssetDerivesFields(t *testing.T) {
 
 	// A unitypackage fbx WITH a preview overrides the thumbnail to preview.
 	b := newAsset(Source{Kind: SourceUnityPackage, ArchivePath: "/lib/p.unitypackage", Guid: "g1", Pathname: "Assets/Foo.fbx", HasPreview: true},
-		"Foo.fbx", "synty/Pack/p.unitypackage::Assets/Foo.fbx", "synty", "Pack", "Unity_2022_3", 9)
+		"Foo.fbx", "synty/Pack/p.unitypackage::Assets/Foo.fbx", "synty", "Pack", "Unity_2022_3", 9, "")
 	if b.Thumb != ThumbPreview {
 		t.Errorf("unity+preview thumb = %s, want preview", b.Thumb)
 	}

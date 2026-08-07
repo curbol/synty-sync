@@ -45,6 +45,7 @@ func zipAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset, 
 			archiveRel(displayRel, f.Name),
 			vendor, pack, variant,
 			int64(f.UncompressedSize64),
+			crcFingerprint(f.CRC32, int64(f.UncompressedSize64)),
 		))
 	}
 	return assets, nil

@@ -111,9 +111,11 @@ func enumerateArchive(e libEntry) ([]Asset, error) {
 	return nil, nil
 }
 
-// looseAsset builds the single asset for a loose file entry.
+// looseAsset builds the single asset for a loose file entry, reading the file to
+// compute its content fingerprint. Build/Refresh reuse a cached loose asset via
+// LoosePrint so this read only happens for new or changed files.
 func looseAsset(e libEntry) Asset {
-	return newAsset(Source{Kind: SourceLoose, FilePath: e.path}, e.name, e.rel, e.vendor, e.pack, "", e.size)
+	return newAsset(Source{Kind: SourceLoose, FilePath: e.path}, e.name, e.rel, e.vendor, e.pack, "", e.size, looseFingerprint(e.path))
 }
 
 // Scan walks the library root and returns every browseable asset: loose files and

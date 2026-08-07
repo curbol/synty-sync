@@ -12,7 +12,7 @@ import (
 
 // indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
 // classified), so a cached index from older logic is rebuilt rather than reused.
-const indexVersion = 5
+const indexVersion = 6
 
 // Index is the in-memory, on-disk-cacheable catalog of a library. Content requests
 // resolve through byID (never by reconstructing a path from client input), and the
@@ -22,7 +22,8 @@ type Index struct {
 	Version      int               `json:"version"`
 	Root         string            `json:"root"`
 	Assets       []Asset           `json:"assets"`
-	ArchivePrint map[string]string `json:"archivePrint"` // abs archive path -> fingerprint
+	ArchivePrint map[string]string `json:"archivePrint"` // abs archive path -> stat fingerprint
+	LoosePrint   map[string]string `json:"loosePrint"`   // abs loose path -> stat fingerprint
 
 	cacheDir string
 	byID     map[string]*Asset
@@ -54,10 +55,13 @@ func Build(root, cacheDir string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	ix := &Index{Version: indexVersion, Root: absRoot, cacheDir: cacheDir, ArchivePrint: map[string]string{}}
+	ix := &Index{Version: indexVersion, Root: absRoot, cacheDir: cacheDir, ArchivePrint: map[string]string{}, LoosePrint: map[string]string{}}
 	var assets []Asset
 	for _, e := range entries {
 		if e.kind == SourceLoose {
+			if fp, err := fingerprint(e.path); err == nil {
+				ix.LoosePrint[e.path] = fp
+			}
 			assets = append(assets, looseAsset(e))
 			continue
 		}
@@ -75,24 +79,35 @@ func Build(root, cacheDir string) (*Index, error) {
 }
 
 // Refresh re-walks the library, reusing the cached enumeration of every archive
-// whose fingerprint is unchanged and re-enumerating only changed or new archives;
-// loose files are always re-derived (cheap). This avoids re-decompressing every
-// unitypackage on each run.
+// and the cached fingerprint of every loose file whose stat fingerprint is
+// unchanged, re-deriving only changed or new files. This avoids re-decompressing
+// every unitypackage and re-reading every loose file's bytes on each run.
 func (ix *Index) Refresh() error {
 	entries, err := walkLibrary(ix.Root)
 	if err != nil {
 		return err
 	}
 	oldByArchive := map[string][]Asset{}
+	oldByLoose := map[string]Asset{}
 	for _, a := range ix.Assets {
-		if a.Source.Kind != SourceLoose {
+		if a.Source.Kind == SourceLoose {
+			oldByLoose[a.Source.FilePath] = a
+		} else {
 			oldByArchive[a.Source.ArchivePath] = append(oldByArchive[a.Source.ArchivePath], a)
 		}
 	}
 	newPrint := map[string]string{}
+	newLoose := map[string]string{}
 	var assets []Asset
 	for _, e := range entries {
 		if e.kind == SourceLoose {
+			if fp, err := fingerprint(e.path); err == nil {
+				newLoose[e.path] = fp
+				if old, ok := oldByLoose[e.path]; ok && ix.LoosePrint[e.path] == fp {
+					assets = append(assets, old)
+					continue
+				}
+			}
 			assets = append(assets, looseAsset(e))
 			continue
 		}
@@ -112,6 +127,7 @@ func (ix *Index) Refresh() error {
 		assets = append(assets, a...)
 	}
 	ix.ArchivePrint = newPrint
+	ix.LoosePrint = newLoose
 	ix.setAssets(dedup(assets))
 	return nil
 }
@@ -129,6 +145,9 @@ func Load(cachePath, cacheDir string) (*Index, error) {
 	ix.cacheDir = cacheDir
 	if ix.ArchivePrint == nil {
 		ix.ArchivePrint = map[string]string{}
+	}
+	if ix.LoosePrint == nil {
+		ix.LoosePrint = map[string]string{}
 	}
 	ix.setAssets(ix.Assets)
 	return &ix, nil

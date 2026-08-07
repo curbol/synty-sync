@@ -72,19 +72,27 @@ type Source struct {
 }
 
 // Asset is one browseable item: a loose file or a single entry inside an archive.
+//
+// Fingerprint is the asset's stable content identity, used to attach tags. It is
+// distinct from ID: ID locates the exact bytes to serve (a machine-absolute path
+// and version-bearing archive name) and so is not stable across machines or pack
+// updates; Fingerprint is derived from the content (zip/loose CRC32+size, Unity
+// GUID) so byte-identical copies share it and a tag set once survives a resync.
+// Empty when the content could not be read.
 type Asset struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	RelPath  string    `json:"relPath"`
-	CopyPath string    `json:"copyPath"`
-	Category Category  `json:"category"`
-	Ext      string    `json:"ext"`
-	Vendor   string    `json:"vendor"`
-	Pack     string    `json:"pack"`
-	Variant  string    `json:"variant,omitempty"`
-	Size     int64     `json:"size"`
-	Thumb    ThumbKind `json:"thumb"`
-	Source   Source    `json:"source"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	RelPath     string    `json:"relPath"`
+	CopyPath    string    `json:"copyPath"`
+	Category    Category  `json:"category"`
+	Ext         string    `json:"ext"`
+	Vendor      string    `json:"vendor"`
+	Pack        string    `json:"pack"`
+	Variant     string    `json:"variant,omitempty"`
+	Size        int64     `json:"size"`
+	Thumb       ThumbKind `json:"thumb"`
+	Fingerprint string    `json:"fingerprint,omitempty"`
+	Source      Source    `json:"source"`
 }
 
 // id derives a stable identifier from the locator so the content API can resolve
@@ -119,8 +127,9 @@ func copyPath(s Source) string {
 }
 
 // newAsset fills the derived fields (ID, CopyPath, Category, Thumb) from a
-// locator plus the display metadata scanning has already resolved.
-func newAsset(s Source, name, relPath, vendor, pack, variant string, size int64) Asset {
+// locator plus the display metadata scanning has already resolved. fingerprint is
+// the content identity the caller has computed for this source kind.
+func newAsset(s Source, name, relPath, vendor, pack, variant string, size int64, fingerprint string) Asset {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
 	cat, thumb := Classify(ext)
 	if cat == CategoryImage {
@@ -130,18 +139,19 @@ func newAsset(s Source, name, relPath, vendor, pack, variant string, size int64)
 		thumb = ThumbPreview
 	}
 	return Asset{
-		ID:       id(s),
-		Name:     name,
-		RelPath:  relPath,
-		CopyPath: copyPath(s),
-		Category: cat,
-		Ext:      ext,
-		Vendor:   vendor,
-		Pack:     pack,
-		Variant:  variant,
-		Size:     size,
-		Thumb:    thumb,
-		Source:   s,
+		ID:          id(s),
+		Name:        name,
+		RelPath:     relPath,
+		CopyPath:    copyPath(s),
+		Category:    cat,
+		Ext:         ext,
+		Vendor:      vendor,
+		Pack:        pack,
+		Variant:     variant,
+		Size:        size,
+		Thumb:       thumb,
+		Fingerprint: fingerprint,
+		Source:      s,
 	}
 }
 

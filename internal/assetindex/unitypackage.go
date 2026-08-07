@@ -99,6 +99,7 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 			archiveRel(displayRel, e.pathname),
 			vendor, pack, variant,
 			e.assetSize,
+			unityFingerprint(guid),
 		))
 	}
 	return assets, nil
