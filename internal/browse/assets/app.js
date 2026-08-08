@@ -27,6 +27,7 @@ function query(extra = {}) {
   for (const f of FILTERS) for (const v of filters[f.id].getSelected()) p.append(f.id, v);
   for (const t of tagFilter.selected) p.append('tag', t);
   if (tagFilter.selected.size) p.set('tagmode', tagFilter.mode);
+  if (tagFilter.selected.size && tagFilter.related) p.set('includeRelated', '1');
   p.set('sort', els.sort.value);
   if (!els.group.checked) p.set('group', '0');
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
@@ -329,6 +330,7 @@ const tagFilter = {
   root: document.getElementById('tagfilter'),
   selected: new Set(),
   mode: 'or',
+  related: false,
   manage: false,
   init() {
     this.btn = this.root.querySelector('.ms-btn');
@@ -388,6 +390,19 @@ const tagFilter = {
     manageBtn.textContent = this.manage ? 'done' : 'manage';
     manageBtn.addEventListener('click', () => { this.manage = !this.manage; this.render(); });
     head.append(modeBtn, manageBtn);
+    if (!this.manage) {
+      const linked = document.createElement('label');
+      linked.className = 'tag-linked';
+      linked.title = 'also show assets linked to a match (companions, like a frame’s background)';
+      const lcb = document.createElement('input');
+      lcb.type = 'checkbox';
+      lcb.checked = this.related;
+      lcb.addEventListener('change', () => { this.related = lcb.checked; if (this.selected.size) reset(); });
+      const lt = document.createElement('span');
+      lt.textContent = 'linked';
+      linked.append(lcb, lt);
+      head.appendChild(linked);
+    }
     this.pop.appendChild(head);
 
     const ids = [...tagState.colors.keys()].sort((x, y) => x.localeCompare(y));
@@ -957,6 +972,7 @@ const lb = {
   name: document.getElementById('lb-name'),
   fields: document.getElementById('lb-fields'),
   tags: document.getElementById('lb-tags'),
+  related: document.getElementById('lb-related'),
   character: document.getElementById('lb-character'),
   copies: document.getElementById('lb-copies'),
 };
@@ -983,6 +999,7 @@ function openLightbox(a) {
   }
   lb.character.replaceChildren(); // the viewer fills this for clip-only animations
   renderLbTags(a);
+  renderLbRelated(a);
   renderCopies(a);
 
   lb.view.replaceChildren();
@@ -1126,11 +1143,60 @@ function renderCopies(a) {
   }
 }
 
+// renderLbRelated shows the card's linked companions ("parts of this set") as small
+// clickable thumbnails that open that asset. It fetches the related cards on demand
+// (they can live anywhere in the library) and stays hidden when there are none or
+// tagging is off. It clears synchronously first, so a fetch in flight never flashes a
+// previous card's companions.
+async function renderLbRelated(a) {
+  const box = lb.related;
+  box.replaceChildren();
+  box.hidden = true;
+  if (!tagState.enabled || !hasFingerprints(a)) return;
+  let items;
+  try {
+    const qs = a.fingerprints.map((fp) => 'fingerprint=' + encodeURIComponent(fp)).join('&');
+    items = ((await (await fetch('/api/related?' + qs)).json()).items) || [];
+  } catch { return; }
+  if (!items.length || lb.root.hidden) return;
+
+  const head = document.createElement('div');
+  head.className = 'lb-related-head';
+  const heading = document.createElement('span');
+  heading.textContent = items.length > 1 ? `Parts of this set (${items.length})` : 'Part of this set';
+  head.appendChild(heading);
+
+  const strip = document.createElement('div');
+  strip.className = 'lb-related-strip';
+  for (const it of items) strip.appendChild(relatedThumb(it));
+
+  box.append(head, strip);
+  box.hidden = false;
+}
+
+function relatedThumb(it) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = 'lb-related-item';
+  el.title = it.name;
+  const th = document.createElement('div');
+  th.className = 'lb-related-thumb';
+  th.appendChild(thumbContent(it));
+  const name = document.createElement('span');
+  name.className = 'lb-related-name';
+  name.textContent = it.name;
+  el.append(th, name);
+  el.addEventListener('click', () => openLightbox(it));
+  return el;
+}
+
 function closeLightbox() {
   lb.root.hidden = true;
   if (activeViewer) { activeViewer.stop(); activeViewer = null; }
   lb.view.replaceChildren();
   lb.character.replaceChildren();
+  lb.related.replaceChildren();
+  lb.related.hidden = true;
 }
 
 function startViewer(container, asset) {

@@ -194,6 +194,75 @@ func TestDefaultColorDeterministicAndValid(t *testing.T) {
 	}
 }
 
+func TestLinkMergesTransitively(t *testing.T) {
+	s := New()
+	s.Link([]string{"A", "B"})
+	s.Link([]string{"B", "C"}) // overlaps on B, so all three merge
+	if !reflect.DeepEqual(s.Related("A"), []string{"B", "C"}) {
+		t.Errorf("Related(A) = %v, want [B C]", s.Related("A"))
+	}
+	if !reflect.DeepEqual(s.Related("C"), []string{"A", "B"}) {
+		t.Errorf("Related(C) = %v, want [A B]", s.Related("C"))
+	}
+	if g := s.Groups(); len(g) != 1 || !reflect.DeepEqual(g[0], []string{"A", "B", "C"}) {
+		t.Errorf("Groups() = %v, want [[A B C]]", g)
+	}
+}
+
+func TestLinkNeedsTwoMembers(t *testing.T) {
+	s := New()
+	s.Link([]string{"solo"})
+	s.Link([]string{"", "x"}) // empty filtered out, leaves a single member
+	if s.Related("solo") != nil || s.Related("x") != nil {
+		t.Errorf("a single distinct fingerprint must not form a group")
+	}
+	if len(s.Groups()) != 0 {
+		t.Errorf("Groups() = %v, want none", s.Groups())
+	}
+}
+
+func TestUnlinkDissolves(t *testing.T) {
+	s := New()
+	s.Link([]string{"A", "B", "C"})
+	s.Unlink([]string{"B"})
+	if s.Related("B") != nil {
+		t.Errorf("Related(B) after unlink = %v, want nil", s.Related("B"))
+	}
+	if !reflect.DeepEqual(s.Related("A"), []string{"C"}) {
+		t.Errorf("Related(A) = %v, want [C]", s.Related("A"))
+	}
+	// Removing A leaves only C, which cannot be a group on its own: it dissolves.
+	s.Unlink([]string{"A"})
+	if s.Related("C") != nil {
+		t.Errorf("Related(C) = %v, want nil after group dissolves", s.Related("C"))
+	}
+	if len(s.Groups()) != 0 {
+		t.Errorf("Groups() = %v, want none", s.Groups())
+	}
+}
+
+// Link groups round-trip and, like assignments, are never pruned to a scanned set.
+func TestLinksRoundTripSortedAndPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	s := New()
+	s.Link([]string{"crc32:zzz:9", "uguid:aaa"}) // unsorted input, unknown to any index
+	if err := Save(path, s); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := os.ReadFile(path)
+	if !strings.Contains(string(text), `fingerprints = ["crc32:zzz:9", "uguid:aaa"]`) {
+		t.Errorf("group members not sorted in file:\n%s", text)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Related("crc32:zzz:9"), []string{"uguid:aaa"}) {
+		t.Errorf("link lost across save/load: Related = %v", got.Related("crc32:zzz:9"))
+	}
+}
+
 func TestDefineRejectsBadColor(t *testing.T) {
 	s := New()
 	if err := s.Define("t", "red"); err == nil {

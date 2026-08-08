@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/curbol/synty-sync/internal/assetindex"
 	"github.com/curbol/synty-sync/internal/tagstore"
 )
 
@@ -227,6 +228,138 @@ func (s *server) handleAssign(w http.ResponseWriter, r *http.Request) {
 		"tags":    s.unionTagsLocked(req.Fingerprints),
 		"palette": s.paletteLocked(),
 	})
+}
+
+// resolveRelated fills each card's Related with the union of link-related
+// fingerprints over its own fingerprints, minus its own set.
+func (s *server) resolveRelated(dtos []assetDTO) {
+	s.tagsMu.RLock()
+	defer s.tagsMu.RUnlock()
+	for i := range dtos {
+		own := make(map[string]bool, len(dtos[i].Fingerprints))
+		for _, fp := range dtos[i].Fingerprints {
+			own[fp] = true
+		}
+		rel := map[string]bool{}
+		for _, fp := range dtos[i].Fingerprints {
+			for _, r := range s.store.Related(fp) {
+				if !own[r] {
+					rel[r] = true
+				}
+			}
+		}
+		if len(rel) > 0 {
+			dtos[i].Related = sortedSet(rel)
+		}
+	}
+}
+
+// expandRelated pulls companion cards into a tag-filtered result: any card from the
+// pre-tag-filter set (preTag) that shares a link group with a match. It relaxes only
+// the tag filter, so other facets and the text search still apply (a companion must
+// have survived them to be in preTag). Matches keep their order; companions follow.
+func expandRelated(filtered, preTag []assetDTO) []assetDTO {
+	if len(filtered) == 0 {
+		return filtered
+	}
+	want := map[string]bool{}
+	for _, d := range filtered {
+		for _, fp := range d.Related {
+			want[fp] = true
+		}
+	}
+	if len(want) == 0 {
+		return filtered
+	}
+	present := make(map[string]bool, len(filtered))
+	for _, d := range filtered {
+		present[d.ID] = true
+	}
+	out := filtered
+	for _, d := range preTag {
+		if present[d.ID] {
+			continue
+		}
+		for _, fp := range d.Fingerprints {
+			if want[fp] {
+				out = append(out, d)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// handleLink links or unlinks a set of fingerprints as one travel-together group,
+// mirroring handleAssign's shape. Linking needs at least two fingerprints.
+func (s *server) handleLink(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnabled(w) {
+		return
+	}
+	var req struct {
+		Fingerprints []string `json:"fingerprints"`
+		On           bool     `json:"on"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Fingerprints) == 0 {
+		writeErr(w, http.StatusBadRequest, "missing fingerprints")
+		return
+	}
+	if req.On && len(req.Fingerprints) < 2 {
+		writeErr(w, http.StatusBadRequest, "need at least two fingerprints to link")
+		return
+	}
+	s.tagsMu.Lock()
+	defer s.tagsMu.Unlock()
+	if req.On {
+		s.store.Link(req.Fingerprints)
+	} else {
+		s.store.Unlink(req.Fingerprints)
+	}
+	if !s.persistLocked(w) {
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleRelated returns the cards linked to the given fingerprints (a card's whole
+// fingerprint set, passed as repeated ?fingerprint= params). It searches the whole
+// library, not the current page or facet filter, so companions surface regardless of
+// how the grid is filtered.
+func (s *server) handleRelated(w http.ResponseWriter, r *http.Request) {
+	fps := r.URL.Query()["fingerprint"]
+	own := make(map[string]bool, len(fps))
+	for _, fp := range fps {
+		own[fp] = true
+	}
+	s.tagsMu.RLock()
+	related := map[string]bool{}
+	for _, fp := range fps {
+		for _, rfp := range s.store.Related(fp) {
+			if !own[rfp] {
+				related[rfp] = true
+			}
+		}
+	}
+	s.tagsMu.RUnlock()
+
+	var assets []assetindex.Asset
+	seen := map[string]bool{}
+	for rfp := range related {
+		for _, a := range s.byFP[rfp] {
+			if seen[a.ID] {
+				continue
+			}
+			seen[a.ID] = true
+			assets = append(assets, a)
+		}
+	}
+	grouped := groupItems(assets)
+	s.resolveTags(grouped)
+	sortItems(grouped, "")
+	writeJSON(w, map[string]any{"items": grouped})
 }
 
 func (s *server) requireEnabled(w http.ResponseWriter) bool {

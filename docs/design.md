@@ -223,10 +223,11 @@ via env (`SYNTY_LIBRARY`).
 ## Tag store
 
 `synty-sync.tags.toml`, a third project-scoped file committed beside the manifest and
-lockfile (discovered the same way; `--tags` / `--manifest` override), records user tags for
-the `browse` UI. It holds a palette of `[[tag]]` definitions (`id` = the label text, which is
-its identity; `color` = `#rrggbb`) and `[[assignment]]` rows mapping a content **fingerprint**
-to its tag ids, both sorted for minimal diffs:
+lockfile (discovered the same way; `--tags` / `--manifest` override), records user tags and
+links for the `browse` UI. It holds a palette of `[[tag]]` definitions (`id` = the label text,
+which is its identity; `color` = `#rrggbb`), `[[assignment]]` rows mapping a content
+**fingerprint** to its tag ids, and `[[group]]` rows recording link groups, all sorted for
+minimal diffs:
 
 ```toml
 [[tag]]
@@ -235,19 +236,31 @@ to its tag ids, both sorted for minimal diffs:
 [[assignment]]
   fingerprint = "crc32:1a2b3c4d:41700000"
   tags = ["biome:forest", "hero"]
+[[group]]
+  fingerprints = ["crc32:2c54c32c:8635", "uguid:98960c3a158d24c4a933f0d99fb26946"]
 ```
 
-Assignments key on an asset's content, not its location or the browse `id` (which embeds a
-machine-absolute path and a version-bearing archive name, so it is neither portable nor stable
-across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries and loose files (the
-CRC is free from the zip central directory) and `uguid:<guid>` for unitypackage entries (Unity's
-stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag set once
-applies to every copy and survives a `sync` for unchanged files. The store never prunes to a
-currently-scanned set: assignments for fingerprints outside the current view are preserved, so
-tags survive a disabled pack, a narrowed `--root`, or another machine. `browse` is otherwise
-read-only; this is its one write surface, guarded by a mutex and written atomically. Tagging is
-disabled (the UI hides it) when no manifest neighborhood is found, so `browse` still needs no
-manifest.
+Assignments and groups key on an asset's content, not its location or the browse `id` (which
+embeds a machine-absolute path and a version-bearing archive name, so it is neither portable nor
+stable across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries and loose files
+(the CRC is free from the zip central directory) and `uguid:<guid>` for unitypackage entries
+(Unity's stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag
+set once applies to every copy and survives a `sync` for unchanged files.
+
+A `[[group]]` is an **undirected** set of fingerprints that belong together (a UI frame and its
+background fill, say). Groups merge transitively: linking `{A,B}` then `{B,C}` yields `{A,B,C}`.
+They are a result-expansion concern only, orthogonal to tags: a group never changes what tags a
+fingerprint carries. `GET /api/assets?includeRelated=1` takes each tag match's linked companions
+and folds them into the result (relaxing only the tag filter, so other facets and the text search
+still apply); each card's `related` field lists its companions' fingerprints; `GET
+/api/related?fingerprint=` resolves a fingerprint set's companions to whole cards (for the
+lightbox "parts of this set" strip); `POST /api/link {fingerprints, on}` links or unlinks.
+
+The store never prunes to a currently-scanned set: assignments and groups for fingerprints
+outside the current view are preserved, so tags and links survive a disabled pack, a narrowed
+`--root`, or another machine. `browse` is otherwise read-only; this is its one write surface,
+guarded by a mutex and written atomically. Tagging is disabled (the UI hides it) when no manifest
+neighborhood is found, so `browse` still needs no manifest.
 
 ## Testing
 

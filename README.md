@@ -128,8 +128,15 @@ selected tag, or only assets carrying all of them) and a **manage** mode to rena
 recolor, or delete tags. A tag is just a label; `key:value` labels (e.g. `biome:forest`)
 are a convention, not enforced.
 
-Tags live in `synty-sync.tags.toml` beside the project manifest, committed to the
-consuming project so they travel with it and diff cleanly. They key on each asset's
+Assets can also be **linked** into a set that belongs together (a UI frame and its
+background fill, say). The enlarged view lists a linked asset's companions as *parts of
+this set* (click to open one), and the tags filter's **linked** toggle folds each
+match's companions into the grid, so a `verdict:` query keeps the frame and its fill
+together instead of dropping the untagged one. Links are made through the API (below) or
+a project seeder, not the tag buttons.
+
+Tags and links live in `synty-sync.tags.toml` beside the project manifest, committed to
+the consuming project so they travel with it and diff cleanly. They key on each asset's
 **content**, so a tag follows the file across packs and survives a `sync` — an unchanged
 file keeps its tags, and a file Synty re-exports starts fresh. Tagging needs a project
 manifest to sit next to (discovered by walking up from the working directory, or
@@ -163,10 +170,14 @@ locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixe
 `width` / `height` for images, and every duplicate copy. `?guid=` resolves a scene or
 prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
 extraction is one request rather than tar-scraping the archive. Each asset also carries
-its content `fingerprints` and current `tags`. `GET /api/content?id=` streams an asset's
-bytes and `GET /api/thumb?id=` its Unity preview. When tagging is enabled, `GET /api/tags`
-returns the palette, `POST/PATCH/DELETE /api/tags` create/rename/recolor/delete a tag, and
-`POST /api/assign` toggles a tag across an asset's fingerprint set.
+its content `fingerprints`, current `tags`, and any linked `related` fingerprints;
+`includeRelated=1` folds each tag match's linked companions into the results. `GET
+/api/content?id=` streams an asset's bytes and `GET /api/thumb?id=` its Unity preview.
+When tagging is enabled, `GET /api/tags` returns the palette, `POST/PATCH/DELETE
+/api/tags` create/rename/recolor/delete a tag, `POST /api/assign` toggles a tag across an
+asset's fingerprint set, `POST /api/link` links or unlinks a set of fingerprints as one
+travel-together group, and `GET /api/related?fingerprint=` returns the cards linked to a
+fingerprint set.
 
 ## Selecting packs
 

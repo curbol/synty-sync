@@ -39,6 +39,10 @@ type server struct {
 	tagsPath    string
 	tagsMu      sync.RWMutex
 	store       *tagstore.Store
+
+	// byFP indexes assets by content fingerprint so link expansion can resolve a
+	// related fingerprint back to its asset(s) without scanning the whole library.
+	byFP map[string][]assetindex.Asset
 }
 
 type facets struct {
@@ -76,6 +80,9 @@ type assetDTO struct {
 	// the card target this whole set. Tags is the union of tag ids over them.
 	Fingerprints []string `json:"fingerprints"`
 	Tags         []string `json:"tags"`
+	// Related are the content fingerprints of assets linked to this card (its
+	// companions), for API consumers and the lightbox "parts of this set" strip.
+	Related []string `json:"related,omitempty"`
 }
 
 // copyDTO is one occurrence of an asset (its variant/pack, the path to copy, and its
@@ -133,9 +140,15 @@ func newServer(ix *assetindex.Index, store *tagstore.Store, tagsPath string) (*s
 	if store == nil {
 		store = tagstore.New()
 	}
+	byFP := map[string][]assetindex.Asset{}
+	for _, a := range ix.Assets {
+		if a.Fingerprint != "" {
+			byFP[a.Fingerprint] = append(byFP[a.Fingerprint], a)
+		}
+	}
 	return &server{
 		ix: ix, facets: buildFacets(ix), static: http.FileServerFS(static),
-		tagsEnabled: tagsPath != "", tagsPath: tagsPath, store: store,
+		tagsEnabled: tagsPath != "", tagsPath: tagsPath, store: store, byFP: byFP,
 	}, nil
 }
 
@@ -152,6 +165,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tags", s.handleTagPatch)
 	mux.HandleFunc("DELETE /api/tags", s.handleTagDelete)
 	mux.HandleFunc("POST /api/assign", s.handleAssign)
+	mux.HandleFunc("POST /api/link", s.handleLink)
+	mux.HandleFunc("GET /api/related", s.handleRelated)
 	return mux
 }
 
@@ -247,11 +262,20 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 			grouped[i] = toDTO(a)
 		}
 	}
-	// Resolve each card's tags (the union over its fingerprints) and then filter by
-	// the requested tags, so a card matches on its whole tag set. The count/total
-	// below reflect the post-filter result set.
+	// Resolve each card's tags (the union over its fingerprints) and its linked
+	// companions, then filter by the requested tags, so a card matches on its whole
+	// tag set. The count/total below reflect the post-filter result set.
 	s.resolveTags(grouped)
+	s.resolveRelated(grouped)
+	includeRelated := query.Get("includeRelated") == "1"
+	var preTag []assetDTO
+	if includeRelated {
+		preTag = append([]assetDTO(nil), grouped...)
+	}
 	grouped = filterByTags(grouped, query["tag"], query.Get("tagmode"))
+	if includeRelated {
+		grouped = expandRelated(grouped, preTag)
+	}
 	sortItems(grouped, query.Get("sort"))
 
 	total := len(grouped)

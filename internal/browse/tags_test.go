@@ -31,6 +31,7 @@ type taggedItem struct {
 	Name         string
 	Fingerprints []string
 	Tags         []string
+	Related      []string
 }
 
 type taggedAssetsResp struct {
