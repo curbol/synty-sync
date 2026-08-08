@@ -988,8 +988,17 @@ function openLightbox(a) {
   lb.view.replaceChildren();
   if (a.category === 'model' && (a.ext === 'glb' || a.ext === 'gltf' || a.ext === 'fbx')) {
     activeViewer = startViewer(lb.view, a);
-  } else if (a.thumb === 'image') {
-    const img = new Image(); img.src = contentURL(a.id); lb.view.appendChild(img);
+  } else if (bitmap) {
+    // The expanded view shows the full-resolution image, not the small Unity
+    // preview.png a unitypackage entry may also carry; fall back to that preview,
+    // then the category icon.
+    const img = new Image();
+    img.onerror = () => {
+      if (a.thumb === 'preview') { img.onerror = () => img.replaceWith(iconEl(a.category)); img.src = thumbURL(a.id); }
+      else img.replaceWith(iconEl(a.category));
+    };
+    img.src = contentURL(a.id);
+    lb.view.appendChild(img);
   } else if (a.thumb === 'preview') {
     const img = new Image(); img.src = thumbURL(a.id); lb.view.appendChild(img);
   } else if (a.thumb === 'font') {
