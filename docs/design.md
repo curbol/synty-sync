@@ -247,6 +247,11 @@ stable across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries 
 (Unity's stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag
 set once applies to every copy and survives a `sync` for unchanged files.
 
+`GET /api/assets` filters by tags with a repeatable `tag` param combined by `tagmode`: `and`
+matches cards carrying all selected tags, `or` (the default) any. A card is matched on the
+**union** of tags over its fingerprints, so a grouped card can satisfy an `and` query even when no
+single copy carries every tag. (The browse UI's ANY/ALL toggle is this `tagmode`.)
+
 A `[[group]]` is an **undirected** set of fingerprints that belong together (a UI frame and its
 background fill, say). Groups merge transitively: linking `{A,B}` then `{B,C}` yields `{A,B,C}`.
 They are a result-expansion concern only, orthogonal to tags: a group never changes what tags a

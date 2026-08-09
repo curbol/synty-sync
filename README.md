@@ -164,7 +164,8 @@ Textureless Synty source FBX render as neutral clay; animation-only FBX (no mesh
 an icon.
 
 The page is backed by a small read-only JSON API you can script against. `GET /api/assets`
-takes `q`, repeatable `type` / `vendor` / `variant` / `guid` filters, `group=0` to keep
+takes `q`, repeatable `type` / `vendor` / `variant` / `guid` filters, repeatable `tag` with
+`tagmode=and` (match all selected tags) or `tagmode=or` (any; the default), `group=0` to keep
 duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its `source`
 locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixel
 `width` / `height` for images, and every duplicate copy. `?guid=` resolves a scene or
