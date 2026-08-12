@@ -1003,7 +1003,7 @@ function openLightbox(a) {
   renderCopies(a);
 
   lb.view.replaceChildren();
-  if (a.category === 'model' && (a.ext === 'glb' || a.ext === 'gltf' || a.ext === 'fbx')) {
+  if (a.thumb === 'glb' || a.thumb === 'fbx') {
     activeViewer = startViewer(lb.view, a);
   } else if (bitmap) {
     // The expanded view shows the full-resolution image, not the small Unity
