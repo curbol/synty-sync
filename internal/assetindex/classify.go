@@ -58,6 +58,30 @@ var (
 	texSuffixRe = regexp.MustCompile(`_(albedo|basecolor|diffuse|normals?|metallic(smoothness)?|roughness|specular|emissive|emission|occlusion|ao|height|orm|gloss|opacity|mask|texture)([._]|$|[0-9])`)
 )
 
+// An animation pack (Synty ANIMATION_*, explosive "RPG Animations", kevdev
+// "*_Animations"/"*_Motions"), and the reference rig/character meshes such packs
+// bundle alongside their clips. Both anchored to path/word boundaries so a substring
+// like "animation" inside "Automation" never matches.
+var (
+	animPackRe = regexp.MustCompile(`(^|[/_ -])(animations?|motions?)([/_ .-]|$)`)
+	rigRefRe   = regexp.MustCompile(`(^|[/_ -])(bones|skeleton|skel|rig|armature|tpose|reference|model)([/_ .-]|$)`)
+)
+
+// refineModel promotes a file already classified as a model to animation when it is
+// a clip inside an animation pack. The pack name is the signal (Synty ships every
+// clip as a .fbx, byte-indistinguishable by extension from a static mesh), and the
+// reference rig/character mesh each pack bundles is excluded by filename so only the
+// clips are reclassified.
+func refineModel(pack, name string) Category {
+	if !animPackRe.MatchString(strings.ToLower(pack)) {
+		return CategoryModel
+	}
+	if rigRefRe.MatchString(strings.ToLower(name)) {
+		return CategoryModel
+	}
+	return CategoryAnimation
+}
+
 // refineImage narrows a file already classified as an image to ui, texture, or plain
 // image using its path. UI containers win (a HUD sprite is UI even if the pack also
 // ships textures), then texture folders and material-map suffixes, else a plain image.

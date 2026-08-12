@@ -81,6 +81,52 @@ func TestRefineImage(t *testing.T) {
 	}
 }
 
+func TestRefineModel(t *testing.T) {
+	cases := []struct {
+		pack string
+		name string
+		want Category
+	}{
+		// Animation packs across all three vendor conventions: Synty ANIMATION_*,
+		// the explosive "RPG Animations" vendor, and kevdev "*_Animations"/"*_Motions".
+		{"ANIMATION_Sword_Combat", "A_Block_Loop_Sword.fbx", CategoryAnimation},
+		{"RPG Animations GLB-0.1.0", "2Hand Sword.glb", CategoryAnimation},
+		{"Human_Melee_Animations", "HumanF@Attack1H01_L.fbx", CategoryAnimation},
+		{"Human_Basic_Motions", "HumanM@Idle.fbx", CategoryAnimation},
+		// Reference rig/skeleton/character meshes bundled in an animation pack are
+		// not clips: they stay model.
+		{"RPG Animations GLB-0.1.0", "RPG-Character-Bones.FBX", CategoryModel},
+		{"Human_Melee_Animations", "HumanF_Model.fbx", CategoryModel},
+		{"Human_Melee_Animations", "HumanM_Model.fbx", CategoryModel},
+		// A non-animation pack: models stay models even for a mesh named like a motion.
+		{"POLYGON_Nature", "SM_Env_Tree_01.fbx", CategoryModel},
+		// "Animation"/"Motion" must be a whole token, not an incidental substring.
+		{"POLYGON_Automation_Kit", "SM_Prop.fbx", CategoryModel},
+	}
+	for _, c := range cases {
+		if got := refineModel(c.pack, c.name); got != c.want {
+			t.Errorf("refineModel(%q, %q) = %s, want %s", c.pack, c.name, got, c.want)
+		}
+	}
+}
+
+func TestNewAssetRefinesAnimationCategory(t *testing.T) {
+	anim := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "SourceFiles/Animations/A_Block_Loop_Sword.fbx"},
+		"A_Block_Loop_Sword.fbx", "synty/ANIMATION_Sword_Combat/x.zip::SourceFiles/Animations/A_Block_Loop_Sword.fbx", "synty", "ANIMATION_Sword_Combat", "SourceFiles", 10, "")
+	if anim.Category != CategoryAnimation {
+		t.Errorf("animation clip category = %s, want animation", anim.Category)
+	}
+	if anim.Thumb != ThumbFBX {
+		t.Errorf("animation fbx thumb = %s, want fbx (still three.js-renderable)", anim.Thumb)
+	}
+
+	skel := newAsset(Source{Kind: SourceLoose, FilePath: "/lib/explosive/RPG Animations GLB-0.1.0/RPG-Character-Bones.FBX"},
+		"RPG-Character-Bones.FBX", "explosive/RPG Animations GLB-0.1.0/RPG-Character-Bones.FBX", "explosive", "RPG Animations GLB-0.1.0", "", 10, "")
+	if skel.Category != CategoryModel {
+		t.Errorf("reference skeleton category = %s, want model", skel.Category)
+	}
+}
+
 func TestNewAssetRefinesImageCategory(t *testing.T) {
 	ui := newAsset(Source{Kind: SourceZip, ArchivePath: "/x.zip", Entry: "Source_Sprites/Icons/ICON_x.png"},
 		"ICON_x.png", "synty/INTERFACE_Pack/x.zip::Source_Sprites/Icons/ICON_x.png", "synty", "INTERFACE_Pack", "SourceSprites", 10, "")

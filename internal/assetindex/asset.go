@@ -137,6 +137,9 @@ func newAsset(s Source, name, relPath, vendor, pack, variant string, size int64,
 	if cat == CategoryImage {
 		cat = refineImage(relPath)
 	}
+	if cat == CategoryModel {
+		cat = refineModel(pack, name)
+	}
 	if s.Kind == SourceUnityPackage && s.HasPreview {
 		thumb = ThumbPreview
 	}
