@@ -758,6 +758,17 @@ function isRenderable(object) {
   return dims[0] > dims[2] * 1e-3;
 }
 
+// poseAt drives root to a representative mid-clip frame and returns the mixer, so a
+// still shows real motion instead of the bind (T-)pose. skeleton.pose() first clears
+// any prior binding on a reused rig. A zero/NaN-duration clip falls back to frame 0.
+function poseAt(root, clip) {
+  root.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.pose(); });
+  const mixer = new THREE.AnimationMixer(root);
+  mixer.clipAction(clip).play();
+  mixer.setTime(clip.duration > 0 ? clip.duration * 0.5 : 0);
+  return mixer;
+}
+
 function dispose(object) {
   object.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
@@ -792,11 +803,16 @@ const CharRegistry = {
   // match picks the registered character whose skeleton best covers a clip's bones.
   // A pinned character that covers the clip wins over a higher-coverage unpinned one,
   // so pinning a body for a rig makes it the default for every clip on that rig.
-  match(bones) {
+  // Auto-match is scoped to the clip's own vendor: cross-vendor skeletons share enough
+  // bone names to pass the coverage bar but differ in rest pose, posing a clip into a
+  // shredded/T-posed garbage still. A legacy entry with no recorded vendor is a wildcard
+  // until it is re-registered (see register), so old caches keep working.
+  match(bones, vendor) {
     const want = new Set(bones);
     if (!want.size) return null;
     let best = null, bestScore = -1, bestPinned = false;
     for (const e of this.list()) {
+      if (vendor && e.vendor && e.vendor !== vendor) continue;
       const have = new Set(e.bones);
       let hit = 0;
       for (const b of want) if (have.has(b)) hit++;
@@ -818,12 +834,16 @@ const CharRegistry = {
   },
   isPinned(id) { return !!(this.list().find((x) => x.id === id) || {}).pinned; },
   async register(item) {
-    if (this.list().some((e) => e.id === item.id)) return true; // already known, no reload
+    const known = this.list().find((e) => e.id === item.id);
+    if (known) { // already loaded; only backfill a missing vendor so legacy caches scope
+      if (item.vendor && known.vendor !== item.vendor) { known.vendor = item.vendor; this.save(this.list().map((e) => e.id === item.id ? known : e)); }
+      return true;
+    }
     let root;
     try { root = await loadModel(contentURL(item.id), item.ext); } catch { return false; }
     const bones = boneNames(root), rigged = isRenderable(root) && bones.length >= 10;
     dispose(root);
-    if (rigged) this.add({ id: item.id, name: item.name, ext: item.ext, bones });
+    if (rigged) this.add({ id: item.id, name: item.name, ext: item.ext, bones, vendor: item.vendor });
     return rigged;
   },
   // Lazily discover a few character bodies by name so auto-match works before the
@@ -908,6 +928,8 @@ class ModelThumbnails {
       this.ensureRenderer();
       const obj = await loadModel(contentURL(asset.id), asset.ext);
       if (isRenderable(obj)) {
+        const cs = obj.animations || [];
+        if (cs.length) poseAt(obj, cs[0]); // a self-contained animated model, posed not bind
         const dataURL = this.snap(obj);
         dispose(obj);
         return dataURL;
@@ -938,8 +960,8 @@ class ModelThumbnails {
   async rigFor(clip, vendor) {
     const bones = clipBones(clip);
     await CharRegistry.seed();
-    let m = CharRegistry.match(bones);
-    if (!m) { await CharRegistry.discoverForVendor(vendor); m = CharRegistry.match(bones); }
+    let m = CharRegistry.match(bones, vendor);
+    if (!m) { await CharRegistry.discoverForVendor(vendor); m = CharRegistry.match(bones, vendor); }
     if (!m) return null;
     if (!this.rigs.has(m.id)) {
       const rig = await loadModel(contentURL(m.id), m.ext)
@@ -953,10 +975,7 @@ class ModelThumbnails {
   async buildPosed(clip, vendor) {
     const rig = await this.rigFor(clip, vendor);
     if (!rig) return null;
-    rig.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.pose(); });
-    const mixer = new THREE.AnimationMixer(rig);
-    mixer.clipAction(clip).play();
-    mixer.setTime(clip.duration ? clip.duration * 0.5 : 0);
+    const mixer = poseAt(rig, clip);
     const dataURL = this.snap(rig);
     mixer.stopAllAction();
     return dataURL;
@@ -1262,7 +1281,7 @@ function startViewer(container, asset) {
   const useCharacter = (item) =>
     loadModel(contentURL(item.id), item.ext).then((char) => {
       if (stopped) { dispose(char); return true; }
-      CharRegistry.add({ id: item.id, name: item.name, ext: item.ext, bones: boneNames(char) });
+      CharRegistry.add({ id: item.id, name: item.name, ext: item.ext, bones: boneNames(char), vendor: item.vendor });
       clearOverlays(); ensureCanvas();
       if (obj) { scene.remove(obj); dispose(obj); }
       obj = char; scene.add(char); frame(char, camera, controls);
@@ -1416,7 +1435,7 @@ function startViewer(container, asset) {
     const cs = root.animations || [];
     if (isRenderable(root)) {
       obj = root; scene.add(root); frame(root, camera, controls);
-      CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root) });
+      CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
       if (cs.length) buildPlayback(root, cs, null); // self-contained: play its own clips
       return;
     }
@@ -1431,7 +1450,7 @@ function startViewer(container, asset) {
     // after a re-index), so a failed load evicts it and falls through to the next
     // match, then vendor discovery, then the manual picker — never a blank viewer.
     const playOnMatch = async () => {
-      for (let m = CharRegistry.match(bones); m && !stopped; m = CharRegistry.match(bones)) {
+      for (let m = CharRegistry.match(bones, asset.vendor); m && !stopped; m = CharRegistry.match(bones, asset.vendor)) {
         if (await useCharacter(m)) return true;
         CharRegistry.remove(m.id);
       }
