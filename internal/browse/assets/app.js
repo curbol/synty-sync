@@ -683,7 +683,14 @@ function normalizeClip(clip) {
   let tMin = Infinity;
   for (const tr of clip.tracks) if (tr.times.length) tMin = Math.min(tMin, tr.times[0]);
   if (!isFinite(tMin) || tMin <= 1e-3) return clip;
-  for (const tr of clip.tracks) { const t = tr.times; for (let i = 0; i < t.length; i++) t[i] -= tMin; }
+  // Clone each track's times before shifting. GLTFLoader shares one times buffer across
+  // a clip's tracks (and across clips), so subtracting in place double-counts, drives the
+  // shared array negative, and collapses durations to 0 (the NaN/0.00s scrubber on GLBs).
+  for (const tr of clip.tracks) {
+    const t = tr.times.slice();
+    for (let i = 0; i < t.length; i++) t[i] -= tMin;
+    tr.times = t;
+  }
   clip.resetDuration();
   return clip;
 }
