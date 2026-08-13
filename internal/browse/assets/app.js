@@ -768,28 +768,6 @@ function isRenderable(object) {
   return dims[0] > dims[2] * 1e-3;
 }
 
-// uprightPose rotates a posed character so its spine (hips → head) points up. Turn and
-// root-motion clips rotate the whole body through the root bone, which would otherwise
-// render the still lying on its side or upside down; this cancels that. A near-no-op for
-// an already-upright pose, and skipped when the hip/head landmarks aren't found.
-function uprightPose(root) {
-  root.updateMatrixWorld(true);
-  let hips = null, head = null, neck = null;
-  root.traverse((o) => {
-    if (!o.isBone) return;
-    const n = o.name.toLowerCase();
-    if (!hips && (n.includes('hips') || n.includes('pelvis'))) hips = o;
-    if (!head && n.includes('head')) head = o;
-    if (!neck && n.includes('neck')) neck = o;
-  });
-  const top = head || neck;
-  if (!hips || !top) return;
-  const up = top.getWorldPosition(new THREE.Vector3()).sub(hips.getWorldPosition(new THREE.Vector3()));
-  if (up.lengthSq() < 1e-6) return;
-  root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(up.normalize(), new THREE.Vector3(0, 1, 0)));
-  root.updateMatrixWorld(true);
-}
-
 // captureRootMotionRest returns the clip source's top-level bone rest quaternion — the
 // bone's local rotation before any animation. It encodes the file's own axis convention,
 // so a mesh-less clip posed on a body from a different file can be corrected regardless of
@@ -1073,7 +1051,7 @@ class ModelThumbnails {
       const rootRest = captureRootRest(obj);
       if (isRenderable(obj)) {
         const cs = obj.animations || [];
-        if (cs.length) { poseAt(obj, cs[0]); uprightPose(obj); } // self-contained: a mid-frame still, uprighted
+        if (cs.length) poseAt(obj, cs[0]); // self-contained plays upright on its own mesh; no correction
         const dataURL = this.snap(obj);
         dispose(obj);
         return dataURL;
