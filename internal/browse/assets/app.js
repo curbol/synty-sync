@@ -754,9 +754,8 @@ function posedBox(object) {
   return box;
 }
 
-function frame(object, camera, controls, offset = 1.5) {
-  const box = posedBox(object);
-  if (box.isEmpty()) return;
+function frameBox(box, camera, controls, offset = 1.5) {
+  if (!box || box.isEmpty()) return;
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -794,15 +793,18 @@ function captureRootRest(obj) {
   return rr;
 }
 
-// uprightRig corrects the fixed orientation flip that appears when a mesh-less clip is
-// posed on a body exported with a different root-bone axis (e.g. kevdev clips on their
-// HumanF_Model body). It derives the flip from the clip's own rest T-pose — momentarily
-// posing the body's root bone at that rest and reading which way the (straight) spine
-// points — then rotates the whole object by a fixed amount. Because the measurement uses
-// the rest, not the animated frame, it is pose-independent: a fall/roll/sit stays as
-// authored, only the file-axis flip is removed. No-op without a rootRest or landmarks.
+// uprightRig rotates the whole object so the character stands +Y-up, fixing the axis
+// flips from files authored Z-up (kevdev bodies, some explosive clips) or from a mesh-less
+// clip whose root-bone axis differs from the body it plays on (kevdev clips on HumanF_Model).
+// It measures the character's up (hips->head) at a straight *reference* pose — the bind
+// pose, with the root bone forced to the clip's own rest (rootRest) so a cross-file clip's
+// root convention is anticipated — then snaps that up to the nearest cardinal axis and
+// rotates that axis to +Y. Snapping (not exact hips->head alignment) is deliberate: an
+// already-upright rig keeps its natural forward spine lean instead of being tilted back,
+// while a 90/180 flip is still fully corrected. It leaves the skeleton in the reference
+// pose, so the caller can read a stable framing box (posedBox) before animating. rootRest
+// is null for self-contained and retargeted (synty) clips: then it reads the rig's own bind.
 function uprightRig(root, rootRest) {
-  if (!rootRest) return;
   let rootBone = null, hips = null, head = null, neck = null;
   root.traverse((o) => {
     if (!o.isBone) return;
@@ -814,12 +816,20 @@ function uprightRig(root, rootRest) {
   });
   const top = head || neck;
   if (!rootBone || !hips || !top) return;
-  const saved = rootBone.quaternion.clone();
-  rootBone.quaternion.copy(rootRest); root.updateMatrixWorld(true);
+  root.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.pose(); });
+  if (rootRest) rootBone.quaternion.copy(rootRest);
+  root.updateMatrixWorld(true);
   const up = top.getWorldPosition(new THREE.Vector3()).sub(hips.getWorldPosition(new THREE.Vector3()));
-  rootBone.quaternion.copy(saved); root.updateMatrixWorld(true);
   if (up.lengthSq() < 1e-6) return;
-  root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(up.normalize(), new THREE.Vector3(0, 1, 0)));
+  up.normalize();
+  const ax = Math.abs(up.x), ay = Math.abs(up.y), az = Math.abs(up.z);
+  const card = ax >= ay && ax >= az ? new THREE.Vector3(Math.sign(up.x), 0, 0)
+    : ay >= az ? new THREE.Vector3(0, Math.sign(up.y), 0)
+      : new THREE.Vector3(0, 0, Math.sign(up.z));
+  // The character's up axis in this file's track space; stripRootMotion keeps this axis and
+  // zeroes the two horizontal ones (a Z-up file's forward is on Y, not the Y-up default).
+  root.userData.upAxis = card.clone();
+  root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(card, new THREE.Vector3(0, 1, 0)));
   root.updateMatrixWorld(true);
 }
 
@@ -899,16 +909,20 @@ async function retargetedFor(clip, vendor, rig) {
   return neutral ? retargetClip(clip, neutral, rig) : clip;
 }
 
-// stripRootMotion zeroes the horizontal (X/Z) locomotion on the root bone's position
-// track, so a walk/run/lunge plays in place instead of drifting out of frame. Vertical (Y)
-// and every other track are kept, so squats, jumps, and hip bob still read.
-function stripRootMotion(clip, rootName) {
+// stripRootMotion zeroes the horizontal locomotion on the root bone's position track, so a
+// walk/run/dash plays in place instead of drifting out of frame, while keeping the vertical
+// axis (so squats, jumps, and hip bob still read). upAxis is the character's up in the clip's
+// track space (from uprightRig); the two axes that aren't it are the horizontal ones. Defaults
+// to Y-up — a Z-up file's forward travel is on Y, which the default would wrongly keep.
+function stripRootMotion(clip, rootName, upAxis) {
   if (!rootName) return clip;
+  const up = upAxis || new THREE.Vector3(0, 1, 0);
+  const keep = [Math.abs(up.x) >= 0.5, Math.abs(up.y) >= 0.5, Math.abs(up.z) >= 0.5];
   let changed = false;
   const tracks = clip.tracks.map((tr) => {
     if (tr.name !== rootName + '.position') return tr;
     const v = tr.values.slice();
-    for (let i = 0; i < v.length; i += 3) { v[i] = 0; v[i + 2] = 0; }
+    for (let i = 0; i < v.length; i += 3) { if (!keep[0]) v[i] = 0; if (!keep[1]) v[i + 1] = 0; if (!keep[2]) v[i + 2] = 0; }
     changed = true;
     return new THREE.VectorKeyframeTrack(tr.name, tr.times, v);
   });
@@ -1079,8 +1093,14 @@ class ModelThumbnails {
       const rootRest = captureRootRest(obj);
       if (isRenderable(obj)) {
         const cs = obj.animations || [];
-        if (cs.length) poseAt(obj, cs[0]); // self-contained plays upright on its own mesh; no correction
-        const dataURL = this.snap(obj);
+        uprightRig(obj, null); // fixes Z-up self-contained files (e.g. some explosive dashes); no-op when upright
+        const refBox = posedBox(obj); // reference pose (set by uprightRig), before posing to a frame
+        if (cs.length) {
+          let rootBoneName = null;
+          obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
+          poseAt(obj, stripRootMotion(cs[0], rootBoneName, obj.userData.upAxis)); // in place, or a dash/locomotion clip drifts out of the still's frame
+        }
+        const dataURL = this.snap(obj, refBox);
         dispose(obj);
         return dataURL;
       }
@@ -1094,11 +1114,13 @@ class ModelThumbnails {
     }
   }
 
-  // snap adds an object to the shared scene, frames and renders it, then removes
-  // it (without disposing — the caller owns the object) and returns a PNG data URL.
-  snap(object) {
+  // snap adds an object to the shared scene, frames it to the given box (the character's
+  // constant reference box, so every thumbnail of a character is the same scale) and
+  // renders it, then removes it (without disposing — the caller owns the object) and
+  // returns a PNG data URL.
+  snap(object, box) {
     this.scene.add(object);
-    frame(object, this.camera, null);
+    frameBox(box, this.camera, null);
     this.renderer.render(this.scene, this.camera);
     const dataURL = this.renderer.domElement.toDataURL('image/png');
     this.scene.remove(object);
@@ -1128,11 +1150,22 @@ class ModelThumbnails {
     if (!rig) return null;
     let rootBoneName = null;
     rig.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-    const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName); // in place, so the still stays framed
+    // Orientation and framing are constant per rig, so compute them once on the pristine rig
+    // and cache. Re-measuring uprightRig on a rig already mutated by a prior thumbnail's pose
+    // reads stale skeleton state (skeleton.pose() doesn't fully restore after a mixer ran) and
+    // flips every other thumbnail; the lightbox avoids this by loading a fresh rig each open.
+    // synty is retargeted (measure its own bind, rootRest null); kevdev needs the clip's root
+    // axis. All clips of a rig share one convention, so one correction fits them all.
+    if (rig.userData.uprightQuat === undefined) {
+      if (rig.userData.baseQuat) rig.quaternion.copy(rig.userData.baseQuat);
+      uprightRig(rig, vendor === 'synty' ? null : rootRest);
+      rig.userData.uprightQuat = rig.quaternion.clone();
+      rig.userData.refBox = posedBox(rig).clone();
+    }
+    rig.quaternion.copy(rig.userData.uprightQuat);
+    const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName, rig.userData.upAxis); // in place, so the still stays framed
     const mixer = poseAt(rig, posed);
-    if (rig.userData.baseQuat) rig.quaternion.copy(rig.userData.baseQuat); // rig is cached; drop the prior thumb's uprightRig before re-correcting
-    if (vendor !== 'synty') uprightRig(rig, rootRest); // kevdev file-axis flip; synty handled by retarget
-    const dataURL = this.snap(rig);
+    const dataURL = this.snap(rig, rig.userData.refBox);
     mixer.stopAllAction();
     return dataURL;
   }
@@ -1424,9 +1457,8 @@ function startViewer(container, asset) {
   // a transparent shadow-catcher plane so the directional light drops a soft shadow, and
   // the light's shadow frustum is sized to the character (Synty rigs are ~100+ units tall).
   let ground = null, shadowPlane = null;
-  const placeGround = (object) => {
-    const box = posedBox(object);
-    if (box.isEmpty()) return;
+  const placeGround = (object, box) => {
+    if (!box || box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 1;
     // Ground at the lowest bone (feet), not box.min.y — posedBox pads its bounds, which
@@ -1452,9 +1484,8 @@ function startViewer(container, asset) {
   };
   // Aim slightly above the vertical centre so the character sits centred in the viewport
   // (a touch of lift reads more naturally than dead-centre without wasting the top third).
-  const eyeLevel = (object) => {
-    const box = posedBox(object);
-    if (box.isEmpty()) return;
+  const eyeLevel = (box) => {
+    if (!box || box.isEmpty()) return;
     const dy = (box.min.y + (box.max.y - box.min.y) * 0.55) - controls.target.y;
     controls.target.y += dy;
     camera.position.y += dy;
@@ -1470,7 +1501,7 @@ function startViewer(container, asset) {
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
   let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
-  let rawClips = [], playRootName = null, motionOn = false, curClip = 0;
+  let rawClips = [], playRootName = null, playUpAxis = null, motionOn = false, curClip = 0;
 
   // View controls overlaid on the canvas: three view modes (isometric default / flat
   // eye-level / free rotation), and — for a root-motion clip — show the travel or in place.
@@ -1499,7 +1530,7 @@ function startViewer(container, asset) {
     motionOn = !motionOn;
     moveBtn.classList.toggle('on', motionOn);
     moveBtn.title = motionOn ? 'Showing root motion — click to play in place' : 'Playing in place — click to show root motion';
-    clips = motionOn ? rawClips : rawClips.map((c) => stripRootMotion(c, playRootName));
+    clips = motionOn ? rawClips : rawClips.map((c) => stripRootMotion(c, playRootName, playUpAxis));
     playClip(curClip);
   });
   moveBtn.hidden = true;
@@ -1541,26 +1572,23 @@ function startViewer(container, asset) {
     let rootBoneName = null;
     mixerRoot.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
     mixerRoot.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-    rawClips = cs; playRootName = rootBoneName;
-    clips = motionOn ? cs : cs.map((c) => stripRootMotion(c, rootBoneName));
+    // Correct orientation and measure the framing box first, from the character's constant
+    // reference (bind) pose — so scale, centering and the ground stay fixed no matter what
+    // the clip does. uprightRig leaves the skeleton in that reference pose and records the
+    // up axis (for in-place stripping); posedBox reads the pose; then the clip plays inside
+    // the fixed frame.
+    uprightRig(mixerRoot, rootRest);
+    rawClips = cs; playRootName = rootBoneName; playUpAxis = mixerRoot.userData.upAxis;
+    clips = motionOn ? cs : cs.map((c) => stripRootMotion(c, rootBoneName, playUpAxis));
     moveBtn.hidden = !/rootmotion|_rm\b|\[rm\]/i.test(asset.name || '');
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
+    const refBox = posedBox(mixerRoot);
+    frameBox(refBox, camera, controls);
+    placeGround(mixerRoot, refBox);
+    eyeLevel(refBox);
     playClip(0);
-    // Frame the animated pose, not the bind T-pose: playClip only queues the action, so
-    // the skeleton is still in its arms-spread bind until the mixer runs. Advance it to a
-    // representative mid-clip frame (as the thumbnails do) before measuring bounds.
-    mixer.update(clipDur * 0.5);
-    // A mesh-less clip posed on a body from a different file (kevdev) imports with a
-    // flipped root axis, so live playback renders upside down. Correct it from the clip's
-    // rest (pose-independent, so a fall/roll is preserved); a no-op without rootRest
-    // (self-contained or already-upright retargeted clips). Then re-frame.
-    mixerRoot.updateMatrixWorld(true);
-    uprightRig(mixerRoot, rootRest);
-    frame(mixerRoot, camera, controls);
-    placeGround(mixerRoot);
-    eyeLevel(mixerRoot);
   };
 
   // Load a chosen character and play the pending clip-only clips on it. Resolves
@@ -1574,7 +1602,7 @@ function startViewer(container, asset) {
       if (stopped) { dispose(char); return true; }
       clearOverlays(); ensureCanvas();
       if (obj) { scene.remove(obj); dispose(obj); }
-      obj = char; scene.add(char); frame(char, camera, controls);
+      obj = char; scene.add(char);
       mixer = null; action = null;
       buildPlayback(char, clips, { id: item.id, name: item.name }, asset.vendor === 'synty' ? null : soloRootRest);
       return true;
@@ -1724,9 +1752,12 @@ function startViewer(container, asset) {
     if (stopped) { dispose(root); return; }
     const cs = root.animations || [];
     if (isRenderable(root)) {
-      obj = root; scene.add(root); frame(root, camera, controls);
+      obj = root; scene.add(root);
       CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
-      if (cs.length) buildPlayback(root, cs, null, null); // self-contained: plays correctly on its own body
+      // buildPlayback corrects orientation and frames from the reference box; do the same
+      // for a static (clip-less) renderable so a Z-up model still stands upright and framed.
+      if (cs.length) buildPlayback(root, cs, null, null);
+      else { uprightRig(root, null); frameBox(posedBox(root), camera, controls); }
       return;
     }
     if (!cs.length) { dispose(root); showPlaceholder('No mesh to preview (data file).'); return; }
