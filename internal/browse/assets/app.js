@@ -738,8 +738,24 @@ function coversBones(have, want) {
   return hit / have.length >= 0.6 && hit / want.length >= 0.45;
 }
 
+// posedBox returns the object's bounds from its posed skeleton (bone world positions), not
+// Box3.setFromObject — which for a skinned mesh uses the bind pose at the origin and so
+// ignores the animation, leaving displaced/animated poses off-centre. Falls back to
+// geometry bounds for a static model with no skeleton. Padded to cover skin past the joints.
+const _posedV = new THREE.Vector3();
+function posedBox(object) {
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  let bones = 0;
+  object.traverse((n) => { if (n.isBone) { box.expandByPoint(n.getWorldPosition(_posedV)); bones++; } });
+  if (bones < 2) { box.setFromObject(object); return box; }
+  const pad = box.getSize(_posedV).length() * 0.06;
+  box.expandByScalar(pad || 0);
+  return box;
+}
+
 function frame(object, camera, controls, offset = 1.5) {
-  const box = new THREE.Box3().setFromObject(object);
+  const box = posedBox(object);
   if (box.isEmpty()) return;
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
@@ -1109,7 +1125,10 @@ class ModelThumbnails {
   async buildPosed(clip, vendor, rootRest) {
     const rig = await this.rigFor(clip, vendor);
     if (!rig) return null;
-    const mixer = poseAt(rig, await retargetedFor(clip, vendor, rig));
+    let rootBoneName = null;
+    rig.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
+    const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName); // in place, so the still stays framed
+    const mixer = poseAt(rig, posed);
     if (vendor !== 'synty') uprightRig(rig, rootRest); // kevdev file-axis flip; synty handled by retarget
     const dataURL = this.snap(rig);
     mixer.stopAllAction();
@@ -1407,7 +1426,7 @@ function startViewer(container, asset) {
   // the light's shadow frustum is sized to the character (Synty rigs are ~100+ units tall).
   let ground = null, shadowPlane = null;
   const placeGround = (object) => {
-    const box = new THREE.Box3().setFromObject(object);
+    const box = posedBox(object);
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 1;
@@ -1427,12 +1446,12 @@ function startViewer(container, asset) {
     sc.near = span * 0.1; sc.far = span * 6; sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span;
     sc.updateProjectionMatrix();
   };
-  // Raise the turntable to chest height so the view reads at eye level instead of framing
-  // on the pelvis (the bounding-box centre for a standing character).
+  // Aim slightly above the vertical centre so the character sits centred in the viewport
+  // (a touch of lift reads more naturally than dead-centre without wasting the top third).
   const eyeLevel = (object) => {
-    const box = new THREE.Box3().setFromObject(object);
+    const box = posedBox(object);
     if (box.isEmpty()) return;
-    const dy = (box.min.y + (box.max.y - box.min.y) * 0.72) - controls.target.y;
+    const dy = (box.min.y + (box.max.y - box.min.y) * 0.55) - controls.target.y;
     controls.target.y += dy;
     camera.position.y += dy;
     controls.update();
