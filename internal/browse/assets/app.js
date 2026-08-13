@@ -1416,10 +1416,7 @@ function startViewer(container, asset) {
   const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  // Turntable by default: spin around the vertical axis only, no up/down tilt, so an
-  // uprighted character stays upright and can't be rotated into a confusing angle.
-  controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2;
-  controls.enablePan = false;
+  controls.enablePan = false; // the lock toggle (applyLock, below) sets the turntable constraint
 
   // A ground grid under the character's feet gives the pose a floor to read against, plus
   // a transparent shadow-catcher plane so the directional light drops a soft shadow, and
@@ -1466,6 +1463,34 @@ function startViewer(container, asset) {
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
   let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
+  let rawClips = [], playRootName = null, motionOn = false, curClip = 0;
+
+  // View controls overlaid on the canvas: lock/unlock rotation (turntable vs free), and —
+  // for a root-motion clip — whether to show the travel or play in place.
+  const LOCK_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+  const LOCK_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.5"/></svg>';
+  const MOVE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>';
+  const lockBtn = document.createElement('button'); lockBtn.type = 'button'; lockBtn.className = 'lb-viewbtn lb-lock';
+  let rotLocked = true;
+  const applyLock = () => {
+    if (rotLocked) { controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2; }
+    else { controls.minPolarAngle = 0.0001; controls.maxPolarAngle = Math.PI - 0.0001; }
+    lockBtn.innerHTML = rotLocked ? LOCK_ON : LOCK_OFF;
+    lockBtn.classList.toggle('on', rotLocked);
+    lockBtn.title = rotLocked ? 'Turntable only — click for free rotation' : 'Free rotation — click to lock';
+    controls.update();
+  };
+  lockBtn.addEventListener('click', () => { rotLocked = !rotLocked; applyLock(); });
+  container.appendChild(lockBtn); applyLock();
+  const moveBtn = document.createElement('button'); moveBtn.type = 'button'; moveBtn.className = 'lb-viewbtn lb-move'; moveBtn.innerHTML = MOVE_ICON; moveBtn.hidden = true;
+  moveBtn.addEventListener('click', () => {
+    motionOn = !motionOn;
+    moveBtn.classList.toggle('on', motionOn);
+    moveBtn.title = motionOn ? 'Showing root motion — click to play in place' : 'Playing in place — click to show root motion';
+    clips = motionOn ? rawClips : rawClips.map((c) => stripRootMotion(c, playRootName));
+    playClip(curClip);
+  });
+  container.appendChild(moveBtn);
 
   const clearOverlays = () => { container.querySelectorAll('.lb-placeholder,.lb-controls').forEach((e) => e.remove()); };
   const ensureCanvas = () => { if (!renderer.domElement.isConnected) container.appendChild(renderer.domElement); };
@@ -1490,6 +1515,7 @@ function startViewer(container, asset) {
 
   const playClip = (i) => {
     if (action) action.stop();
+    curClip = i;
     action = mixer.clipAction(clips[i]);
     action.reset(); action.play();
     clipDur = clips[i].duration || 0;
@@ -1501,7 +1527,9 @@ function startViewer(container, asset) {
     let rootBoneName = null;
     mixerRoot.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
     mixerRoot.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-    clips = cs.map((c) => stripRootMotion(c, rootBoneName));
+    rawClips = cs; playRootName = rootBoneName;
+    clips = motionOn ? cs : cs.map((c) => stripRootMotion(c, rootBoneName));
+    moveBtn.hidden = !/rootmotion|_rm\b|\[rm\]/i.test(asset.name || '');
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
