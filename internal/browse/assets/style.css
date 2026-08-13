@@ -265,7 +265,7 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   display: flex;
   gap: 0;
   max-width: min(1120px, 94vw);
-  max-height: 90vh;
+  height: min(760px, 90vh);
   width: 100%;
   background: var(--panel);
   border: 1px solid var(--edge);
