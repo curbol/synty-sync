@@ -846,16 +846,18 @@ function syntyNeutral() {
 }
 
 // retargetClip rebuilds clip's rotation tracks onto rig's rest pose through the neutral.
-// Position tracks are dropped so the character animates in place with the rig's own bone
-// lengths. Returns the original clip when nothing maps (so a native rig still plays).
+// Position/scale tracks pass through unchanged so vertical motion (a squat's hip drop, a
+// jump) survives; horizontal locomotion is handled later by stripRootMotion. Returns the
+// original clip when no rotation maps (so a native rig still plays).
 function retargetClip(clip, neutral, rig) {
   rig.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.pose(); });
   const bind = new Map();
   rig.traverse((n) => { if (n.isBone) bind.set(n.name, n.quaternion.clone()); });
   const src = new THREE.Quaternion(), delta = new THREE.Quaternion(), inv = new THREE.Quaternion(), out = new THREE.Quaternion();
   const tracks = [];
+  let rotated = 0;
   for (const tr of clip.tracks) {
-    if (!tr.name.endsWith('.quaternion')) continue;
+    if (!tr.name.endsWith('.quaternion')) { tracks.push(tr); continue; }
     const bone = tr.name.slice(0, -'.quaternion'.length);
     const nq = neutral.get(bone), bq = bind.get(bone);
     if (!nq || !bq) continue;
@@ -868,8 +870,9 @@ function retargetClip(clip, neutral, rig) {
       vv[i] = out.x; vv[i + 1] = out.y; vv[i + 2] = out.z; vv[i + 3] = out.w;
     }
     tracks.push(new THREE.QuaternionKeyframeTrack(tr.name, tr.times, vv));
+    rotated++;
   }
-  return tracks.length ? new THREE.AnimationClip(clip.name, clip.duration, tracks) : clip;
+  return rotated ? new THREE.AnimationClip(clip.name, clip.duration, tracks) : clip;
 }
 
 // retargetedFor returns a clip playable on rig: the Synty mesh-less clips are rebased
@@ -880,11 +883,20 @@ async function retargetedFor(clip, vendor, rig) {
   return neutral ? retargetClip(clip, neutral, rig) : clip;
 }
 
-// stripRootMotion drops position tracks so a clip plays in place, keeping the character
-// centred in the preview instead of walking/running out of frame.
-function stripRootMotion(clip) {
-  const tracks = clip.tracks.filter((t) => !t.name.endsWith('.position'));
-  return tracks.length === clip.tracks.length ? clip : new THREE.AnimationClip(clip.name, clip.duration, tracks);
+// stripRootMotion zeroes the horizontal (X/Z) locomotion on the root bone's position
+// track, so a walk/run/lunge plays in place instead of drifting out of frame. Vertical (Y)
+// and every other track are kept, so squats, jumps, and hip bob still read.
+function stripRootMotion(clip, rootName) {
+  if (!rootName) return clip;
+  let changed = false;
+  const tracks = clip.tracks.map((tr) => {
+    if (tr.name !== rootName + '.position') return tr;
+    const v = tr.values.slice();
+    for (let i = 0; i < v.length; i += 3) { v[i] = 0; v[i + 2] = 0; }
+    changed = true;
+    return new THREE.VectorKeyframeTrack(tr.name, tr.times, v);
+  });
+  return changed ? new THREE.AnimationClip(clip.name, clip.duration, tracks) : clip;
 }
 
 function dispose(object) {
@@ -1374,10 +1386,13 @@ function startViewer(container, asset) {
   renderer.setSize(w, h);
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setClearColor(0x14161d, 1);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   scene.add(new THREE.HemisphereLight(0xffffff, 0x2a2c33, 3.0));
-  const dir = new THREE.DirectionalLight(0xffffff, 2.4); dir.position.set(4, 6, 5); scene.add(dir);
+  const dir = new THREE.DirectionalLight(0xffffff, 2.4); dir.position.set(4, 6, 5); dir.castShadow = true; scene.add(dir); scene.add(dir.target);
+  dir.shadow.mapSize.set(2048, 2048); dir.shadow.bias = -0.0005;
   const fill = new THREE.DirectionalLight(0xffffff, 1.0); fill.position.set(-4, 2, -3); scene.add(fill);
   const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -1387,16 +1402,40 @@ function startViewer(container, asset) {
   controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2;
   controls.enablePan = false;
 
-  // A ground grid under the character's feet gives the pose a floor to read against.
-  let ground = null;
+  // A ground grid under the character's feet gives the pose a floor to read against, plus
+  // a transparent shadow-catcher plane so the directional light drops a soft shadow, and
+  // the light's shadow frustum is sized to the character (Synty rigs are ~100+ units tall).
+  let ground = null, shadowPlane = null;
   const placeGround = (object) => {
     const box = new THREE.Box3().setFromObject(object);
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, size.z) || 1;
     if (ground) { scene.remove(ground); ground.geometry.dispose(); ground.material.dispose(); }
     ground = new THREE.GridHelper(Math.max(size.x, size.z) * 3 || 1, 16, 0x40444f, 0x2b2e37);
     ground.position.set(center.x, box.min.y, center.z);
     scene.add(ground);
+    if (shadowPlane) { scene.remove(shadowPlane); shadowPlane.geometry.dispose(); shadowPlane.material.dispose(); }
+    shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(span * 4, span * 4), new THREE.ShadowMaterial({ opacity: 0.32 }));
+    shadowPlane.rotation.x = -Math.PI / 2;
+    shadowPlane.position.set(center.x, box.min.y, center.z);
+    shadowPlane.receiveShadow = true;
+    scene.add(shadowPlane);
+    dir.position.set(center.x + span, box.max.y + span * 1.5, center.z + span * 0.6);
+    dir.target.position.copy(center); dir.target.updateMatrixWorld();
+    const sc = dir.shadow.camera;
+    sc.near = span * 0.1; sc.far = span * 6; sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span;
+    sc.updateProjectionMatrix();
+  };
+  // Raise the turntable to chest height so the view reads at eye level instead of framing
+  // on the pelvis (the bounding-box centre for a standing character).
+  const eyeLevel = (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) return;
+    const dy = (box.min.y + (box.max.y - box.min.y) * 0.72) - controls.target.y;
+    controls.target.y += dy;
+    camera.position.y += dy;
+    controls.update();
   };
   // A small corner gizmo showing the world axes from the current view, so orientation is
   // legible while turntable-spinning (X red, Y green/up, Z blue).
@@ -1440,7 +1479,10 @@ function startViewer(container, asset) {
   };
 
   const buildPlayback = (mixerRoot, cs, charInfo, rootRest) => {
-    clips = cs.map(stripRootMotion);
+    let rootBoneName = null;
+    mixerRoot.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
+    mixerRoot.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    clips = cs.map((c) => stripRootMotion(c, rootBoneName));
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
@@ -1453,6 +1495,7 @@ function startViewer(container, asset) {
     uprightRig(mixerRoot, rootRest);
     frame(mixerRoot, camera, controls);
     placeGround(mixerRoot);
+    eyeLevel(mixerRoot);
   };
 
   // Load a chosen character and play the pending clip-only clips on it. Resolves
@@ -1688,6 +1731,7 @@ function startViewer(container, asset) {
       if (mixer) mixer.stopAllAction();
       if (obj) dispose(obj);
       if (ground) { ground.geometry.dispose(); ground.material.dispose(); }
+      if (shadowPlane) { shadowPlane.geometry.dispose(); shadowPlane.material.dispose(); }
       gizmoScene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
       renderer.dispose();
       renderer.domElement.remove();
