@@ -1364,6 +1364,10 @@ function startViewer(container, asset) {
   const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
+  // Turntable by default: spin around the vertical axis only, no up/down tilt, so an
+  // uprighted character stays upright and can't be rotated into a confusing angle.
+  controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2;
+  controls.enablePan = false;
 
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
