@@ -864,6 +864,13 @@ async function retargetedFor(clip, vendor, rig) {
   return neutral ? retargetClip(clip, neutral, rig) : clip;
 }
 
+// stripRootMotion drops position tracks so a clip plays in place, keeping the character
+// centred in the preview instead of walking/running out of frame.
+function stripRootMotion(clip) {
+  const tracks = clip.tracks.filter((t) => !t.name.endsWith('.position'));
+  return tracks.length === clip.tracks.length ? clip : new THREE.AnimationClip(clip.name, clip.duration, tracks);
+}
+
 function dispose(object) {
   object.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
@@ -1393,11 +1400,19 @@ function startViewer(container, asset) {
   };
 
   const buildPlayback = (mixerRoot, cs, charInfo) => {
-    clips = cs;
+    clips = cs.map(stripRootMotion);
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
     playClip(0);
+    // Some vendors' mesh-less clips (kevdev) import with a bind flipped from their body
+    // rig, so live playback renders upside down. Upright the character from a
+    // representative frame (a no-op for already-upright retargeted/native clips), then
+    // resume from the start and re-frame.
+    mixer.setTime((clipDur || 0) * 0.5); mixerRoot.updateMatrixWorld(true);
+    uprightPose(mixerRoot);
+    mixer.setTime(0); mixerRoot.updateMatrixWorld(true);
+    frame(mixerRoot, camera, controls);
   };
 
   // Load a chosen character and play the pending clip-only clips on it. Resolves
