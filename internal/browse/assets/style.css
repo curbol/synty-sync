@@ -310,8 +310,8 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
 .lb-viewbtn:hover { background: rgba(0, 0, 0, 0.75); }
 .lb-viewbtn.on { color: #f6d488; }
 .lb-viewbtn[hidden] { display: none; }
-.lb-lock { bottom: 100px; }
-.lb-move { bottom: 142px; }
+.lb-lock { bottom: 132px; }
+.lb-move { bottom: 174px; }
 .lb-clipsel { max-width: 170px; background: var(--bg); color: var(--text); border: 1px solid var(--edge); border-radius: 6px; padding: 4px; font: inherit; }
 
 /* character sidebar panel */

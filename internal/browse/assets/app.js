@@ -1761,9 +1761,9 @@ function startViewer(container, asset) {
     // orientation gizmo, bottom-left corner
     renderer.autoClear = false;
     renderer.clearDepth();
-    const g = 78;
-    renderer.setViewport(12, 12, g, g);
-    renderer.setScissor(12, 12, g, g);
+    const g = 66;
+    renderer.setViewport(10, 58, g, g); // above the controls bar, aligned with the toggle buttons
+    renderer.setScissor(10, 58, g, g);
     renderer.setScissorTest(true);
     gizmoCam.position.copy(camera.position).sub(controls.target).normalize().multiplyScalar(3);
     gizmoCam.lookAt(0, 0, 0);
