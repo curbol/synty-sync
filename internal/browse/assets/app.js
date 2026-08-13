@@ -802,6 +802,68 @@ function poseAt(root, clip) {
   return mixer;
 }
 
+// ---- rig-agnostic clip retargeting for the mesh-less Synty animation clips ----
+// The Synty animation clips are authored on one shared rig whose neutral is the T-pose
+// clip A_TPose_Neut. Playing a clip's raw local rotations on a different character rig
+// distorts it (their bind poses differ); rebasing each rotation through the shared
+// neutral — rigBind · neutral⁻¹ · sourceFrame — makes any Synty T-pose character play any
+// clip cleanly. syntyNeutral loads that neutral once (per-bone local quaternions).
+let syntyNeutralPromise = null;
+function syntyNeutral() {
+  if (syntyNeutralPromise) return syntyNeutralPromise;
+  syntyNeutralPromise = (async () => {
+    try {
+      const r = await fetch('/api/assets?vendor=synty&limit=8&group=0&q=' + encodeURIComponent('A_TPose_Neut'));
+      const items = (await r.json()).items || [];
+      const it = items.find((x) => x.name === 'A_TPose_Neut.fbx') || items[0];
+      if (!it) return null;
+      const o = await loadModel(contentURL(it.id), it.ext);
+      const clip = (o.animations || [])[0];
+      if (clip) { const m = new THREE.AnimationMixer(o); m.clipAction(clip).play(); m.setTime((clip.duration || 0) * 0.5); }
+      const map = new Map();
+      o.traverse((n) => { if (n.isBone) map.set(n.name, n.quaternion.clone()); });
+      dispose(o);
+      return map.size ? map : null;
+    } catch { return null; }
+  })();
+  return syntyNeutralPromise;
+}
+
+// retargetClip rebuilds clip's rotation tracks onto rig's rest pose through the neutral.
+// Position tracks are dropped so the character animates in place with the rig's own bone
+// lengths. Returns the original clip when nothing maps (so a native rig still plays).
+function retargetClip(clip, neutral, rig) {
+  rig.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.pose(); });
+  const bind = new Map();
+  rig.traverse((n) => { if (n.isBone) bind.set(n.name, n.quaternion.clone()); });
+  const src = new THREE.Quaternion(), delta = new THREE.Quaternion(), inv = new THREE.Quaternion(), out = new THREE.Quaternion();
+  const tracks = [];
+  for (const tr of clip.tracks) {
+    if (!tr.name.endsWith('.quaternion')) continue;
+    const bone = tr.name.slice(0, -'.quaternion'.length);
+    const nq = neutral.get(bone), bq = bind.get(bone);
+    if (!nq || !bq) continue;
+    inv.copy(nq).invert();
+    const v = tr.values, vv = new Float32Array(v.length);
+    for (let i = 0; i < v.length; i += 4) {
+      src.set(v[i], v[i + 1], v[i + 2], v[i + 3]);
+      delta.copy(inv).multiply(src);
+      out.copy(bq).multiply(delta);
+      vv[i] = out.x; vv[i + 1] = out.y; vv[i + 2] = out.z; vv[i + 3] = out.w;
+    }
+    tracks.push(new THREE.QuaternionKeyframeTrack(tr.name, tr.times, vv));
+  }
+  return tracks.length ? new THREE.AnimationClip(clip.name, clip.duration, tracks) : clip;
+}
+
+// retargetedFor returns a clip playable on rig: the Synty mesh-less clips are rebased
+// through the shared neutral; everything else plays as-is.
+async function retargetedFor(clip, vendor, rig) {
+  if (vendor !== 'synty') return clip;
+  const neutral = await syntyNeutral();
+  return neutral ? retargetClip(clip, neutral, rig) : clip;
+}
+
 function dispose(object) {
   object.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
@@ -1011,7 +1073,7 @@ class ModelThumbnails {
   async buildPosed(clip, vendor) {
     const rig = await this.rigFor(clip, vendor);
     if (!rig) return null;
-    const mixer = poseAt(rig, clip);
+    const mixer = poseAt(rig, await retargetedFor(clip, vendor, rig));
     const dataURL = this.snap(rig);
     mixer.stopAllAction();
     return dataURL;
@@ -1342,14 +1404,16 @@ function startViewer(container, asset) {
   // true on success, false if the character couldn't load — so callers can fall
   // back to another rig or the picker instead of leaving an empty viewer.
   const useCharacter = (item) =>
-    loadModel(contentURL(item.id), item.ext).then((char) => {
+    loadModel(contentURL(item.id), item.ext).then(async (char) => {
       if (stopped) { dispose(char); return true; }
       CharRegistry.add({ id: item.id, name: item.name, ext: item.ext, bones: boneNames(char), vendor: item.vendor });
+      const clips = await Promise.all(soloClips.map((c) => retargetedFor(c, asset.vendor, char)));
+      if (stopped) { dispose(char); return true; }
       clearOverlays(); ensureCanvas();
       if (obj) { scene.remove(obj); dispose(obj); }
       obj = char; scene.add(char); frame(char, camera, controls);
       mixer = null; action = null;
-      buildPlayback(char, soloClips, { id: item.id, name: item.name });
+      buildPlayback(char, clips, { id: item.id, name: item.name });
       return true;
     }).catch(() => false);
 
