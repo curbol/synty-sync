@@ -1470,33 +1470,39 @@ function startViewer(container, asset) {
   let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
   let rawClips = [], playRootName = null, motionOn = false, curClip = 0;
 
-  // View controls overlaid on the canvas: lock/unlock rotation (turntable vs free), and —
-  // for a root-motion clip — whether to show the travel or play in place.
-  const LOCK_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
-  const LOCK_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.5"/></svg>';
+  // View controls overlaid on the canvas: three view modes (isometric default / flat
+  // eye-level / free rotation), and — for a root-motion clip — show the travel or in place.
+  const ISO_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg>';
+  const FLAT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 14h18"/></svg>';
+  const FREE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>';
   const MOVE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>';
-  const lockBtn = document.createElement('button'); lockBtn.type = 'button'; lockBtn.className = 'lb-viewbtn lb-lock';
-  const DEFAULT_POLAR = Math.PI * 0.36; // an elevated 3/4 (isometric-ish) view, not flat-on
-  let rotLocked = true;
-  const applyLock = () => {
-    if (rotLocked) { controls.minPolarAngle = controls.maxPolarAngle = DEFAULT_POLAR; }
+  const DEFAULT_POLAR = Math.PI * 0.36; // elevated 3/4 (isometric-ish) angle
+  const toolbar = document.createElement('div'); toolbar.className = 'lb-viewtools';
+  const mkBtn = (cls, svg, title, onClick) => {
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'lb-viewbtn ' + cls;
+    btn.innerHTML = svg; btn.title = title; btn.addEventListener('click', onClick); toolbar.appendChild(btn); return btn;
+  };
+  const viewBtns = {};
+  const setViewMode = (mode) => {
+    if (mode === 'iso') { controls.minPolarAngle = controls.maxPolarAngle = DEFAULT_POLAR; }
+    else if (mode === 'flat') { controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2; }
     else { controls.minPolarAngle = 0.0001; controls.maxPolarAngle = Math.PI - 0.0001; }
-    lockBtn.innerHTML = rotLocked ? LOCK_ON : LOCK_OFF;
-    lockBtn.classList.toggle('on', rotLocked);
-    lockBtn.title = rotLocked ? 'Turntable only — click for free rotation' : 'Free rotation — click to lock';
+    for (const m in viewBtns) viewBtns[m].classList.toggle('on', m === mode);
     controls.update();
   };
-  lockBtn.addEventListener('click', () => { rotLocked = !rotLocked; applyLock(); });
-  container.appendChild(lockBtn); applyLock();
-  const moveBtn = document.createElement('button'); moveBtn.type = 'button'; moveBtn.className = 'lb-viewbtn lb-move'; moveBtn.innerHTML = MOVE_ICON; moveBtn.hidden = true;
-  moveBtn.addEventListener('click', () => {
+  viewBtns.iso = mkBtn('', ISO_ICON, 'Isometric view', () => setViewMode('iso'));
+  viewBtns.flat = mkBtn('', FLAT_ICON, 'Flat (eye-level) view', () => setViewMode('flat'));
+  viewBtns.free = mkBtn('', FREE_ICON, 'Free rotation', () => setViewMode('free'));
+  const moveBtn = mkBtn('lb-move', MOVE_ICON, '', () => {
     motionOn = !motionOn;
     moveBtn.classList.toggle('on', motionOn);
     moveBtn.title = motionOn ? 'Showing root motion — click to play in place' : 'Playing in place — click to show root motion';
     clips = motionOn ? rawClips : rawClips.map((c) => stripRootMotion(c, playRootName));
     playClip(curClip);
   });
-  container.appendChild(moveBtn);
+  moveBtn.hidden = true;
+  container.appendChild(toolbar);
+  setViewMode('iso');
 
   const clearOverlays = () => { container.querySelectorAll('.lb-placeholder,.lb-controls').forEach((e) => e.remove()); };
   const ensureCanvas = () => { if (!renderer.domElement.isConnected) container.appendChild(renderer.domElement); };
@@ -1762,8 +1768,8 @@ function startViewer(container, asset) {
     renderer.autoClear = false;
     renderer.clearDepth();
     const g = 66;
-    renderer.setViewport(10, 58, g, g); // above the controls bar, aligned with the toggle buttons
-    renderer.setScissor(10, 58, g, g);
+    renderer.setViewport(2, 48, g, g); // lower-left, just clear of the controls bar
+    renderer.setScissor(2, 48, g, g);
     renderer.setScissorTest(true);
     gizmoCam.position.copy(camera.position).sub(controls.target).normalize().multiplyScalar(3);
     gizmoCam.lookAt(0, 0, 0);
