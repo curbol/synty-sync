@@ -1117,6 +1117,7 @@ class ModelThumbnails {
       const rig = await loadModel(contentURL(m.id), m.ext)
         .then((r) => (isRenderable(r) ? r : (dispose(r), null)))
         .catch(() => null);
+      if (rig) rig.userData.baseQuat = rig.quaternion.clone();
       this.rigs.set(m.id, rig);
     }
     return this.rigs.get(m.id);
@@ -1129,6 +1130,7 @@ class ModelThumbnails {
     rig.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
     const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName); // in place, so the still stays framed
     const mixer = poseAt(rig, posed);
+    if (rig.userData.baseQuat) rig.quaternion.copy(rig.userData.baseQuat); // rig is cached; drop the prior thumb's uprightRig before re-correcting
     if (vendor !== 'synty') uprightRig(rig, rootRest); // kevdev file-axis flip; synty handled by retarget
     const dataURL = this.snap(rig);
     mixer.stopAllAction();
@@ -1546,6 +1548,10 @@ function startViewer(container, asset) {
     ctrls = makeControls();
     renderCharacter(charInfo);
     playClip(0);
+    // Frame the animated pose, not the bind T-pose: playClip only queues the action, so
+    // the skeleton is still in its arms-spread bind until the mixer runs. Advance it to a
+    // representative mid-clip frame (as the thumbnails do) before measuring bounds.
+    mixer.update(clipDur * 0.5);
     // A mesh-less clip posed on a body from a different file (kevdev) imports with a
     // flipped root axis, so live playback renders upside down. Correct it from the clip's
     // rest (pose-independent, so a fall/roll is preserved); a no-op without rootRest
