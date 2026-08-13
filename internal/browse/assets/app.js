@@ -579,7 +579,9 @@ function thumbContent(a) {
     return img;
   }
   if (a.thumb === 'glb' || a.thumb === 'fbx') {
-    const holder = iconEl(a.category);
+    const holder = document.createElement('div');
+    holder.className = 'thumb-3d';
+    holder.appendChild(iconEl(a.category));
     modelThumbs.observe(holder, a);
     return holder;
   }
@@ -898,6 +900,7 @@ class ModelThumbnails {
       for (const e of entries) {
         if (e.isIntersecting) {
           this.observer.unobserve(e.target);
+          e.target.classList.add('loading'); // queued or rendering; cleared when the image swaps in
           this.enqueue(e.target, e.target._asset);
         }
       }
@@ -928,6 +931,8 @@ class ModelThumbnails {
       const img = new Image();
       img.src = url;
       holder.replaceWith(img);
+    } else if (holder.isConnected) {
+      holder.classList.remove('loading'); // no render (failed/mesh-less-no-rig): drop the spinner
     }
   }
   async build(asset) {
