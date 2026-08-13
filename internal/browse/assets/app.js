@@ -1387,6 +1387,24 @@ function startViewer(container, asset) {
   controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2;
   controls.enablePan = false;
 
+  // A ground grid under the character's feet gives the pose a floor to read against.
+  let ground = null;
+  const placeGround = (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    if (ground) { scene.remove(ground); ground.geometry.dispose(); ground.material.dispose(); }
+    ground = new THREE.GridHelper(Math.max(size.x, size.z) * 3 || 1, 16, 0x40444f, 0x2b2e37);
+    ground.position.set(center.x, box.min.y, center.z);
+    scene.add(ground);
+  };
+  // A small corner gizmo showing the world axes from the current view, so orientation is
+  // legible while turntable-spinning (X red, Y green/up, Z blue).
+  const gizmoScene = new THREE.Scene();
+  gizmoScene.add(new THREE.AxesHelper(1));
+  const gizmoCam = new THREE.OrthographicCamera(-1.5, 1.5, 1.5, -1.5, 0.1, 10);
+  const viewSize = new THREE.Vector2();
+
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
   let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
@@ -1434,6 +1452,7 @@ function startViewer(container, asset) {
     mixerRoot.updateMatrixWorld(true);
     uprightRig(mixerRoot, rootRest);
     frame(mixerRoot, camera, controls);
+    placeGround(mixerRoot);
   };
 
   // Load a chosen character and play the pending clip-only clips on it. Resolves
@@ -1643,6 +1662,20 @@ function startViewer(container, asset) {
     if (mixer) { const dt = clock.getDelta(); if (playing) { mixer.update(dt); if (action && ctrls) ctrls.sync(action.time); } }
     controls.update();
     renderer.render(scene, camera);
+    // orientation gizmo, bottom-left corner
+    renderer.autoClear = false;
+    renderer.clearDepth();
+    const g = 78;
+    renderer.setViewport(12, 12, g, g);
+    renderer.setScissor(12, 12, g, g);
+    renderer.setScissorTest(true);
+    gizmoCam.position.copy(camera.position).sub(controls.target).normalize().multiplyScalar(3);
+    gizmoCam.lookAt(0, 0, 0);
+    renderer.render(gizmoScene, gizmoCam);
+    renderer.setScissorTest(false);
+    renderer.getSize(viewSize);
+    renderer.setViewport(0, 0, viewSize.x, viewSize.y);
+    renderer.autoClear = true;
   };
   loop();
 
@@ -1654,6 +1687,8 @@ function startViewer(container, asset) {
       controls.dispose();
       if (mixer) mixer.stopAllAction();
       if (obj) dispose(obj);
+      if (ground) { ground.geometry.dispose(); ground.material.dispose(); }
+      gizmoScene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
       renderer.dispose();
       renderer.domElement.remove();
     },
