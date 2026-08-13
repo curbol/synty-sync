@@ -1427,14 +1427,19 @@ function startViewer(container, asset) {
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 1;
+    // Ground at the lowest bone (feet), not box.min.y — posedBox pads its bounds, which
+    // would float the plane ~0.1 below the feet and leave the character hovering.
+    let footY = Infinity;
+    object.traverse((n) => { if (n.isBone) footY = Math.min(footY, n.getWorldPosition(_posedV).y); });
+    if (!isFinite(footY)) footY = box.min.y;
     if (ground) { scene.remove(ground); ground.geometry.dispose(); ground.material.dispose(); }
     ground = new THREE.GridHelper(Math.max(size.x, size.z) * 3 || 1, 16, 0x40444f, 0x2b2e37);
-    ground.position.set(center.x, box.min.y, center.z);
+    ground.position.set(center.x, footY, center.z);
     scene.add(ground);
     if (shadowPlane) { scene.remove(shadowPlane); shadowPlane.geometry.dispose(); shadowPlane.material.dispose(); }
     shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(span * 4, span * 4), new THREE.ShadowMaterial({ opacity: 0.32 }));
     shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.set(center.x, box.min.y, center.z);
+    shadowPlane.position.set(center.x, footY, center.z);
     shadowPlane.receiveShadow = true;
     scene.add(shadowPlane);
     dir.position.set(center.x + span, box.max.y + span * 1.5, center.z + span * 0.6);
@@ -1471,9 +1476,10 @@ function startViewer(container, asset) {
   const LOCK_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.5"/></svg>';
   const MOVE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>';
   const lockBtn = document.createElement('button'); lockBtn.type = 'button'; lockBtn.className = 'lb-viewbtn lb-lock';
+  const DEFAULT_POLAR = Math.PI * 0.36; // an elevated 3/4 (isometric-ish) view, not flat-on
   let rotLocked = true;
   const applyLock = () => {
-    if (rotLocked) { controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2; }
+    if (rotLocked) { controls.minPolarAngle = controls.maxPolarAngle = DEFAULT_POLAR; }
     else { controls.minPolarAngle = 0.0001; controls.maxPolarAngle = Math.PI - 0.0001; }
     lockBtn.innerHTML = rotLocked ? LOCK_ON : LOCK_OFF;
     lockBtn.classList.toggle('on', rotLocked);
