@@ -767,6 +767,28 @@ function isRenderable(object) {
   return dims[0] > dims[2] * 1e-3;
 }
 
+// uprightPose rotates a posed character so its spine (hips → head) points up. Turn and
+// root-motion clips rotate the whole body through the root bone, which would otherwise
+// render the still lying on its side or upside down; this cancels that. A near-no-op for
+// an already-upright pose, and skipped when the hip/head landmarks aren't found.
+function uprightPose(root) {
+  root.updateMatrixWorld(true);
+  let hips = null, head = null, neck = null;
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    const n = o.name.toLowerCase();
+    if (!hips && (n.includes('hips') || n.includes('pelvis'))) hips = o;
+    if (!head && n.includes('head')) head = o;
+    if (!neck && n.includes('neck')) neck = o;
+  });
+  const top = head || neck;
+  if (!hips || !top) return;
+  const up = top.getWorldPosition(new THREE.Vector3()).sub(hips.getWorldPosition(new THREE.Vector3()));
+  if (up.lengthSq() < 1e-6) return;
+  root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(up.normalize(), new THREE.Vector3(0, 1, 0)));
+  root.updateMatrixWorld(true);
+}
+
 // poseAt drives root to a representative mid-clip frame and returns the mixer, so a
 // still shows real motion instead of the bind (T-)pose. skeleton.pose() first clears
 // any prior binding on a reused rig. A zero/NaN-duration clip falls back to frame 0.
@@ -775,6 +797,7 @@ function poseAt(root, clip) {
   const mixer = new THREE.AnimationMixer(root);
   mixer.clipAction(clip).play();
   mixer.setTime(clip.duration > 0 ? clip.duration * 0.5 : 0);
+  uprightPose(root);
   return mixer;
 }
 
