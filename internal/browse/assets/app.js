@@ -1532,7 +1532,11 @@ function startViewer(container, asset) {
     const nw = container.clientWidth, nh = container.clientHeight;
     if (nw && nh) { renderer.setSize(nw, nh); camera.aspect = nw / nh; camera.updateProjectionMatrix(); }
   };
-  window.addEventListener('resize', onResize);
+  // A ResizeObserver (not a one-shot clientWidth read) so the canvas fills the viewer
+  // whether it was created while the lightbox was still hidden (first open) or already
+  // visible (navigating) — otherwise the initial size flip-flops between the two.
+  const ro = new ResizeObserver(onResize);
+  ro.observe(container);
   const loop = () => {
     raf = requestAnimationFrame(loop);
     if (mixer) { const dt = clock.getDelta(); if (playing) { mixer.update(dt); if (action && ctrls) ctrls.sync(action.time); } }
@@ -1545,7 +1549,7 @@ function startViewer(container, asset) {
     stop() {
       stopped = true;
       cancelAnimationFrame(raf);
-      window.removeEventListener('resize', onResize);
+      ro.disconnect();
       controls.dispose();
       if (mixer) mixer.stopAllAction();
       if (obj) dispose(obj);

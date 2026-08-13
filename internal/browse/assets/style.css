@@ -402,10 +402,10 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
 }
 .lb-close:hover { background: rgba(0, 0, 0, 0.65); }
 .lb-nav {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 2;
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  margin: 0 14px;
   background: rgba(0, 0, 0, 0.4);
   color: var(--text);
   border: 0;
@@ -421,8 +421,6 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   transition: background .15s, opacity .15s;
 }
 .lb-nav:hover { background: rgba(0, 0, 0, 0.7); }
-.lb-nav-prev { left: 24px; }
-.lb-nav-next { right: 24px; }
 .lb-nav:disabled { opacity: 0.25; cursor: default; }
 @media (max-width: 720px) {
   .lb-panel { flex-direction: column; }
