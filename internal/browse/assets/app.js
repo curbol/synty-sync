@@ -15,7 +15,7 @@ const els = {
   empty: document.getElementById('empty'),
 };
 
-const state = { offset: 0, total: 0, loading: false, done: false, facetsLoaded: false };
+const state = { offset: 0, total: 0, loading: false, done: false, facetsLoaded: false, items: [] };
 
 // ---- data ----
 
@@ -52,7 +52,7 @@ async function fetchPage() {
   const data = await res.json();
   if (!state.facetsLoaded) { populateFacets(data.facets); state.facetsLoaded = true; }
   state.total = data.total;
-  for (const a of data.items) els.grid.appendChild(card(a));
+  for (const a of data.items) { state.items.push(a); els.grid.appendChild(card(a)); }
   state.offset += data.items.length;
   if (data.items.length === 0 || state.offset >= data.total) state.done = true;
   els.count.textContent = state.total + (state.total === 1 ? ' asset' : ' assets');
@@ -65,6 +65,7 @@ async function fetchPage() {
 
 function reset() {
   state.offset = 0; state.total = 0; state.done = false; state.loading = false;
+  state.items = [];
   els.grid.replaceChildren();
   fetchPage();
 }
@@ -1029,10 +1030,37 @@ const lb = {
   related: document.getElementById('lb-related'),
   character: document.getElementById('lb-character'),
   copies: document.getElementById('lb-copies'),
+  prev: document.getElementById('lb-prev'),
+  next: document.getElementById('lb-next'),
+  index: -1,
 };
 let activeViewer = null;
 
+// updateLbNav enables/disables the prev/next arrows for the current position in the
+// loaded result set. Next stays enabled at the tail while more pages can still load.
+function updateLbNav() {
+  lb.prev.disabled = lb.index <= 0;
+  lb.next.disabled = lb.index < 0 || (lb.index >= state.items.length - 1 && state.done);
+}
+
+// navLightbox steps to an adjacent asset in the filtered result set, loading the next
+// page first when stepping past the last loaded item.
+async function navLightbox(delta) {
+  if (lb.root.hidden || lb.index < 0) return;
+  let i = lb.index + delta;
+  if (i < 0) return;
+  if (i >= state.items.length) {
+    if (state.done) return;
+    await fetchPage();
+    if (i >= state.items.length) return;
+  }
+  openLightbox(state.items[i]);
+}
+
 function openLightbox(a) {
+  if (activeViewer) { activeViewer.stop(); activeViewer = null; } // tear down when navigating
+  lb.index = state.items.indexOf(a);
+  updateLbNav();
   lb.name.textContent = a.name;
   // The metadata carries the shared file properties; every location (one or many)
   // lives in the copies list below, so there's a single copy system either way.
@@ -1529,7 +1557,16 @@ function startViewer(container, asset) {
 
 document.getElementById('lb-close').addEventListener('click', closeLightbox);
 lb.root.querySelector('.lb-backdrop').addEventListener('click', closeLightbox);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !lb.root.hidden) closeLightbox(); });
+lb.prev.addEventListener('click', () => navLightbox(-1));
+lb.next.addEventListener('click', () => navLightbox(1));
+document.addEventListener('keydown', (e) => {
+  if (lb.root.hidden) return;
+  if (e.key === 'Escape') { closeLightbox(); return; }
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); navLightbox(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); navLightbox(1); }
+});
 
 // ---- misc ----
 
