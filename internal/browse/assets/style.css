@@ -210,7 +210,7 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
 }
 .thumb .ext-badge { right: 6px; text-transform: uppercase; letter-spacing: 0.03em; color: #c9bfb4; }
 .thumb .vendor-badge { left: 6px; }
-.count-badge { position: absolute; top: 6px; left: 6px; font-size: 10px; font-weight: 700; background: var(--accent); color: var(--accent-ink); padding: 2px 6px; border-radius: 6px; }
+.count-badge { position: absolute; top: 6px; left: 8px; font-size: 10px; font-weight: 700; color: var(--accent); }
 
 /* Copy icon: hover-revealed, top-right; ✓ tick on success via ::after. */
 .card .copy-icon {
