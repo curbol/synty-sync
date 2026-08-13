@@ -1764,18 +1764,18 @@ function startViewer(container, asset) {
     if (mixer) { const dt = clock.getDelta(); if (playing) { mixer.update(dt); if (action && ctrls) ctrls.sync(action.time); } }
     controls.update();
     renderer.render(scene, camera);
-    // orientation gizmo, bottom-left corner
+    // orientation gizmo, top-left corner (in a row with the view toolbar)
+    renderer.getSize(viewSize);
     renderer.autoClear = false;
     renderer.clearDepth();
-    const g = 66;
-    renderer.setViewport(2, 48, g, g); // lower-left, just clear of the controls bar
-    renderer.setScissor(2, 48, g, g);
+    const g = 52, gx = 10, gy = viewSize.y - g - 8;
+    renderer.setViewport(gx, gy, g, g);
+    renderer.setScissor(gx, gy, g, g);
     renderer.setScissorTest(true);
     gizmoCam.position.copy(camera.position).sub(controls.target).normalize().multiplyScalar(3);
     gizmoCam.lookAt(0, 0, 0);
     renderer.render(gizmoScene, gizmoCam);
     renderer.setScissorTest(false);
-    renderer.getSize(viewSize);
     renderer.setViewport(0, 0, viewSize.x, viewSize.y);
     renderer.autoClear = true;
   };
