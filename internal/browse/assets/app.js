@@ -790,6 +790,45 @@ function uprightPose(root) {
   root.updateMatrixWorld(true);
 }
 
+// captureRootMotionRest returns the clip source's top-level bone rest quaternion — the
+// bone's local rotation before any animation. It encodes the file's own axis convention,
+// so a mesh-less clip posed on a body from a different file can be corrected regardless of
+// what the character is doing (see uprightRig).
+function captureRootRest(obj) {
+  let rr = null;
+  obj.traverse((n) => { if (n.isBone && !rr && (!n.parent || !n.parent.isBone)) rr = n.quaternion.clone(); });
+  return rr;
+}
+
+// uprightRig corrects the fixed orientation flip that appears when a mesh-less clip is
+// posed on a body exported with a different root-bone axis (e.g. kevdev clips on their
+// HumanF_Model body). It derives the flip from the clip's own rest T-pose — momentarily
+// posing the body's root bone at that rest and reading which way the (straight) spine
+// points — then rotates the whole object by a fixed amount. Because the measurement uses
+// the rest, not the animated frame, it is pose-independent: a fall/roll/sit stays as
+// authored, only the file-axis flip is removed. No-op without a rootRest or landmarks.
+function uprightRig(root, rootRest) {
+  if (!rootRest) return;
+  let rootBone = null, hips = null, head = null, neck = null;
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    const n = o.name.toLowerCase();
+    if (!rootBone && (!o.parent || !o.parent.isBone)) rootBone = o;
+    if (!hips && (n.includes('hips') || n.includes('pelvis'))) hips = o;
+    if (!head && n.includes('head')) head = o;
+    if (!neck && n.includes('neck')) neck = o;
+  });
+  const top = head || neck;
+  if (!rootBone || !hips || !top) return;
+  const saved = rootBone.quaternion.clone();
+  rootBone.quaternion.copy(rootRest); root.updateMatrixWorld(true);
+  const up = top.getWorldPosition(new THREE.Vector3()).sub(hips.getWorldPosition(new THREE.Vector3()));
+  rootBone.quaternion.copy(saved); root.updateMatrixWorld(true);
+  if (up.lengthSq() < 1e-6) return;
+  root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(up.normalize(), new THREE.Vector3(0, 1, 0)));
+  root.updateMatrixWorld(true);
+}
+
 // poseAt drives root to a representative mid-clip frame and returns the mixer, so a
 // still shows real motion instead of the bind (T-)pose. skeleton.pose() first clears
 // any prior binding on a reused rig. A zero/NaN-duration clip falls back to frame 0.
@@ -798,7 +837,6 @@ function poseAt(root, clip) {
   const mixer = new THREE.AnimationMixer(root);
   mixer.clipAction(clip).play();
   mixer.setTime(clip.duration > 0 ? clip.duration * 0.5 : 0);
-  uprightPose(root);
   return mixer;
 }
 
@@ -1032,9 +1070,10 @@ class ModelThumbnails {
     try {
       this.ensureRenderer();
       const obj = await loadModel(contentURL(asset.id), asset.ext);
+      const rootRest = captureRootRest(obj);
       if (isRenderable(obj)) {
         const cs = obj.animations || [];
-        if (cs.length) poseAt(obj, cs[0]); // a self-contained animated model, posed not bind
+        if (cs.length) { poseAt(obj, cs[0]); uprightPose(obj); } // self-contained: a mid-frame still, uprighted
         const dataURL = this.snap(obj);
         dispose(obj);
         return dataURL;
@@ -1043,7 +1082,7 @@ class ModelThumbnails {
       // each clip gets a distinguishable still instead of the same bare icon.
       const clips = obj.animations || [];
       dispose(obj);
-      return clips.length ? await this.buildPosed(clips[0], asset.vendor) : null;
+      return clips.length ? await this.buildPosed(clips[0], asset.vendor, rootRest) : null;
     } catch (e) {
       return null;
     }
@@ -1077,10 +1116,11 @@ class ModelThumbnails {
     return this.rigs.get(m.id);
   }
 
-  async buildPosed(clip, vendor) {
+  async buildPosed(clip, vendor, rootRest) {
     const rig = await this.rigFor(clip, vendor);
     if (!rig) return null;
     const mixer = poseAt(rig, await retargetedFor(clip, vendor, rig));
+    if (vendor !== 'synty') uprightRig(rig, rootRest); // kevdev file-axis flip; synty handled by retarget
     const dataURL = this.snap(rig);
     mixer.stopAllAction();
     return dataURL;
@@ -1371,7 +1411,7 @@ function startViewer(container, asset) {
 
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
-  let mixer = null, action = null, clips = [], soloClips = null, clipDur = 0, playing = true, ctrls = null;
+  let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
 
   const clearOverlays = () => { container.querySelectorAll('.lb-placeholder,.lb-controls').forEach((e) => e.remove()); };
   const ensureCanvas = () => { if (!renderer.domElement.isConnected) container.appendChild(renderer.domElement); };
@@ -1403,19 +1443,18 @@ function startViewer(container, asset) {
     if (ctrls) ctrls.setClip(i);
   };
 
-  const buildPlayback = (mixerRoot, cs, charInfo) => {
+  const buildPlayback = (mixerRoot, cs, charInfo, rootRest) => {
     clips = cs.map(stripRootMotion);
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
     playClip(0);
-    // Some vendors' mesh-less clips (kevdev) import with a bind flipped from their body
-    // rig, so live playback renders upside down. Upright the character from a
-    // representative frame (a no-op for already-upright retargeted/native clips), then
-    // resume from the start and re-frame.
-    mixer.setTime((clipDur || 0) * 0.5); mixerRoot.updateMatrixWorld(true);
-    uprightPose(mixerRoot);
-    mixer.setTime(0); mixerRoot.updateMatrixWorld(true);
+    // A mesh-less clip posed on a body from a different file (kevdev) imports with a
+    // flipped root axis, so live playback renders upside down. Correct it from the clip's
+    // rest (pose-independent, so a fall/roll is preserved); a no-op without rootRest
+    // (self-contained or already-upright retargeted clips). Then re-frame.
+    mixerRoot.updateMatrixWorld(true);
+    uprightRig(mixerRoot, rootRest);
     frame(mixerRoot, camera, controls);
   };
 
@@ -1432,7 +1471,7 @@ function startViewer(container, asset) {
       if (obj) { scene.remove(obj); dispose(obj); }
       obj = char; scene.add(char); frame(char, camera, controls);
       mixer = null; action = null;
-      buildPlayback(char, clips, { id: item.id, name: item.name });
+      buildPlayback(char, clips, { id: item.id, name: item.name }, asset.vendor === 'synty' ? null : soloRootRest);
       return true;
     }).catch(() => false);
 
@@ -1582,12 +1621,13 @@ function startViewer(container, asset) {
     if (isRenderable(root)) {
       obj = root; scene.add(root); frame(root, camera, controls);
       CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
-      if (cs.length) buildPlayback(root, cs, null); // self-contained: play its own clips
+      if (cs.length) buildPlayback(root, cs, null, null); // self-contained: plays correctly on its own body
       return;
     }
     if (!cs.length) { dispose(root); showPlaceholder('No mesh to preview (data file).'); return; }
     // clip-only: play on a rig it matches (AnimationClips survive disposing the source).
     soloClips = cs;
+    soloRootRest = captureRootRest(root); // the clip file's root axis, for uprightRig
     const bones = clipBones(cs[0]);
     dispose(root);
     await CharRegistry.seed();
