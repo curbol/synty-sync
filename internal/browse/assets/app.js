@@ -1130,7 +1130,8 @@ class ModelThumbnails {
   constructor(size = 220) {
     this.size = size;
     this.cache = new Map();
-    this.rigs = new Map(); // matched character id -> loaded rig, reused to pose clips
+    this.rigs = new Map();  // matched character id -> loaded rig, reused to pose clips
+    this.files = new Map(); // file path -> parsed+oriented file, reused across its split clips
     this.queue = Promise.resolve();
     this.observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
@@ -1144,7 +1145,12 @@ class ModelThumbnails {
   }
   observe(holder, asset) { holder._asset = asset; this.observer.observe(holder); }
   enqueue(holder, asset) {
-    this.queue = this.queue.then(() => this.render(holder, asset)).catch(() => {});
+    // Yield a frame between thumbnails so posing/rendering never starves scroll and
+    // clicks — the whole page felt frozen until the queue drained otherwise.
+    this.queue = this.queue
+      .then(() => this.render(holder, asset))
+      .then(() => new Promise((r) => requestAnimationFrame(() => r())))
+      .catch(() => {});
   }
   ensureRenderer() {
     if (this.renderer) return;
@@ -1174,27 +1180,83 @@ class ModelThumbnails {
   async build(asset) {
     try {
       this.ensureRenderer();
-      const obj = await loadModel(contentURL(asset.id), asset.ext);
-      const rootRest = captureRootRest(obj);
-      if (isRenderable(obj)) {
-        const cs = clipsForAsset(obj, asset);
-        const refBox = prepareClipRig(obj, null); // self-contained plays on its own body; fixes Z-up files (e.g. some explosive dashes), no-op when upright
-        if (cs.length) {
-          let rootBoneName = null;
-          obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-          poseAt(obj, stripRootMotion(cs[0], rootBoneName, obj.userData.upAxis)); // in place, or a dash/locomotion clip drifts out of the still's frame
-        }
-        const dataURL = this.snap(obj, refBox);
-        dispose(obj);
-        return dataURL;
-      }
-      // Mesh-less animation clip: pose a matching rig at a representative frame so
-      // each clip gets a distinguishable still instead of the same bare icon.
-      const clips = clipsForAsset(obj, asset);
-      dispose(obj);
-      return clips.length ? await this.buildPosed(clips[0], asset.vendor, rootRest) : null;
+      // A split multi-clip file (source.clip) is loaded and oriented once, then every
+      // clip card poses that shared object — otherwise each of the ~120 clips re-fetched
+      // and re-parsed the whole 20–65 MB file, which pinned the main thread.
+      const key = asset.source && asset.source.clip && asset.source.filePath;
+      return key ? await this.buildShared(asset, key) : await this.buildStandalone(asset);
     } catch (e) {
       return null;
+    }
+  }
+
+  async buildStandalone(asset) {
+    const obj = await loadModel(contentURL(asset.id), asset.ext);
+    const rootRest = captureRootRest(obj);
+    if (isRenderable(obj)) {
+      const cs = clipsForAsset(obj, asset);
+      const refBox = prepareClipRig(obj, null); // self-contained plays on its own body; fixes Z-up files (e.g. some explosive dashes), no-op when upright
+      if (cs.length) {
+        let rootBoneName = null;
+        obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
+        poseAt(obj, stripRootMotion(cs[0], rootBoneName, obj.userData.upAxis)); // in place, or a dash/locomotion clip drifts out of the still's frame
+      }
+      const dataURL = this.snap(obj, refBox);
+      dispose(obj);
+      return dataURL;
+    }
+    // Mesh-less animation clip: pose a matching rig at a representative frame so
+    // each clip gets a distinguishable still instead of the same bare icon.
+    const clips = clipsForAsset(obj, asset);
+    dispose(obj);
+    return clips.length ? await this.buildPosed(clips[0], asset.vendor, rootRest) : null;
+  }
+
+  // buildShared renders one clip of a multi-clip file whose parsed+oriented object is
+  // loaded once and reused across all its clips (thumbnails render serially, so the
+  // shared object is safe to re-pose per clip). Orientation and the framing box are
+  // measured once — they belong to the file's rig, not the clip.
+  async buildShared(asset, key) {
+    let pending = this.files.get(key);
+    if (!pending) {
+      pending = this.loadSharedFile(asset);
+      this.files.set(key, pending);
+      this.evictFiles();
+    }
+    const ctx = await pending;
+    if (!ctx) return null;
+    if (ctx.renderable) {
+      const cs = clipsForAsset(ctx.obj, asset);
+      const mixer = cs.length ? poseAt(ctx.obj, stripRootMotion(cs[0], ctx.rootBoneName, ctx.upAxis)) : null;
+      const dataURL = this.snap(ctx.obj, ctx.refBox);
+      if (mixer) mixer.stopAllAction();
+      return dataURL;
+    }
+    const cs = clipsForAsset(ctx.obj, asset);
+    return cs.length ? await this.buildPosed(cs[0], asset.vendor, ctx.rootRest) : null;
+  }
+
+  async loadSharedFile(asset) {
+    const obj = await loadModel(contentURL(asset.id), asset.ext);
+    if (isRenderable(obj)) {
+      const refBox = prepareClipRig(obj, null);
+      let rootBoneName = null;
+      obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
+      return { renderable: true, obj, refBox, upAxis: obj.userData.upAxis, rootBoneName };
+    }
+    return { renderable: false, obj, rootRest: captureRootRest(obj) };
+  }
+
+  // evictFiles bounds the shared-file cache so scrolling a large library doesn't hold
+  // every parsed model in memory. Clips of a file render together, so the oldest file is
+  // done by the time it's evicted.
+  evictFiles() {
+    const CAP = 6;
+    while (this.files.size > CAP) {
+      const oldest = this.files.keys().next().value;
+      const pending = this.files.get(oldest);
+      this.files.delete(oldest);
+      Promise.resolve(pending).then((ctx) => { if (ctx && ctx.obj) dispose(ctx.obj); }).catch(() => {});
     }
   }
 
