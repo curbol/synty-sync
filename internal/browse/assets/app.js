@@ -5,6 +5,12 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const PAGE = 200;
 
+// Above this file size a grid thumbnail shows the category icon instead of a 3D
+// render: three.js parses a model synchronously on the main thread, so parsing a
+// 65 MB FBX just for a 220px still froze the page. The full model still opens in the
+// lightbox on demand.
+const MAX_THUMB_BYTES = 40 * 1024 * 1024;
+
 const els = {
   q: document.getElementById('q'),
   sort: document.getElementById('sort'),
@@ -580,6 +586,7 @@ function thumbContent(a) {
     return img;
   }
   if (a.thumb === 'glb' || a.thumb === 'fbx') {
+    if (a.size > MAX_THUMB_BYTES) return iconEl(a.category); // too big to parse for a grid still
     const holder = document.createElement('div');
     holder.className = 'thumb-3d';
     holder.appendChild(iconEl(a.category));
@@ -1144,6 +1151,20 @@ class ModelThumbnails {
     }, { rootMargin: '200px' });
   }
   observe(holder, asset) { holder._asset = asset; this.observer.observe(holder); }
+  // pause/resume gate the queue so the lightbox (its own heavy model load) doesn't fight
+  // the background thumbnail parsing for the main thread while it's open.
+  pause() {
+    if (this.gate) return;
+    let resume;
+    this.gate = new Promise((r) => { resume = r; });
+    this._resume = resume;
+  }
+  resume() {
+    if (!this.gate) return;
+    this._resume();
+    this.gate = null;
+    this._resume = null;
+  }
   enqueue(holder, asset) {
     // Yield a frame between thumbnails so posing/rendering never starves scroll and
     // clicks — the whole page felt frozen until the queue drained otherwise.
@@ -1164,6 +1185,7 @@ class ModelThumbnails {
     this.scene.add(dir);
   }
   async render(holder, asset) {
+    if (this.gate) await this.gate; // hold while the lightbox is open
     let url = this.cache.get(asset.id);
     if (url === undefined) {
       url = await this.build(asset);
@@ -1351,6 +1373,7 @@ async function navLightbox(delta) {
 
 function openLightbox(a) {
   if (activeViewer) { activeViewer.stop(); activeViewer = null; } // tear down when navigating
+  modelThumbs.pause(); // give the viewer's model load the main thread, not the thumbnail queue
   lb.index = state.items.indexOf(a);
   updateLbNav();
   lb.name.textContent = a.name;
@@ -1566,6 +1589,7 @@ function relatedThumb(it) {
 
 function closeLightbox() {
   lb.root.hidden = true;
+  modelThumbs.resume(); // let background thumbnails continue
   if (activeViewer) { activeViewer.stop(); activeViewer = null; }
   lb.view.replaceChildren();
   lb.character.replaceChildren();
