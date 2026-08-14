@@ -5,7 +5,7 @@
 // FBXLoader decodes embedded textures through DOM <img> elements, which a worker has
 // no document for. Thumbnails render textureless clay (loadModel overrides every
 // material), so stand in a no-op image that reports "loaded" immediately — letting such
-// FBX parse in the worker. Must be installed before importing three's loaders.
+// FBX parse in the worker. Runs at module init, before any job parses an FBX.
 if (typeof document === 'undefined') {
   const fakeImage = () => {
     const on = {};
