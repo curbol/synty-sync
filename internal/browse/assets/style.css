@@ -188,7 +188,9 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   position: relative;
 }
 .thumb img { width: 100%; height: 100%; object-fit: contain; }
-.thumb .icon { width: 42px; height: 42px; opacity: 0.5; color: #d8cec3; }
+/* Absolutely centered (not flex) so it sits on a compositor layer like the loading ring
+   and doesn't snap to a different subpixel — and thus twitch — under the card hover transform. */
+.thumb .icon { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 42px; height: 42px; opacity: 0.5; color: #d8cec3; }
 .thumb-3d { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
 .thumb-3d.loading .icon { opacity: 0.12; }
 /* A ring of 8 dots (one bright) drawn as box-shadows on one transparent dot, with the
@@ -197,17 +199,17 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
 .thumb-3d.loading::after {
   content: "";
   position: absolute; top: 50%; left: 50%;
-  width: 5.6px; height: 5.6px; margin: -2.8px 0 0 -2.8px;
+  width: 8.4px; height: 8.4px; margin: -4.2px 0 0 -4.2px;
   border-radius: 50%; background: transparent;
   box-shadow:
-    0 -16px 0 0 #d8cec3,
-    11.3px -11.3px 0 0 rgba(216, 206, 195, 0.22),
-    16px 0 0 0 rgba(216, 206, 195, 0.22),
-    11.3px 11.3px 0 0 rgba(216, 206, 195, 0.22),
-    0 16px 0 0 rgba(216, 206, 195, 0.22),
-    -11.3px 11.3px 0 0 rgba(216, 206, 195, 0.22),
-    -16px 0 0 0 rgba(216, 206, 195, 0.22),
-    -11.3px -11.3px 0 0 rgba(216, 206, 195, 0.22);
+    0 -24px 0 0 #d8cec3,
+    17px -17px 0 0 rgba(216, 206, 195, 0.22),
+    24px 0 0 0 rgba(216, 206, 195, 0.22),
+    17px 17px 0 0 rgba(216, 206, 195, 0.22),
+    0 24px 0 0 rgba(216, 206, 195, 0.22),
+    -17px 17px 0 0 rgba(216, 206, 195, 0.22),
+    -24px 0 0 0 rgba(216, 206, 195, 0.22),
+    -17px -17px 0 0 rgba(216, 206, 195, 0.22);
   animation: thumb-spin 1.6s steps(8) infinite;
 }
 @keyframes thumb-spin { to { transform: rotate(360deg); } }
