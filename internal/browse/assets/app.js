@@ -833,6 +833,38 @@ function uprightRig(root, rootRest) {
   root.updateMatrixWorld(true);
 }
 
+// prepareClipRig orients a rig for a clip and returns its constant reference box. It is the
+// single shared setup for both the grid thumbnail and the lightbox, so the two can't drift
+// apart — the recurring "one is right, the other is sideways" was two separate code paths.
+// Both feed it a pristine skeleton (the lightbox a freshly loaded body, the thumbnail a
+// fresh clone) because re-measuring orientation on a reused, already-posed skeleton is
+// unreliable. rootRest is already resolved (null for synty / self-contained; the clip's own
+// root rest for a cross-file body).
+function prepareClipRig(rig, rootRest) {
+  uprightRig(rig, rootRest);
+  return posedBox(rig);
+}
+
+// cloneRig deep-clones a skinned character (three's Object3D.clone shares the skeleton, so
+// posing one clone would move them all). Same algorithm as three's SkeletonUtils.clone: clone
+// the hierarchy, then rebind each SkinnedMesh to a cloned skeleton whose bones point at the
+// cloned nodes. Lets the thumbnails reuse one loaded body but pose each clip on a fresh
+// skeleton, matching the lightbox's fresh-load pipeline.
+function cloneRig(source) {
+  const srcLookup = new Map(), cloneLookup = new Map();
+  const clone = source.clone();
+  (function walk(a, b) { srcLookup.set(b, a); cloneLookup.set(a, b); for (let i = 0; i < a.children.length; i++) walk(a.children[i], b.children[i]); })(source, clone);
+  clone.traverse((node) => {
+    if (!node.isSkinnedMesh) return;
+    const src = srcLookup.get(node);
+    node.skeleton = src.skeleton.clone();
+    node.bindMatrix.copy(src.bindMatrix);
+    node.skeleton.bones = src.skeleton.bones.map((b) => cloneLookup.get(b));
+    node.bind(node.skeleton, node.bindMatrix);
+  });
+  return clone;
+}
+
 // poseAt drives root to a representative mid-clip frame and returns the mixer, so a
 // still shows real motion instead of the bind (T-)pose. skeleton.pose() first clears
 // any prior binding on a reused rig. A zero/NaN-duration clip falls back to frame 0.
@@ -1112,8 +1144,7 @@ class ModelThumbnails {
       const rootRest = captureRootRest(obj);
       if (isRenderable(obj)) {
         const cs = obj.animations || [];
-        uprightRig(obj, null); // fixes Z-up self-contained files (e.g. some explosive dashes); no-op when upright
-        const refBox = posedBox(obj); // reference pose (set by uprightRig), before posing to a frame
+        const refBox = prepareClipRig(obj, null); // self-contained plays on its own body; fixes Z-up files (e.g. some explosive dashes), no-op when upright
         if (cs.length) {
           let rootBoneName = null;
           obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
@@ -1158,34 +1189,27 @@ class ModelThumbnails {
       const rig = await loadModel(contentURL(m.id), m.ext)
         .then((r) => (isRenderable(r) ? r : (dispose(r), null)))
         .catch(() => null);
-      if (rig) rig.userData.baseQuat = rig.quaternion.clone();
-      this.rigs.set(m.id, rig);
+      this.rigs.set(m.id, rig); // pristine template; buildPosed clones it per clip
+
     }
     return this.rigs.get(m.id);
   }
 
   async buildPosed(clip, vendor, rootRest) {
-    const rig = await this.rigFor(clip, vendor);
-    if (!rig) return null;
+    const template = await this.rigFor(clip, vendor);
+    if (!template) return null;
+    // Pose each clip on a fresh clone of the loaded body — the same pristine-skeleton pipeline
+    // the lightbox uses, so the two never diverge. (Reusing one posed skeleton re-measures
+    // orientation unreliably and flips every other thumbnail.)
+    const rig = cloneRig(template);
     let rootBoneName = null;
     rig.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-    // Orientation and framing are constant per rig, so compute them once on the pristine rig
-    // and cache. Re-measuring uprightRig on a rig already mutated by a prior thumbnail's pose
-    // reads stale skeleton state (skeleton.pose() doesn't fully restore after a mixer ran) and
-    // flips every other thumbnail; the lightbox avoids this by loading a fresh rig each open.
-    // synty is retargeted (measure its own bind, rootRest null); kevdev needs the clip's root
-    // axis. All clips of a rig share one convention, so one correction fits them all.
-    if (rig.userData.uprightQuat === undefined) {
-      if (rig.userData.baseQuat) rig.quaternion.copy(rig.userData.baseQuat);
-      uprightRig(rig, vendor === 'synty' ? null : rootRest);
-      rig.userData.uprightQuat = rig.quaternion.clone();
-      rig.userData.refBox = posedBox(rig).clone();
-    }
-    rig.quaternion.copy(rig.userData.uprightQuat);
+    const refBox = prepareClipRig(rig, vendor === 'synty' ? null : rootRest); // synty retargeted (own bind); a cross-file body needs the clip's root axis
     const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName, rig.userData.upAxis); // in place, so the still stays framed
     const mixer = poseAt(rig, posed);
-    const dataURL = this.snap(rig, rig.userData.refBox);
+    const dataURL = this.snap(rig, refBox);
     mixer.stopAllAction();
+    dispose(rig);
     return dataURL;
   }
 }
@@ -1592,18 +1616,16 @@ function startViewer(container, asset) {
     mixerRoot.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
     mixerRoot.traverse((o) => { if (o.isMesh) o.castShadow = true; });
     // Correct orientation and measure the framing box first, from the character's constant
-    // reference (bind) pose — so scale, centering and the ground stay fixed no matter what
-    // the clip does. uprightRig leaves the skeleton in that reference pose and records the
-    // up axis (for in-place stripping); posedBox reads the pose; then the clip plays inside
-    // the fixed frame.
-    uprightRig(mixerRoot, rootRest);
+    // reference (bind) pose — the shared prepareClipRig, so thumbnail and lightbox stay in
+    // lockstep. It records the up axis (for in-place stripping); then the clip plays inside
+    // the fixed frame. scale, centering and the ground stay fixed no matter what the clip does.
+    const refBox = prepareClipRig(mixerRoot, rootRest);
     rawClips = cs; playRootName = rootBoneName; playUpAxis = mixerRoot.userData.upAxis;
     clips = motionOn ? cs : cs.map((c) => stripRootMotion(c, rootBoneName, playUpAxis));
     moveBtn.hidden = !/rootmotion|_rm\b|\[rm\]/i.test(asset.name || '');
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
-    const refBox = posedBox(mixerRoot);
     frameBox(refBox, camera, controls);
     placeGround(mixerRoot, refBox);
     eyeLevel(refBox);
@@ -1776,7 +1798,7 @@ function startViewer(container, asset) {
       // buildPlayback corrects orientation and frames from the reference box; do the same
       // for a static (clip-less) renderable so a Z-up model still stands upright and framed.
       if (cs.length) buildPlayback(root, cs, null, null);
-      else { uprightRig(root, null); frameBox(posedBox(root), camera, controls); }
+      else frameBox(prepareClipRig(root, null), camera, controls);
       return;
     }
     if (!cs.length) { dispose(root); showPlaceholder('No mesh to preview (data file).'); return; }
