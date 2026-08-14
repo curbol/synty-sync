@@ -165,22 +165,19 @@ async function buildPosed(clip, vendor, rootRest) {
 // Serialize jobs: one render on the shared canvas at a time, converted to a blob before
 // the next job overwrites the canvas.
 let queue = Promise.resolve();
-// While the foreground viewer is open it owns the GPU; the thumbnail worker yields (a
-// running job finishes, then no new job starts until the viewer closes). This is standard
-// foreground-over-background prioritization, not a throttle — no work overlaps the viewer.
-let paused = false;
-let waiters = [];
+let throttleMs = 0; // while the lightbox is open, space out jobs so it owns the GPU
 
 self.onmessage = (e) => {
   if (e.data.type === 'seed') {
     if (e.data.list && e.data.list.length) CharRegistry.save(e.data.list);
     return;
   }
-  if (e.data.type === 'pause') { paused = true; return; }
-  if (e.data.type === 'resume') { paused = false; const w = waiters; waiters = []; w.forEach((r) => r()); return; }
+  if (e.data.type === 'throttle') {
+    throttleMs = e.data.ms || 0;
+    return;
+  }
   const { id, asset } = e.data;
   queue = queue.then(async () => {
-    while (paused) await new Promise((r) => waiters.push(r));
     try {
       await ensureRenderer();
       if (!(await build(asset))) { self.postMessage({ id, blob: null }); return; }
@@ -189,5 +186,7 @@ self.onmessage = (e) => {
     } catch {
       self.postMessage({ id, blob: null });
     }
+    // Yield the GPU between jobs while throttled, so an open lightbox renders smoothly.
+    if (throttleMs) await new Promise((r) => setTimeout(r, throttleMs));
   });
 };
