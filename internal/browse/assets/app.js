@@ -1062,7 +1062,7 @@ function startViewer(container, asset) {
 
   const clock = new THREE.Clock();
   let raf = 0, obj = null, stopped = false;
-  let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
+  let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null, curTrimmedFrom = 0;
   let rawClips = [], playRootName = null, playUpAxis = null, motionOn = false, curClip = 0;
   let playInPlace = [], playMotion = []; // the two clip sets the root-motion toggle swaps between
 
@@ -1127,6 +1127,7 @@ function startViewer(container, asset) {
     action = mixer.clipAction(clips[i]);
     action.reset(); action.play();
     clipDur = clips[i].duration || 0;
+    curTrimmedFrom = (clips[i].userData && clips[i].userData.trimmedFrom) || 0;
     playing = true;
     if (ctrls) ctrls.setClip(i);
   };
@@ -1299,7 +1300,11 @@ function startViewer(container, asset) {
       sel.addEventListener('change', () => playClip(+sel.value));
       bar.appendChild(sel);
     }
-    const showTime = (t) => { time.textContent = `${t.toFixed(2)} / ${clipDur.toFixed(2)}s`; };
+    const showTime = (t) => {
+      time.textContent = `${t.toFixed(2)} / ${clipDur.toFixed(2)}s`;
+      if (curTrimmedFrom) { time.textContent += ' ✂'; time.title = `Held-pose tail trimmed (was ${curTrimmedFrom.toFixed(2)}s)`; }
+      else time.title = '';
+    };
     play.addEventListener('click', () => { playing = !playing; play.textContent = playing ? '⏸' : '▶'; clock.getDelta(); });
     scrub.addEventListener('input', () => {
       if (!action) return;

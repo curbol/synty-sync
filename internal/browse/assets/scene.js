@@ -29,16 +29,53 @@ const CLAY = new THREE.MeshStandardMaterial({ color: 0xc7ccd6, roughness: 0.72, 
 function normalizeClip(clip) {
   let tMin = Infinity;
   for (const tr of clip.tracks) if (tr.times.length) tMin = Math.min(tMin, tr.times[0]);
-  if (!isFinite(tMin) || tMin <= 1e-3) return clip;
-  // Clone each track's times before shifting. GLTFLoader shares one times buffer across
-  // a clip's tracks (and across clips), so subtracting in place double-counts, drives the
-  // shared array negative, and collapses durations to 0 (the NaN/0.00s scrubber on GLBs).
-  for (const tr of clip.tracks) {
-    const t = tr.times.slice();
-    for (let i = 0; i < t.length; i++) t[i] -= tMin;
-    tr.times = t;
+  if (isFinite(tMin) && tMin > 1e-3) {
+    // Clone each track's times before shifting. GLTFLoader shares one times buffer across
+    // a clip's tracks (and across clips), so subtracting in place double-counts, drives the
+    // shared array negative, and collapses durations to 0 (the NaN/0.00s scrubber on GLBs).
+    for (const tr of clip.tracks) {
+      const t = tr.times.slice();
+      for (let i = 0; i < t.length; i++) t[i] -= tMin;
+      tr.times = t;
+    }
+    clip.resetDuration();
   }
-  clip.resetDuration();
+  return trimStaticTail(clip);
+}
+
+// trimStaticTail shortens a clip that ends by holding a pose — some libraries pad every
+// animation to a fixed slot length (e.g. Quaternius Turn90 finishes at ~1.1s then holds
+// the final pose to 2.0s). It finds the last keyframe any track actually changes and, when
+// the dead tail exceeds ~0.3s, sets the clip duration there so playback and looping stop
+// on the real end. Records the original on userData.trimmedFrom so the UI can show it.
+function trimStaticTail(clip) {
+  let lastMotion = 0;
+  for (const tr of clip.tracks) {
+    const vs = tr.getValueSize();
+    const v = tr.values, times = tr.times, n = times.length;
+    if (n < 2) continue;
+    // Per-keyframe change, and the track's peak change. A frame counts as motion only if
+    // it exceeds 5% of the track's own peak, so imperceptible end-of-clip jitter on one
+    // bone doesn't keep the whole clip from trimming.
+    let peak = 0;
+    const chg = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+      let d = 0;
+      for (let k = 0; k < vs; k++) d += Math.abs(v[i * vs + k] - v[(i - 1) * vs + k]);
+      chg[i] = d;
+      if (d > peak) peak = d;
+    }
+    if (peak < 1e-3) continue; // this track never really moves
+    const thresh = peak * 0.05;
+    for (let i = n - 1; i > 0; i--) {
+      if (chg[i] > thresh) { if (times[i] > lastMotion) lastMotion = times[i]; break; }
+    }
+  }
+  if (lastMotion > 0 && clip.duration - lastMotion > 0.3) {
+    clip.userData = clip.userData || {};
+    clip.userData.trimmedFrom = clip.duration;
+    clip.duration = lastMotion;
+  }
   return clip;
 }
 
