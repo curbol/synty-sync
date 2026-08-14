@@ -202,7 +202,7 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   width: 8.4px; height: 8.4px; margin: -4.2px 0 0 -4.2px;
   border-radius: 50%; background: transparent;
   box-shadow:
-    0 -24px 0 0 #d8cec3,
+    0 -24px 0 0 rgba(216, 206, 195, 0.5),
     17px -17px 0 0 rgba(216, 206, 195, 0.22),
     24px 0 0 0 rgba(216, 206, 195, 0.22),
     17px 17px 0 0 rgba(216, 206, 195, 0.22),
