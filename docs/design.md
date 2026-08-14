@@ -247,6 +247,14 @@ stable across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries 
 (Unity's stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag
 set once applies to every copy and survives a `sync` for unchanged files.
 
+A multi-animation `.glb` (a Quaternius-style animation library, one file holding ~120 clips on a
+shared rig) is split at scan time into one virtual asset per embedded clip: `assetindex` reads
+only the GLB's JSON chunk for the animation names, then emits a per-clip asset whose `Source.Clip`
+names the animation and whose bytes are the whole file (`/api/content` serves the file; the
+preview plays `Source.Clip`). Each clip fingerprints as `<file-fingerprint>#<clipName>`, so clips
+tag independently and stably. A root-motion (`_RM`) sibling is left whole (its clips would
+duplicate the base file's); pairing the two as a root-motion toggle is a later concern.
+
 `GET /api/assets` filters by tags with a repeatable `tag` param combined by `tagmode`: `and`
 matches cards carrying all selected tags, `or` (the default) any. A card is matched on the
 **union** of tags over its fingerprints, so a grouped card can satisfy an `and` query even when no

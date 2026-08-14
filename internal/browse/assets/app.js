@@ -724,6 +724,19 @@ function clipBones(clip) {
   return [...new Set(clip.tracks.map((t) => t.name.split('.')[0]))];
 }
 
+// clipsForAsset returns the animation clips to preview for an asset. A per-clip
+// virtual asset (source.clip, from splitting a multi-animation model file like a
+// Quaternius library) narrows to just that named clip; every other asset previews
+// all of the file's clips. FBX prefixes a clip name with its take ("Armature|Walk"),
+// so match the suffix too.
+function clipsForAsset(obj, asset) {
+  const all = obj.animations || [];
+  const want = asset && asset.source && asset.source.clip;
+  if (!want) return all;
+  const hit = all.filter((c) => c.name === want || c.name.endsWith('|' + want));
+  return hit.length ? hit : all;
+}
+
 // coversBones reports whether a rig can actually play a clip: the clip must drive
 // most of the rig (≥60% of the rig's bones — so nearly the whole body animates) AND
 // cover a good part of the clip (≥45% of its bones). Requiring both rejects the
@@ -1143,7 +1156,7 @@ class ModelThumbnails {
       const obj = await loadModel(contentURL(asset.id), asset.ext);
       const rootRest = captureRootRest(obj);
       if (isRenderable(obj)) {
-        const cs = obj.animations || [];
+        const cs = clipsForAsset(obj, asset);
         const refBox = prepareClipRig(obj, null); // self-contained plays on its own body; fixes Z-up files (e.g. some explosive dashes), no-op when upright
         if (cs.length) {
           let rootBoneName = null;
@@ -1156,7 +1169,7 @@ class ModelThumbnails {
       }
       // Mesh-less animation clip: pose a matching rig at a representative frame so
       // each clip gets a distinguishable still instead of the same bare icon.
-      const clips = obj.animations || [];
+      const clips = clipsForAsset(obj, asset);
       dispose(obj);
       return clips.length ? await this.buildPosed(clips[0], asset.vendor, rootRest) : null;
     } catch (e) {
@@ -1791,7 +1804,7 @@ function startViewer(container, asset) {
     try { root = await loadModel(contentURL(asset.id), asset.ext); }
     catch { showPlaceholder('Could not load this model.'); return; }
     if (stopped) { dispose(root); return; }
-    const cs = root.animations || [];
+    const cs = clipsForAsset(root, asset);
     if (isRenderable(root)) {
       obj = root; scene.add(root);
       CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });

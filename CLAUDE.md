@@ -69,8 +69,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `web` — serves the local pack-selection page for `select` (checkbox grid, returns the
   chosen set).
 - `assetindex` — scans the local library into a searchable index of individual assets,
-  seeing inside `.zip` and `.unitypackage` archives as well as loose files; serves each
-  asset's bytes and thumbnail on demand. HTTP-free — the `browse` server queries it.
+  seeing inside `.zip` and `.unitypackage` archives as well as loose files, and splitting a
+  multi-animation `.glb` (a Quaternius-style animation library) into one virtual per-clip
+  asset (`Source.Clip`) that shares the file's bytes; serves each asset's bytes and thumbnail
+  on demand. HTTP-free — the `browse` server queries it.
 - `browse` — serves the `browse` web UI to search and preview the library, querying an
   `assetindex.Index` and streaming asset bytes and thumbnails (three.js 3D previews,
   copy-path). Read-only over the local library except for asset tagging and linking, its
@@ -104,7 +106,8 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
 - **Tags and links key on content, not the browse `id`.** `Asset.Fingerprint`
-  (`crc32:<hex>:<size>` for zip/loose, `uguid:<guid>` for unitypackage) is the tag and link
+  (`crc32:<hex>:<size>` for zip/loose, `uguid:<guid>` for unitypackage, `<file-fp>#<clip>` for
+  a split GLB clip) is the tag and link
   identity; it is portable and stable across updates, unlike `Asset.ID` (a machine-absolute,
   version-bearing locator hash used only to serve bytes). Bump `assetindex.indexVersion` when
   the fingerprint scheme or any indexed field changes so stale caches rebuild.

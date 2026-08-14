@@ -128,6 +128,59 @@ func looseAsset(e libEntry) Asset {
 	return a
 }
 
+// isRootMotionVariant reports the Unreal/Quaternius root-motion sibling of an
+// animation library (e.g. "UAL1_RM.glb" beside "UAL1.glb"). It is left whole so its
+// clips don't duplicate the base file's; pairing the two as a root-motion toggle is
+// a later concern.
+func isRootMotionVariant(name string) bool {
+	base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
+	return strings.HasSuffix(base, "_rm")
+}
+
+// clipAsset builds one virtual asset for a single embedded animation of a multi-clip
+// model file. All clips of a file share its bytes (Source.FilePath); Source.Clip
+// names which animation the preview plays. The content fingerprint combines the
+// file's fingerprint with the clip name so each clip tags independently and stably.
+func clipAsset(e libEntry, clip, fileFP string) Asset {
+	s := Source{Kind: SourceLoose, FilePath: e.path, Clip: clip}
+	fp := ""
+	if fileFP != "" {
+		fp = fileFP + "#" + clip
+	}
+	return Asset{
+		ID:          id(s),
+		Name:        clip,
+		RelPath:     e.rel + "::" + clip,
+		CopyPath:    e.path + "::" + clip,
+		Category:    CategoryAnimation,
+		Ext:         strings.ToLower(strings.TrimPrefix(filepath.Ext(e.name), ".")),
+		Vendor:      e.vendor,
+		Pack:        e.pack,
+		Size:        e.size,
+		Thumb:       ThumbGLB,
+		Fingerprint: fp,
+		Source:      s,
+	}
+}
+
+// looseAssets builds the asset(s) for a loose file. A multi-animation .glb (a
+// Quaternius-style animation library) is split into one virtual asset per embedded
+// clip, all sharing the file's bytes; its root-motion (_RM) sibling is left whole.
+// Everything else (including single-animation and unreadable GLBs) is one asset.
+func looseAssets(e libEntry) []Asset {
+	if strings.EqualFold(filepath.Ext(e.name), ".glb") && !isRootMotionVariant(e.name) {
+		if names, err := glbAnimationNames(e.path); err == nil && len(names) >= 2 {
+			fp := looseFingerprint(e.path)
+			out := make([]Asset, 0, len(names))
+			for _, n := range names {
+				out = append(out, clipAsset(e, n, fp))
+			}
+			return out
+		}
+	}
+	return []Asset{looseAsset(e)}
+}
+
 // readHead reads up to dimsHeadBytes from r, enough to recover an image's
 // dimensions without pulling a whole file into memory.
 func readHead(r io.Reader) []byte {
@@ -149,7 +202,7 @@ func Scan(root string) ([]Asset, error) {
 	var assets []Asset
 	for _, e := range entries {
 		if e.kind == SourceLoose {
-			assets = append(assets, looseAsset(e))
+			assets = append(assets, looseAssets(e)...)
 			continue
 		}
 		a, err := enumerateArchive(e)

@@ -12,7 +12,7 @@ import (
 
 // indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
 // classified), so a cached index from older logic is rebuilt rather than reused.
-const indexVersion = 8
+const indexVersion = 9
 
 // Index is the in-memory, on-disk-cacheable catalog of a library. Content requests
 // resolve through byID (never by reconstructing a path from client input), and the
@@ -62,7 +62,7 @@ func Build(root, cacheDir string) (*Index, error) {
 			if fp, err := fingerprint(e.path); err == nil {
 				ix.LoosePrint[e.path] = fp
 			}
-			assets = append(assets, looseAsset(e))
+			assets = append(assets, looseAssets(e)...)
 			continue
 		}
 		a, err := enumerateArchive(e)
@@ -88,10 +88,10 @@ func (ix *Index) Refresh() error {
 		return err
 	}
 	oldByArchive := map[string][]Asset{}
-	oldByLoose := map[string]Asset{}
+	oldByLoose := map[string][]Asset{}
 	for _, a := range ix.Assets {
 		if a.Source.Kind == SourceLoose {
-			oldByLoose[a.Source.FilePath] = a
+			oldByLoose[a.Source.FilePath] = append(oldByLoose[a.Source.FilePath], a)
 		} else {
 			oldByArchive[a.Source.ArchivePath] = append(oldByArchive[a.Source.ArchivePath], a)
 		}
@@ -104,11 +104,11 @@ func (ix *Index) Refresh() error {
 			if fp, err := fingerprint(e.path); err == nil {
 				newLoose[e.path] = fp
 				if old, ok := oldByLoose[e.path]; ok && ix.LoosePrint[e.path] == fp {
-					assets = append(assets, old)
+					assets = append(assets, old...)
 					continue
 				}
 			}
-			assets = append(assets, looseAsset(e))
+			assets = append(assets, looseAssets(e)...)
 			continue
 		}
 		fp, err := fingerprint(e.path)

@@ -170,8 +170,11 @@ an exact phrase, `( )` groups, and `field:value` scopes a term to one field — 
 a bare term matches name, pack, and path), repeatable `type` / `vendor` / `variant` / `guid` filters, repeatable `tag` with
 `tagmode=and` (match all selected tags) or `tagmode=or` (any; the default), `group=0` to keep
 duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its `source`
-locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixel
-`width` / `height` for images, and every duplicate copy. `?guid=` resolves a scene or
+locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`, `clip`), pixel
+`width` / `height` for images, and every duplicate copy. A multi-animation `.glb` (an
+animation library like Quaternius, one file holding ~120 clips) is split into one card per
+clip: each shares the file's bytes and names its animation in `source.clip`, so the clips are
+individually searchable, taggable, and previewable. `?guid=` resolves a scene or
 prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
 extraction is one request rather than tar-scraping the archive. Each asset also carries
 its content `fingerprints`, current `tags`, and any linked `related` fingerprints;

@@ -69,6 +69,10 @@ type Source struct {
 	Guid        string     `json:"guid,omitempty"`
 	Pathname    string     `json:"pathname,omitempty"`
 	HasPreview  bool       `json:"hasPreview,omitempty"`
+	// Clip names one embedded animation of a multi-clip model file (a Quaternius-style
+	// GLB animation library split into per-clip assets). The bytes served are the whole
+	// file; Clip only tells the preview which animation to play.
+	Clip string `json:"clip,omitempty"`
 }
 
 // Asset is one browseable item: a loose file or a single entry inside an archive.
@@ -108,6 +112,9 @@ func id(s Source) string {
 		key = "zip\x00" + s.ArchivePath + "\x00" + s.Entry
 	case SourceUnityPackage:
 		key = "unity\x00" + s.ArchivePath + "\x00" + s.Guid
+	}
+	if s.Clip != "" {
+		key += "\x00clip\x00" + s.Clip
 	}
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:16])

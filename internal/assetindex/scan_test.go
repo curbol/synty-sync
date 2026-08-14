@@ -25,6 +25,69 @@ func TestDeriveVariant(t *testing.T) {
 	}
 }
 
+func TestGLBClipSplit(t *testing.T) {
+	root := t.TempDir()
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		return full
+	}
+	writeGLB(t, mk("quaternius", "UAL", "UAL1.glb"), "Walk", "Run", "Idle") // multi-anim -> split into clips
+	writeGLB(t, mk("quaternius", "UAL", "UAL1_RM.glb"), "Walk", "Run")      // _RM sibling -> kept whole
+	writeGLB(t, mk("quaternius", "UAL", "Prop.glb"), "Spin")                // single anim -> kept whole
+
+	assets, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clips, whole []Asset
+	for _, a := range assets {
+		if a.Source.Clip != "" {
+			clips = append(clips, a)
+		} else {
+			whole = append(whole, a)
+		}
+	}
+
+	if len(clips) != 3 {
+		t.Fatalf("clip assets = %d, want 3 (Walk/Run/Idle from UAL1.glb)", len(clips))
+	}
+	ids, fps := map[string]bool{}, map[string]bool{}
+	for _, c := range clips {
+		if c.Category != CategoryAnimation {
+			t.Errorf("clip %q category = %q, want animation", c.Name, c.Category)
+		}
+		if c.Source.Kind != SourceLoose || c.Source.FilePath == "" {
+			t.Errorf("clip %q source = %+v, want loose with FilePath", c.Name, c.Source)
+		}
+		if c.Source.Clip != c.Name {
+			t.Errorf("clip name %q != source.clip %q", c.Name, c.Source.Clip)
+		}
+		if c.Thumb != ThumbGLB {
+			t.Errorf("clip %q thumb = %q, want glb", c.Name, c.Thumb)
+		}
+		ids[c.ID] = true
+		fps[c.Fingerprint] = true
+	}
+	if len(ids) != 3 || len(fps) != 3 {
+		t.Errorf("clip ids/fingerprints not distinct: ids=%d fps=%d", len(ids), len(fps))
+	}
+
+	wholeNames := map[string]bool{}
+	for _, w := range whole {
+		wholeNames[w.Name] = true
+	}
+	if wholeNames["UAL1.glb"] {
+		t.Error("UAL1.glb was split; it should not also appear as a whole-file card")
+	}
+	if !wholeNames["UAL1_RM.glb"] {
+		t.Error("UAL1_RM.glb should be kept whole (root-motion sibling), not split")
+	}
+	if !wholeNames["Prop.glb"] {
+		t.Error("Prop.glb (single animation) should be kept whole")
+	}
+}
+
 // writeZip creates a .zip with the given entry->content map.
 func writeZip(t *testing.T, path string, entries map[string]string) {
 	t.Helper()
