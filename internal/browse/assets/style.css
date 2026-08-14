@@ -41,8 +41,7 @@ header {
   gap: 12px;
   align-items: center;
   padding: 12px 20px;
-  background: rgba(24, 22, 19, 0.82);
-  backdrop-filter: blur(8px);
+  background: rgba(24, 22, 19, 0.95);
   border-bottom: 1px solid var(--edge);
 }
 header h1 {
@@ -167,6 +166,11 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   box-shadow: 0 10px 22px -16px rgba(0, 0, 0, 0.9);
   transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
   animation: card-in .34s ease;
+  /* Skip layout+paint for off-screen cards; the grid can hold thousands after scrolling,
+     and painting them all every frame is what pins the main thread. The observer still
+     fires, so lazy thumbnails are unaffected. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 216px;
 }
 @keyframes card-in { from { opacity: 0; transform: translateY(9px); } }
 .card:hover, .card:focus-visible {
@@ -198,7 +202,7 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   position: absolute;
   bottom: 6px;
   font-size: 10px;
-  background: rgba(10, 8, 6, 0.72);
+  background: rgba(10, 8, 6, 0.88);
   color: var(--muted);
   padding: 2px 6px;
   border-radius: 6px;
@@ -206,7 +210,6 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  backdrop-filter: blur(2px);
 }
 .thumb .ext-badge { right: 6px; text-transform: uppercase; letter-spacing: 0.03em; color: #c9bfb4; }
 .thumb .vendor-badge { left: 6px; }
@@ -222,12 +225,11 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   padding: 4px;
   border: 0;
   border-radius: 6px;
-  background: rgba(10, 8, 6, 0.72);
+  background: rgba(10, 8, 6, 0.88);
   color: var(--text);
   cursor: pointer;
   opacity: 0;
   transition: opacity .12s;
-  backdrop-filter: blur(2px);
 }
 .card:hover .copy-icon, .card:focus-within .copy-icon { opacity: 1; }
 .card .copy-icon svg { width: 100%; height: 100%; display: block; }
@@ -462,12 +464,11 @@ header select:hover { border-color: var(--edge-hi); color: var(--text); }
   padding: 4px;
   border: 0;
   border-radius: 6px;
-  background: rgba(10, 8, 6, 0.72);
+  background: rgba(10, 8, 6, 0.88);
   color: var(--text);
   cursor: pointer;
   opacity: 0;
   transition: opacity .12s;
-  backdrop-filter: blur(2px);
   display: none;
 }
 body.tags-on .tag-add { display: block; }
