@@ -166,6 +166,10 @@ async function buildPosed(clip, vendor, rootRest) {
 // the next job overwrites the canvas.
 let queue = Promise.resolve();
 self.onmessage = (e) => {
+  if (e.data.type === 'seed') {
+    if (e.data.list && e.data.list.length) CharRegistry.save(e.data.list);
+    return;
+  }
   const { id, asset } = e.data;
   queue = queue.then(async () => {
     try {

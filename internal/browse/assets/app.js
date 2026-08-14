@@ -689,6 +689,10 @@ class ModelThumbnails {
     this.pending = new Map(); // asset.id -> holder awaiting its render
     this.worker = new Worker('/static/thumbworker.js', { type: 'module' });
     this.worker.onmessage = (e) => this.onResult(e.data);
+    // Seed the worker's (localStorage-less) rig registry with the bodies the user has
+    // opened or pinned, so mesh-less clips whose rig can't be auto-discovered still pose
+    // on the character the user chose in the lightbox.
+    this.worker.postMessage({ type: 'seed', list: CharRegistry.list() });
     this.observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
         if (e.isIntersecting) { this.observer.unobserve(e.target); this.request(e.target); }

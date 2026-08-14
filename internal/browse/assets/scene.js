@@ -126,9 +126,15 @@ function posedBox(object) {
   const box = new THREE.Box3();
   let bones = 0;
   object.traverse((n) => { if (n.isBone) { box.expandByPoint(n.getWorldPosition(_posedV)); bones++; } });
-  if (bones < 2) { box.setFromObject(object); return box; }
-  const pad = box.getSize(_posedV).length() * 0.06;
-  box.expandByScalar(pad || 0);
+  const meshBox = new THREE.Box3().setFromObject(object);
+  if (bones < 2 || box.isEmpty()) return meshBox;
+  const boneSpan = box.getSize(_posedV).length();
+  const meshSpan = meshBox.isEmpty() ? 0 : meshBox.getSize(new THREE.Vector3()).length();
+  // Some rigs keep every bone at the armature origin at bind (they skin the mesh through
+  // bind matrices only), so the bone box collapses to a point; frame the mesh instead
+  // when the bones don't span it.
+  if (meshSpan > 0 && boneSpan < meshSpan * 0.25) return meshBox;
+  box.expandByScalar(boneSpan * 0.06 || 0);
   return box;
 }
 
