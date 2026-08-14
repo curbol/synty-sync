@@ -85,7 +85,7 @@ func buildRootMotionPairs(assets []assetindex.Asset) (sibling map[string]string,
 			continue
 		}
 		for _, ni := range g.nonRM {
-			if rmID := pickRM(assets, g.rm, assets[ni].Source.Clip); rmID != "" {
+			if rmID := pickRM(assets, g.rm, assets[ni]); rmID != "" {
 				sibling[assets[ni].ID] = rmID
 			}
 		}
@@ -96,21 +96,24 @@ func buildRootMotionPairs(assets []assetindex.Asset) (sibling map[string]string,
 	return sibling, suppressed
 }
 
-// pickRM chooses the RM asset for an in-place clip: the RM with the same clip (a
-// per-clip RM file), else a whole-file RM (clip ""), else any.
-func pickRM(assets []assetindex.Asset, rm []int, clip string) string {
+// pickRM chooses the RM sibling for an in-place asset. It prefers a sibling with the
+// same file extension (a glb clip's travel is the glb RM, not the fbx RM of the same
+// library shipped in the same pack — loading the wrong container fails), then the same
+// clip (a per-clip RM over a whole-file one).
+func pickRM(assets []assetindex.Asset, rm []int, nonRM assetindex.Asset) string {
+	best, bestScore := "", -1
 	for _, ri := range rm {
-		if assets[ri].Source.Clip == clip {
-			return assets[ri].ID
+		r := assets[ri]
+		score := 0
+		if r.Ext == nonRM.Ext {
+			score += 2
+		}
+		if r.Source.Clip == nonRM.Source.Clip {
+			score++
+		}
+		if score > bestScore {
+			best, bestScore = r.ID, score
 		}
 	}
-	for _, ri := range rm {
-		if assets[ri].Source.Clip == "" {
-			return assets[ri].ID
-		}
-	}
-	if len(rm) > 0 {
-		return assets[rm[0]].ID
-	}
-	return ""
+	return best
 }
