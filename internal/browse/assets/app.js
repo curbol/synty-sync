@@ -726,10 +726,14 @@ class ModelThumbnails {
       holder.classList.remove('loading'); // no render (failed / mesh-less with no rig)
     }
   }
-  swap(holder, url) {
+  async swap(holder, url) {
     const img = new Image();
     img.src = url;
-    holder.replaceWith(img);
+    // Decode on a background thread before inserting, so painting the thumbnail never
+    // blocks the main thread — the jank felt while many thumbnails streamed in during a
+    // lightbox animation was the per-image decode on paint.
+    try { await img.decode(); } catch { /* fall through and insert anyway */ }
+    if (holder.isConnected) holder.replaceWith(img);
   }
 }
 const modelThumbs = new ModelThumbnails();
