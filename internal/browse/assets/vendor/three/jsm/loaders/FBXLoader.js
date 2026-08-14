@@ -42,7 +42,7 @@ import {
 	Vector3,
 	Vector4,
 	VectorKeyframeTrack
-} from 'three';
+} from '../../three.module.min.js';
 
 import * as fflate from '../libs/fflate.module.js';
 import { NURBSCurve } from '../curves/NURBSCurve.js';
