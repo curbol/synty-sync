@@ -167,7 +167,7 @@ func newServer(ix *assetindex.Index, store *tagstore.Store, tagsPath string) (*s
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.index)
-	mux.Handle("/static/", http.StripPrefix("/static/", s.static))
+	mux.Handle("/static/", http.StripPrefix("/static/", noCache(s.static)))
 	mux.HandleFunc("/api/assets", s.handleAssets)
 	mux.HandleFunc("/api/content", s.handleContent)
 	mux.HandleFunc("/api/thumb", s.handleThumb)
@@ -228,7 +228,18 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(b)
+}
+
+// noCache stops the browser serving stale embedded JS/CSS. The embedded FS has a zero
+// modtime, so http.FileServer emits no Last-Modified/ETag and the browser would cache
+// heuristically — silently running old code after a rebuild until a hard refresh.
+func noCache(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
