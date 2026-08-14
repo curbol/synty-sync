@@ -973,6 +973,7 @@ const CharRegistry = {
     let best = null, bestScore = -1, bestPinned = false;
     for (const e of this.list()) {
       if (vendor && e.vendor && e.vendor !== vendor) continue;
+      if (e.bones.length > new Set(e.bones).size * 1.4) continue; // legacy cache: skip multi-skeleton showcase meshes, whose bones repeat per character (register now rejects them)
       const have = new Set(e.bones);
       let hit = 0;
       for (const b of want) if (have.has(b)) hit++;
@@ -1001,7 +1002,15 @@ const CharRegistry = {
     }
     let root;
     try { root = await loadModel(contentURL(item.id), item.ext); } catch { return false; }
-    const bones = boneNames(root), rigged = isRenderable(root) && bones.length >= 10;
+    const bones = boneNames(root);
+    // A showcase FBX packs several characters into one mesh (multiple skeletons, duplicate
+    // bone names like two "Hips"); those can't be posed cleanly — the retarget bind map and
+    // three.js property bindings resolve the name ambiguously and shred the character. Only
+    // register a single-skeleton body (a clean rig may still carry a few incidental duplicate
+    // helper-bone names, so gate on skeleton count, not on any duplicate).
+    const skels = new Set();
+    root.traverse((n) => { if (n.isSkinnedMesh && n.skeleton) skels.add(n.skeleton); });
+    const rigged = isRenderable(root) && bones.length >= 10 && skels.size <= 1;
     dispose(root);
     if (rigged) this.add({ id: item.id, name: item.name, ext: item.ext, bones, vendor: item.vendor });
     return rigged;
@@ -1027,14 +1036,24 @@ const CharRegistry = {
   },
   // When the seed didn't cover a clip's rig, look for a body in the clip's own vendor
   // (a clip's native character usually ships in the same vendor's packs).
-  async discoverForVendor(vendor) {
+  async discoverForVendor(vendor, want) {
     if (!vendor) return;
-    for (const t of ['Model', 'Body', 'Character', 'Base']) {
-      try {
-        const r = await fetch(`/api/assets?type=model&limit=6&vendor=${encodeURIComponent(vendor)}&q=${encodeURIComponent(t)}`);
-        const items = (await r.json()).items;
-        for (const it of items.slice(0, 3)) await this.register(it);
-      } catch { /* skip */ }
+    // Load candidate bodies until one actually covers this clip (a single showcase mesh can
+    // win by bone count yet be a multi-skeleton mesh register now rejects, and some bodies
+    // ship a different skeleton family that shares no bone names). Stop at the first covering
+    // rig; bound the loads so a vendor without a match doesn't scan the whole library.
+    const seen = new Set(this.list().map((e) => e.id));
+    let loaded = 0;
+    for (const t of ['Character', 'Hero', 'Human', 'Knight', 'Warrior', 'Body', 'Model', 'Base']) {
+      let items;
+      try { items = (await (await fetch(`/api/assets?type=model&limit=8&vendor=${encodeURIComponent(vendor)}&q=${encodeURIComponent(t)}`)).json()).items || []; } catch { continue; }
+      for (const it of items) {
+        if (loaded >= 14) return;
+        if (seen.has(it.id)) continue;
+        seen.add(it.id); loaded++;
+        await this.register(it);
+        if (want && this.match(want, vendor)) return;
+      }
     }
   },
 };
@@ -1133,7 +1152,7 @@ class ModelThumbnails {
     const bones = clipBones(clip);
     await CharRegistry.seed();
     let m = CharRegistry.match(bones, vendor);
-    if (!m) { await CharRegistry.discoverForVendor(vendor); m = CharRegistry.match(bones, vendor); }
+    if (!m) { await CharRegistry.discoverForVendor(vendor, bones); m = CharRegistry.match(bones, vendor); }
     if (!m) return null;
     if (!this.rigs.has(m.id)) {
       const rig = await loadModel(contentURL(m.id), m.ext)
@@ -1780,7 +1799,7 @@ function startViewer(container, asset) {
     };
     if (await playOnMatch()) return;
     if (stopped) return;
-    await CharRegistry.discoverForVendor(asset.vendor);
+    await CharRegistry.discoverForVendor(asset.vendor, bones);
     if (await playOnMatch()) return;
     if (stopped) return;
     showPlaceholder('Animation clip — pick a character in the sidebar →');
