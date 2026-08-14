@@ -174,7 +174,9 @@ locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`, `clip
 `width` / `height` for images, and every duplicate copy. A multi-animation `.glb` (an
 animation library like Quaternius, one file holding ~120 clips) is split into one card per
 clip: each shares the file's bytes and names its animation in `source.clip`, so the clips are
-individually searchable, taggable, and previewable. `?guid=` resolves a scene or
+individually searchable, taggable, and previewable. An animation that also ships a root-motion
+(`_RM`) variant collapses to one card carrying `rootMotionId` (the travel variant's id); the RM
+card is hidden and the preview's toggle plays it to show the travel. `?guid=` resolves a scene or
 prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
 extraction is one request rather than tar-scraping the archive. Each asset also carries
 its content `fingerprints`, current `tags`, and any linked `related` fingerprints;

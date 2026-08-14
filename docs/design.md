@@ -252,8 +252,19 @@ shared rig) is split at scan time into one virtual asset per embedded clip: `ass
 only the GLB's JSON chunk for the animation names, then emits a per-clip asset whose `Source.Clip`
 names the animation and whose bytes are the whole file (`/api/content` serves the file; the
 preview plays `Source.Clip`). Each clip fingerprints as `<file-fingerprint>#<clipName>`, so clips
-tag independently and stably. A root-motion (`_RM`) sibling is left whole (its clips would
-duplicate the base file's); pairing the two as a root-motion toggle is a later concern.
+tag independently and stably. A root-motion (`_RM`) GLB is left whole (its clips would duplicate
+the base file's) and becomes the base clips' root-motion sibling (below).
+
+An animation that ships in two variants — one that travels (root motion baked in, an `_RM` file)
+and one that animates in place — collapses to a single card in the `browse` layer (not
+`assetindex`, which keeps both files as faithful assets). The in-place variant is the visible
+card carrying `rootMotionId`, the RM variant's asset id; the lightbox's root-motion toggle loads
+that file to show the travel, and the RM card is suppressed from the grid. Pairing groups assets
+by `(vendor, pack, canonical file base)` where the canonical base strips the `_RM` token — a
+trailing `_RM` (Quaternius/explosive GLBs) or a `_RM_` infix before a suffix (Synty FBX,
+`..._180L_RM_Masc`) — and pairs a group's in-place animations to its RM sibling (the same clip
+when the RM is also per-clip, else the whole-file RM). This is orthogonal to whether the clip has
+a body to preview on: it only decides which file the toggle plays.
 
 `GET /api/assets` filters by tags with a repeatable `tag` param combined by `tagmode`: `and`
 matches cards carrying all selected tags, `or` (the default) any. A card is matched on the

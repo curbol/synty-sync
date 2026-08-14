@@ -737,6 +737,27 @@ function clipsForAsset(obj, asset) {
   return hit.length ? hit : all;
 }
 
+// loadRMClips loads an animation's root-motion (travel) sibling file and returns its
+// matching clips — the same clip name as the card. The RM and in-place variants share
+// a skeleton, so the clips play on the already-loaded body; only the AnimationClips are
+// kept (they outlive disposing the source object). Null when the asset has no sibling.
+async function loadRMClips(asset) {
+  if (!asset || !asset.rootMotionId) return null;
+  try {
+    const rmObj = await loadModel(contentURL(asset.rootMotionId), asset.ext);
+    const cs = clipsForAsset(rmObj, asset);
+    dispose(rmObj);
+    return cs.length ? cs : null;
+  } catch { return null; }
+}
+
+// hasBakedMotion detects a file that itself carries baked root motion (an _RM file
+// opened without a separate in-place sibling), so the toggle can still strip it in
+// place. Matches the "_RM" token bounded by _, space, brackets, dot, or ends.
+function hasBakedMotion(name) {
+  return /(?:^|[_\s[])rm(?:[_\s\].]|$)/i.test(name || '');
+}
+
 // coversBones reports whether a rig can actually play a clip: the clip must drive
 // most of the rig (≥60% of the rig's bones — so nearly the whole body animates) AND
 // cover a good part of the clip (≥45% of its bones). Requiring both rejects the
@@ -1558,6 +1579,7 @@ function startViewer(container, asset) {
   let raf = 0, obj = null, stopped = false;
   let mixer = null, action = null, clips = [], soloClips = null, soloRootRest = null, clipDur = 0, playing = true, ctrls = null;
   let rawClips = [], playRootName = null, playUpAxis = null, motionOn = false, curClip = 0;
+  let playInPlace = [], playMotion = []; // the two clip sets the root-motion toggle swaps between
 
   // View controls overlaid on the canvas: three view modes (isometric default / flat
   // eye-level / free rotation), and — for a root-motion clip — show the travel or in place.
@@ -1586,7 +1608,7 @@ function startViewer(container, asset) {
     motionOn = !motionOn;
     moveBtn.classList.toggle('on', motionOn);
     moveBtn.title = motionOn ? 'Showing root motion — click to play in place' : 'Playing in place — click to show root motion';
-    clips = motionOn ? rawClips : rawClips.map((c) => stripRootMotion(c, playRootName, playUpAxis));
+    clips = motionOn ? playMotion : playInPlace;
     playClip(curClip);
   });
   moveBtn.hidden = true;
@@ -1624,7 +1646,7 @@ function startViewer(container, asset) {
     if (ctrls) ctrls.setClip(i);
   };
 
-  const buildPlayback = (mixerRoot, cs, charInfo, rootRest) => {
+  const buildPlayback = (mixerRoot, cs, charInfo, rootRest, rmCs) => {
     let rootBoneName = null;
     mixerRoot.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
     mixerRoot.traverse((o) => { if (o.isMesh) o.castShadow = true; });
@@ -1634,8 +1656,14 @@ function startViewer(container, asset) {
     // the fixed frame. scale, centering and the ground stay fixed no matter what the clip does.
     const refBox = prepareClipRig(mixerRoot, rootRest);
     rawClips = cs; playRootName = rootBoneName; playUpAxis = mixerRoot.userData.upAxis;
-    clips = motionOn ? cs : cs.map((c) => stripRootMotion(c, rootBoneName, playUpAxis));
-    moveBtn.hidden = !/rootmotion|_rm\b|\[rm\]/i.test(asset.name || '');
+    const rmClips = rmCs || [];
+    // With a paired RM sibling, in-place is the native (non-RM) clips and the travel view is
+    // the RM clips — both play on this same skeleton. Without one, fall back to stripping a
+    // baked-motion clip in place algorithmically.
+    playInPlace = rmClips.length ? cs : cs.map((c) => stripRootMotion(c, rootBoneName, playUpAxis));
+    playMotion = rmClips.length ? rmClips : cs;
+    clips = motionOn ? playMotion : playInPlace;
+    moveBtn.hidden = !(rmClips.length || hasBakedMotion(asset.name));
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);
@@ -1653,12 +1681,15 @@ function startViewer(container, asset) {
       if (stopped) { dispose(char); return true; }
       CharRegistry.add({ id: item.id, name: item.name, ext: item.ext, bones: boneNames(char), vendor: item.vendor });
       const clips = await Promise.all(soloClips.map((c) => retargetedFor(c, asset.vendor, char)));
+      let rmCs = null;
+      const rmRaw = await loadRMClips(asset); // travel sibling, retargeted onto the same body
+      if (rmRaw) rmCs = await Promise.all(rmRaw.map((c) => retargetedFor(c, asset.vendor, char)));
       if (stopped) { dispose(char); return true; }
       clearOverlays(); ensureCanvas();
       if (obj) { scene.remove(obj); dispose(obj); }
       obj = char; scene.add(char);
       mixer = null; action = null;
-      buildPlayback(char, clips, { id: item.id, name: item.name }, asset.vendor === 'synty' ? null : soloRootRest);
+      buildPlayback(char, clips, { id: item.id, name: item.name }, asset.vendor === 'synty' ? null : soloRootRest, rmCs);
       return true;
     }).catch(() => false);
 
@@ -1810,8 +1841,11 @@ function startViewer(container, asset) {
       CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
       // buildPlayback corrects orientation and frames from the reference box; do the same
       // for a static (clip-less) renderable so a Z-up model still stands upright and framed.
-      if (cs.length) buildPlayback(root, cs, null, null);
-      else frameBox(prepareClipRig(root, null), camera, controls);
+      if (cs.length) {
+        const rmCs = await loadRMClips(asset); // travel sibling, if this animation ships one
+        if (stopped) return;
+        buildPlayback(root, cs, null, null, rmCs);
+      } else frameBox(prepareClipRig(root, null), camera, controls);
       return;
     }
     if (!cs.length) { dispose(root); showPlaceholder('No mesh to preview (data file).'); return; }

@@ -79,7 +79,9 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   one write surface (see `tagstore`); no session. It discovers the project manifest
   (best-effort, never required) only to locate the tag store beside it. `includeRelated=1`
   folds each tag match's linked companions into results; `/api/link` and `/api/related`
-  write and resolve links.
+  write and resolve links. It also pairs each in-place animation with its root-motion (`_RM`)
+  sibling (`pairing.go`): the in-place card carries `rootMotionId` and the RM card is hidden,
+  so the preview's toggle can play the travel variant.
 - `tagstore` — `synty-sync.tags.toml`, a committed project file beside the manifest: a
   palette of user tags (label + color), per-asset **assignments keyed by content
   fingerprint**, and **link groups** (undirected sets of fingerprints that travel

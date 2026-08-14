@@ -43,6 +43,12 @@ type server struct {
 	// byFP indexes assets by content fingerprint so link expansion can resolve a
 	// related fingerprint back to its asset(s) without scanning the whole library.
 	byFP map[string][]assetindex.Asset
+
+	// rmSibling maps an in-place animation asset id to its root-motion sibling id;
+	// rmSuppressed marks the RM assets a sibling covers, hidden from the grid. Both
+	// are computed once (the index is static per run). See pairing.go.
+	rmSibling    map[string]string
+	rmSuppressed map[string]bool
 }
 
 type facets struct {
@@ -83,6 +89,9 @@ type assetDTO struct {
 	// Related are the content fingerprints of assets linked to this card (its
 	// companions), for API consumers and the lightbox "parts of this set" strip.
 	Related []string `json:"related,omitempty"`
+	// RootMotionID is the id of this animation's root-motion (travel) sibling, when
+	// it ships one; the lightbox's toggle loads that file to show the travel.
+	RootMotionID string `json:"rootMotionId,omitempty"`
 }
 
 // copyDTO is one occurrence of an asset (its variant/pack, the path to copy, and its
@@ -146,9 +155,11 @@ func newServer(ix *assetindex.Index, store *tagstore.Store, tagsPath string) (*s
 			byFP[a.Fingerprint] = append(byFP[a.Fingerprint], a)
 		}
 	}
+	rmSibling, rmSuppressed := buildRootMotionPairs(ix.Assets)
 	return &server{
 		ix: ix, facets: buildFacets(ix), static: http.FileServerFS(static),
 		tagsEnabled: tagsPath != "", tagsPath: tagsPath, store: store, byFP: byFP,
+		rmSibling: rmSibling, rmSuppressed: rmSuppressed,
 	}, nil
 }
 
@@ -235,6 +246,9 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 
 	var matched []assetindex.Asset
 	for _, a := range s.ix.Assets {
+		if s.rmSuppressed[a.ID] {
+			continue // folded into its in-place sibling's card (root-motion toggle)
+		}
 		if types != nil && !types[string(a.Category)] {
 			continue
 		}
@@ -261,6 +275,9 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		for i, a := range matched {
 			grouped[i] = toDTO(a)
 		}
+	}
+	for i := range grouped {
+		grouped[i].RootMotionID = s.rmSibling[grouped[i].ID]
 	}
 	// Resolve each card's tags (the union over its fingerprints) and its linked
 	// companions, then filter by the requested tags, so a card matches on its whole
