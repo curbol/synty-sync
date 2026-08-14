@@ -164,7 +164,10 @@ Textureless Synty source FBX render as neutral clay; animation-only FBX (no mesh
 an icon.
 
 The page is backed by a small read-only JSON API you can script against. `GET /api/assets`
-takes `q`, repeatable `type` / `vendor` / `variant` / `guid` filters, repeatable `tag` with
+takes `q` (a Google-style query: space is AND, `OR` / `|` alternate, `-` excludes, `"…"` is
+an exact phrase, `( )` groups, and `field:value` scopes a term to one field — `name`, `pack`,
+`vendor`, `type`, `variant`, `ext`, `guid`, `path` — so `turn loop vendor:kevdev -idle` works;
+a bare term matches name, pack, and path), repeatable `type` / `vendor` / `variant` / `guid` filters, repeatable `tag` with
 `tagmode=and` (match all selected tags) or `tagmode=or` (any; the default), `group=0` to keep
 duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its `source`
 locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`), pixel

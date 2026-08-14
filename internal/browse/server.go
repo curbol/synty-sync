@@ -222,7 +222,7 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	matcher := parseQuery(query.Get("q"))
 	types := valueSet(query["type"])
 	vendors := valueSet(query["vendor"])
 	variants := valueSet(query["variant"])
@@ -247,7 +247,7 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		if guids != nil && !guids[a.Source.Guid] {
 			continue
 		}
-		if q != "" && !strings.Contains(strings.ToLower(a.Name), q) {
+		if !matcher.match(a) {
 			continue
 		}
 		matched = append(matched, a)
