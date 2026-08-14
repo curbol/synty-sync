@@ -10,12 +10,6 @@ import {
 
 const PAGE = 200;
 
-// Above this file size a grid thumbnail shows the category icon instead of a 3D
-// render: three.js parses a model synchronously on the main thread, so parsing a
-// 65 MB FBX just for a 220px still froze the page. The full model still opens in the
-// lightbox on demand.
-const MAX_THUMB_BYTES = 40 * 1024 * 1024;
-
 const els = {
   q: document.getElementById('q'),
   sort: document.getElementById('sort'),
@@ -590,7 +584,6 @@ function thumbContent(a) {
     return img;
   }
   if (a.thumb === 'glb' || a.thumb === 'fbx') {
-    if (a.size > MAX_THUMB_BYTES) return iconEl(a.category); // too big to parse for a grid still
     const holder = document.createElement('div');
     holder.className = 'thumb-3d';
     holder.appendChild(iconEl(a.category));
@@ -687,202 +680,52 @@ function iconEl(category) {
 
 // ---- lazy 3D thumbnails: one shared renderer, sequential queue, cached ----
 
+// ModelThumbnails is a thin client over the thumbnail worker: it observes cards, posts
+// each asset's descriptor, and swaps in the PNG blob the worker renders off the main
+// thread. No parsing or WebGL happens here, so a large model never blocks the UI.
 class ModelThumbnails {
-  constructor(size = 220) {
-    this.size = size;
-    this.cache = new Map();
-    this.rigs = new Map();  // matched character id -> loaded rig, reused to pose clips
-    this.files = new Map(); // file path -> parsed+oriented file, reused across its split clips
-    this.queue = Promise.resolve();
+  constructor() {
+    this.cache = new Map();   // asset.id -> object URL (a rendered blob)
+    this.pending = new Map(); // asset.id -> holder awaiting its render
+    this.worker = new Worker('/static/thumbworker.js', { type: 'module' });
+    this.worker.onmessage = (e) => this.onResult(e.data);
     this.observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
-        if (e.isIntersecting) {
-          this.observer.unobserve(e.target);
-          e.target.classList.add('loading'); // queued or rendering; cleared when the image swaps in
-          this.enqueue(e.target, e.target._asset);
-        }
+        if (e.isIntersecting) { this.observer.unobserve(e.target); this.request(e.target); }
       }
     }, { rootMargin: '200px' });
   }
   observe(holder, asset) { holder._asset = asset; this.observer.observe(holder); }
-  // pause/resume gate the queue so the lightbox (its own heavy model load) doesn't fight
-  // the background thumbnail parsing for the main thread while it's open.
-  pause() {
-    if (this.gate) return;
-    let resume;
-    this.gate = new Promise((r) => { resume = r; });
-    this._resume = resume;
+  request(holder) {
+    const asset = holder._asset;
+    const cached = this.cache.get(asset.id);
+    if (cached) { this.swap(holder, cached); return; }
+    holder.classList.add('loading');
+    this.pending.set(asset.id, holder);
+    // Only the fields the worker's build needs — DTOs aren't structured-clone-friendly wholesale.
+    this.worker.postMessage({
+      id: asset.id,
+      asset: {
+        id: asset.id, ext: asset.ext, vendor: asset.vendor,
+        source: { clip: asset.source && asset.source.clip, filePath: asset.source && asset.source.filePath },
+      },
+    });
   }
-  resume() {
-    if (!this.gate) return;
-    this._resume();
-    this.gate = null;
-    this._resume = null;
-  }
-  enqueue(holder, asset) {
-    // Yield a frame between thumbnails so posing/rendering never starves scroll and
-    // clicks — the whole page felt frozen until the queue drained otherwise.
-    this.queue = this.queue
-      .then(() => this.render(holder, asset))
-      .then(() => new Promise((r) => requestAnimationFrame(() => r())))
-      .catch(() => {});
-  }
-  ensureRenderer() {
-    if (this.renderer) return;
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    this.renderer.setSize(this.size, this.size);
-    this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x33343a, 2.6));
-    const dir = new THREE.DirectionalLight(0xffffff, 2.2);
-    dir.position.set(4, 6, 5);
-    this.scene.add(dir);
-  }
-  async render(holder, asset) {
-    if (this.gate) await this.gate; // hold while the lightbox is open
-    let url = this.cache.get(asset.id);
-    if (url === undefined) {
-      url = await this.build(asset);
-      this.cache.set(asset.id, url);
-    }
-    if (url && holder.isConnected) {
-      const img = new Image();
-      img.src = url;
-      holder.replaceWith(img);
-    } else if (holder.isConnected) {
-      holder.classList.remove('loading'); // no render (failed/mesh-less-no-rig): drop the spinner
+  onResult({ id, blob }) {
+    const holder = this.pending.get(id);
+    this.pending.delete(id);
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      this.cache.set(id, url);
+      if (holder && holder.isConnected) this.swap(holder, url);
+    } else if (holder && holder.isConnected) {
+      holder.classList.remove('loading'); // no render (failed / mesh-less with no rig)
     }
   }
-  async build(asset) {
-    try {
-      this.ensureRenderer();
-      // A split multi-clip file (source.clip) is loaded and oriented once, then every
-      // clip card poses that shared object — otherwise each of the ~120 clips re-fetched
-      // and re-parsed the whole 20–65 MB file, which pinned the main thread.
-      const key = asset.source && asset.source.clip && asset.source.filePath;
-      return key ? await this.buildShared(asset, key) : await this.buildStandalone(asset);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  async buildStandalone(asset) {
-    const obj = await loadModel(contentURL(asset.id), asset.ext);
-    const rootRest = captureRootRest(obj);
-    if (isRenderable(obj)) {
-      const cs = clipsForAsset(obj, asset);
-      const refBox = prepareClipRig(obj, null); // self-contained plays on its own body; fixes Z-up files (e.g. some explosive dashes), no-op when upright
-      if (cs.length) {
-        let rootBoneName = null;
-        obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-        poseAt(obj, stripRootMotion(cs[0], rootBoneName, obj.userData.upAxis)); // in place, or a dash/locomotion clip drifts out of the still's frame
-      }
-      const dataURL = this.snap(obj, refBox);
-      dispose(obj);
-      return dataURL;
-    }
-    // Mesh-less animation clip: pose a matching rig at a representative frame so
-    // each clip gets a distinguishable still instead of the same bare icon.
-    const clips = clipsForAsset(obj, asset);
-    dispose(obj);
-    return clips.length ? await this.buildPosed(clips[0], asset.vendor, rootRest) : null;
-  }
-
-  // buildShared renders one clip of a multi-clip file whose parsed+oriented object is
-  // loaded once and reused across all its clips (thumbnails render serially, so the
-  // shared object is safe to re-pose per clip). Orientation and the framing box are
-  // measured once — they belong to the file's rig, not the clip.
-  async buildShared(asset, key) {
-    let pending = this.files.get(key);
-    if (!pending) {
-      pending = this.loadSharedFile(asset);
-      this.files.set(key, pending);
-      this.evictFiles();
-    }
-    const ctx = await pending;
-    if (!ctx) return null;
-    if (ctx.renderable) {
-      const cs = clipsForAsset(ctx.obj, asset);
-      const mixer = cs.length ? poseAt(ctx.obj, stripRootMotion(cs[0], ctx.rootBoneName, ctx.upAxis)) : null;
-      const dataURL = this.snap(ctx.obj, ctx.refBox);
-      if (mixer) mixer.stopAllAction();
-      return dataURL;
-    }
-    const cs = clipsForAsset(ctx.obj, asset);
-    return cs.length ? await this.buildPosed(cs[0], asset.vendor, ctx.rootRest) : null;
-  }
-
-  async loadSharedFile(asset) {
-    const obj = await loadModel(contentURL(asset.id), asset.ext);
-    if (isRenderable(obj)) {
-      const refBox = prepareClipRig(obj, null);
-      let rootBoneName = null;
-      obj.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-      return { renderable: true, obj, refBox, upAxis: obj.userData.upAxis, rootBoneName };
-    }
-    return { renderable: false, obj, rootRest: captureRootRest(obj) };
-  }
-
-  // evictFiles bounds the shared-file cache so scrolling a large library doesn't hold
-  // every parsed model in memory. Clips of a file render together, so the oldest file is
-  // done by the time it's evicted.
-  evictFiles() {
-    const CAP = 6;
-    while (this.files.size > CAP) {
-      const oldest = this.files.keys().next().value;
-      const pending = this.files.get(oldest);
-      this.files.delete(oldest);
-      Promise.resolve(pending).then((ctx) => { if (ctx && ctx.obj) dispose(ctx.obj); }).catch(() => {});
-    }
-  }
-
-  // snap adds an object to the shared scene, frames it to the given box (the character's
-  // constant reference box, so every thumbnail of a character is the same scale) and
-  // renders it, then removes it (without disposing — the caller owns the object) and
-  // returns a PNG data URL.
-  snap(object, box) {
-    this.scene.add(object);
-    frameBox(box, this.camera, null);
-    this.renderer.render(this.scene, this.camera);
-    const dataURL = this.renderer.domElement.toDataURL('image/png');
-    this.scene.remove(object);
-    return dataURL;
-  }
-
-  // rigFor returns (and caches) a loaded character whose skeleton can play a clip,
-  // using the same registry the lightbox uses; null when no rig matches.
-  async rigFor(clip, vendor) {
-    const bones = clipBones(clip);
-    await CharRegistry.seed();
-    let m = CharRegistry.match(bones, vendor);
-    if (!m) { await CharRegistry.discoverForVendor(vendor, bones); m = CharRegistry.match(bones, vendor); }
-    if (!m) return null;
-    if (!this.rigs.has(m.id)) {
-      const rig = await loadModel(contentURL(m.id), m.ext)
-        .then((r) => (isRenderable(r) ? r : (dispose(r), null)))
-        .catch(() => null);
-      this.rigs.set(m.id, rig); // pristine template; buildPosed clones it per clip
-
-    }
-    return this.rigs.get(m.id);
-  }
-
-  async buildPosed(clip, vendor, rootRest) {
-    const template = await this.rigFor(clip, vendor);
-    if (!template) return null;
-    // Pose each clip on a fresh clone of the loaded body — the same pristine-skeleton pipeline
-    // the lightbox uses, so the two never diverge. (Reusing one posed skeleton re-measures
-    // orientation unreliably and flips every other thumbnail.)
-    const rig = cloneRig(template);
-    let rootBoneName = null;
-    rig.traverse((n) => { if (n.isBone && !rootBoneName && (!n.parent || !n.parent.isBone)) rootBoneName = n.name; });
-    const refBox = prepareClipRig(rig, vendor === 'synty' ? null : rootRest); // synty retargeted (own bind); a cross-file body needs the clip's root axis
-    const posed = stripRootMotion(await retargetedFor(clip, vendor, rig), rootBoneName, rig.userData.upAxis); // in place, so the still stays framed
-    const mixer = poseAt(rig, posed);
-    const dataURL = this.snap(rig, refBox);
-    mixer.stopAllAction();
-    dispose(rig);
-    return dataURL;
+  swap(holder, url) {
+    const img = new Image();
+    img.src = url;
+    holder.replaceWith(img);
   }
 }
 const modelThumbs = new ModelThumbnails();
@@ -927,7 +770,6 @@ async function navLightbox(delta) {
 
 function openLightbox(a) {
   if (activeViewer) { activeViewer.stop(); activeViewer = null; } // tear down when navigating
-  modelThumbs.pause(); // give the viewer's model load the main thread, not the thumbnail queue
   lb.index = state.items.indexOf(a);
   updateLbNav();
   lb.name.textContent = a.name;
@@ -1143,7 +985,6 @@ function relatedThumb(it) {
 
 function closeLightbox() {
   lb.root.hidden = true;
-  modelThumbs.resume(); // let background thumbnails continue
   if (activeViewer) { activeViewer.stop(); activeViewer = null; }
   lb.view.replaceChildren();
   lb.character.replaceChildren();
