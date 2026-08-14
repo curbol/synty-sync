@@ -700,6 +700,9 @@ class ModelThumbnails {
     }, { rootMargin: '200px' });
   }
   observe(holder, asset) { holder._asset = asset; this.observer.observe(holder); }
+  // While the lightbox is open it renders a live 60fps view; throttling the thumbnail
+  // worker (which shares the one GPU) keeps that view smooth without stopping loads.
+  throttle(ms) { this.worker.postMessage({ type: 'throttle', ms }); }
   request(holder) {
     const asset = holder._asset;
     const cached = this.cache.get(asset.id);
@@ -778,6 +781,7 @@ async function navLightbox(delta) {
 
 function openLightbox(a) {
   if (activeViewer) { activeViewer.stop(); activeViewer = null; } // tear down when navigating
+  modelThumbs.throttle(250); // the viewer owns the GPU; let thumbnails trickle behind it
   lb.index = state.items.indexOf(a);
   updateLbNav();
   lb.name.textContent = a.name;
@@ -993,6 +997,7 @@ function relatedThumb(it) {
 
 function closeLightbox() {
   lb.root.hidden = true;
+  modelThumbs.throttle(0); // full speed again
   if (activeViewer) { activeViewer.stop(); activeViewer = null; }
   lb.view.replaceChildren();
   lb.character.replaceChildren();

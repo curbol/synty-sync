@@ -165,9 +165,15 @@ async function buildPosed(clip, vendor, rootRest) {
 // Serialize jobs: one render on the shared canvas at a time, converted to a blob before
 // the next job overwrites the canvas.
 let queue = Promise.resolve();
+let throttleMs = 0; // while the lightbox is open, space out jobs so it owns the GPU
+
 self.onmessage = (e) => {
   if (e.data.type === 'seed') {
     if (e.data.list && e.data.list.length) CharRegistry.save(e.data.list);
+    return;
+  }
+  if (e.data.type === 'throttle') {
+    throttleMs = e.data.ms || 0;
     return;
   }
   const { id, asset } = e.data;
@@ -180,5 +186,7 @@ self.onmessage = (e) => {
     } catch {
       self.postMessage({ id, blob: null });
     }
+    // Yield the GPU between jobs while throttled, so an open lightbox renders smoothly.
+    if (throttleMs) await new Promise((r) => setTimeout(r, throttleMs));
   });
 };
