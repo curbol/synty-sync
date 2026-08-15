@@ -22,7 +22,7 @@ if (typeof document === 'undefined') {
 
 import * as THREE from '/static/vendor/three/three.module.min.js';
 import {
-  loadModel, clipsForAsset, prepareClipRig, poseAt, stripRootMotion, isRenderable,
+  loadModel, loadSidekick, clipsForAsset, prepareClipRig, poseAt, stripRootMotion, isRenderable,
   captureRootRest, cloneRig, retargetedFor, dispose, CharRegistry, frameBox, contentURL,
 } from '/static/scene.js';
 
@@ -72,8 +72,18 @@ function rootBoneName(root) {
 // build renders one thumbnail to the canvas and resolves true, or false when there is
 // nothing to draw (a mesh-less clip with no matching rig).
 async function build(asset) {
+  if (asset.thumb === 'sidekick') return await buildSidekick(asset);
   const key = asset.source && asset.source.clip && asset.source.filePath;
   return key ? await buildShared(asset, key) : await buildStandalone(asset);
+}
+
+async function buildSidekick(asset) {
+  const root = await loadSidekick(asset.source && asset.source.parts);
+  if (!root) return false;
+  const refBox = prepareClipRig(root, null);
+  snap(root, refBox);
+  dispose(root);
+  return true;
 }
 
 async function buildStandalone(asset) {

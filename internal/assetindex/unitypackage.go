@@ -112,7 +112,7 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 		}
 		assets = append(assets, a)
 	}
-	return assets, nil
+	return applySidekick(archivePath, entries, order, assets)
 }
 
 // extractUnityPackage decompresses a .unitypackage once, writing each GUID's

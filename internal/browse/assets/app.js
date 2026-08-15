@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
-  contentURL, loadModel, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips,
+  contentURL, loadModel, loadSidekick, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips,
   hasBakedMotion, coversBones, posedBox, frameBox, isRenderable, captureRootRest, uprightRig,
   prepareClipRig, cloneRig, poseAt, retargetedFor, stripRootMotion, dispose, CharRegistry, CLAY, _posedV,
 } from '/static/scene.js';
@@ -583,7 +583,7 @@ function thumbContent(a) {
     img.onerror = () => img.replaceWith(iconEl(a.category));
     return img;
   }
-  if (a.thumb === 'glb' || a.thumb === 'fbx') {
+  if (a.thumb === 'glb' || a.thumb === 'fbx' || a.thumb === 'sidekick') {
     const holder = document.createElement('div');
     holder.className = 'thumb-3d';
     holder.appendChild(iconEl(a.category));
@@ -710,8 +710,12 @@ class ModelThumbnails {
     this.worker.postMessage({
       id: asset.id,
       asset: {
-        id: asset.id, ext: asset.ext, vendor: asset.vendor,
-        source: { clip: asset.source && asset.source.clip, filePath: asset.source && asset.source.filePath },
+        id: asset.id, ext: asset.ext, vendor: asset.vendor, thumb: asset.thumb,
+        source: {
+          clip: asset.source && asset.source.clip,
+          filePath: asset.source && asset.source.filePath,
+          parts: asset.source && asset.source.parts,
+        },
       },
     });
   }
@@ -804,7 +808,7 @@ function openLightbox(a) {
   renderCopies(a);
 
   lb.view.replaceChildren();
-  if (a.thumb === 'glb' || a.thumb === 'fbx') {
+  if (a.thumb === 'glb' || a.thumb === 'fbx' || a.thumb === 'sidekick') {
     activeViewer = startViewer(lb.view, a);
   } else if (bitmap) {
     // The expanded view shows the full-resolution image, not the small Unity
@@ -1326,13 +1330,22 @@ function startViewer(container, asset) {
 
   (async () => {
     let root;
-    try { root = await loadModel(contentURL(asset.id), asset.ext); }
-    catch { showPlaceholder('Could not load this model.'); return; }
+    if (asset.thumb === 'sidekick') {
+      root = await loadSidekick(asset.source && asset.source.parts);
+      if (!root) { showPlaceholder('Could not assemble this character.'); return; }
+    } else {
+      try { root = await loadModel(contentURL(asset.id), asset.ext); }
+      catch { showPlaceholder('Could not load this model.'); return; }
+    }
     if (stopped) { dispose(root); return; }
     const cs = clipsForAsset(root, asset);
     if (isRenderable(root)) {
       obj = root; scene.add(root);
-      CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
+      // A sidekick group is many part meshes each on its own copy of the skeleton;
+      // registering it as a rig would pollute the registry with duplicate bone names.
+      if (asset.thumb !== 'sidekick') {
+        CharRegistry.add({ id: asset.id, name: asset.name, ext: asset.ext, bones: boneNames(root), vendor: asset.vendor });
+      }
       // buildPlayback corrects orientation and frames from the reference box; do the same
       // for a static (clip-less) renderable so a Z-up model still stands upright and framed.
       if (cs.length) {

@@ -47,6 +47,9 @@ const (
 	ThumbFBX     ThumbKind = "fbx"
 	ThumbPreview ThumbKind = "preview"
 	ThumbFont    ThumbKind = "font"
+	// ThumbSidekick is an assembled Synty Sidekick character: not one file but a set
+	// of part meshes (Source.Parts) the frontend loads and merges onto one skeleton.
+	ThumbSidekick ThumbKind = "sidekick"
 )
 
 // SourceKind discriminates where an asset's bytes live.
@@ -73,6 +76,10 @@ type Source struct {
 	// GLB animation library split into per-clip assets). The bytes served are the whole
 	// file; Clip only tells the preview which animation to play.
 	Clip string `json:"clip,omitempty"`
+	// Parts lists the ids of the individual FBX meshes that compose an assembled Synty
+	// Sidekick character (see ThumbSidekick). The character has no bytes of its own; the
+	// frontend loads each part by id and merges them onto the shared skeleton.
+	Parts []string `json:"parts,omitempty"`
 }
 
 // Asset is one browseable item: a loose file or a single entry inside an archive.

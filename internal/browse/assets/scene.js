@@ -94,6 +94,19 @@ async function loadModel(url, ext) {
   return obj;
 }
 
+// loadSidekick assembles a Synty Sidekick character from its part meshes (ids from
+// Source.Parts). Each part is a separate FBX skinned to the same skeleton at the same
+// bind pose and root transform, so overlaying them at the origin reconstructs the whole
+// figure. Parts that fail to load are skipped; null when none load. The parts keep their
+// own (identical) skeletons — enough for a static clay preview.
+async function loadSidekick(parts) {
+  const group = new THREE.Group();
+  for (const pid of parts || []) {
+    try { group.add(await loadModel(contentURL(pid), 'fbx')); } catch { /* skip a bad part */ }
+  }
+  return group.children.length ? group : null;
+}
+
 function boneNames(root) {
   const names = [];
   root.traverse((o) => { if (o.isBone) names.push(o.name); });
@@ -512,7 +525,7 @@ const CharRegistry = {
 };
 
 export {
-  loadModel, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips, hasBakedMotion,
+  loadModel, loadSidekick, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips, hasBakedMotion,
   coversBones, posedBox, frameBox, isRenderable, captureRootRest, uprightRig, prepareClipRig,
   cloneRig, poseAt, retargetedFor, stripRootMotion, dispose, CharRegistry, CLAY, _posedV,
 };
