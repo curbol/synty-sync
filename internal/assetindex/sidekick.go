@@ -97,7 +97,29 @@ func applySidekick(archivePath string, entries map[string]*unityEntry, order []s
 		assets[i].Thumb = ThumbSidekick
 		assets[i].Source.Parts = partIDs
 	}
-	return assets, nil
+	kept := assets[:0]
+	for _, a := range assets {
+		if !sidekickByproduct(a) {
+			kept = append(kept, a)
+		}
+	}
+	return kept, nil
+}
+
+// sidekickByproduct reports a per-character byproduct under a Sidekick package's
+// Characters/ tree that the assembled .sk character supersedes: the magenta prefab,
+// its material, and the combined-mesh/avatar .asset data. The reusable part meshes
+// live under Resources/ (not Characters/) and the character's textures are kept, so
+// both stay browseable.
+func sidekickByproduct(a Asset) bool {
+	if a.Thumb == ThumbSidekick || !strings.Contains(a.Source.Pathname, "/Characters/") {
+		return false
+	}
+	switch a.Ext {
+	case "prefab", "mat", "asset":
+		return true
+	}
+	return false
 }
 
 // readUnityAssetBytes streams a .unitypackage once and returns the full `asset` payload

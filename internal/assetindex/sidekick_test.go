@@ -85,3 +85,48 @@ func TestScanSidekickCharacter(t *testing.T) {
 		t.Errorf("parts = %v, want %v", ch.Source.Parts, want)
 	}
 }
+
+// Within a Sidekick package, the per-character byproducts under the Characters/ tree
+// (the magenta prefab, its material, the combined-mesh and avatar .asset data) are
+// dropped in favour of the assembled .sk character. The reusable parts (Resources/)
+// and the character's textures stay browseable.
+func TestScanSidekickDeclutter(t *testing.T) {
+	root := t.TempDir()
+	mk := func(parts ...string) string {
+		p := filepath.Join(append([]string{root}, parts...)...)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		return p
+	}
+	base := "Assets/Synty/SidekickCharacters/"
+	writeUnityPackage(t, mk("synty", "SIDEKICK_X", "SIDEKICK_X_Unity_2021_3_v1_0_0.unitypackage"), []unityGUID{
+		{guid: "sk1", pathname: base + "Characters/W/W_01/W_01.sk", asset: "Name: W_01\nParts:\n- Name: SK_HEAD\n"},
+		{guid: "hd1", pathname: base + "Resources/Meshes/SK_HEAD.fbx", asset: "HEADFBX"},
+		{guid: "pf1", pathname: base + "Characters/W/W_01/W_01.prefab", asset: "PREFAB", preview: true},
+		{guid: "mt1", pathname: base + "Characters/W/W_01/Materials/W_01.mat", asset: "MAT", preview: true},
+		{guid: "av1", pathname: base + "Characters/W/W_01/Meshes/W_01-avatar.asset", asset: "AVATAR"},
+		{guid: "tx1", pathname: base + "Characters/W/W_01/Textures/T_W_01ColorMap.png", asset: "PNG"},
+	})
+
+	assets, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]Asset{}
+	for _, a := range assets {
+		present[a.Name] = a
+	}
+	for _, gone := range []string{"W_01.prefab", "W_01.mat", "W_01-avatar.asset"} {
+		if _, ok := present[gone]; ok {
+			t.Errorf("%s should have been dropped as a Sidekick byproduct", gone)
+		}
+	}
+	if _, ok := present["W_01"]; !ok {
+		t.Error("the assembled character W_01 should remain")
+	}
+	if _, ok := present["SK_HEAD.fbx"]; !ok {
+		t.Error("a Resources/ part should remain browseable")
+	}
+	if _, ok := present["T_W_01ColorMap.png"]; !ok {
+		t.Error("the character texture should remain browseable")
+	}
+}
