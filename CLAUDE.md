@@ -72,7 +72,11 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   seeing inside `.zip` and `.unitypackage` archives as well as loose files, and splitting a
   multi-animation `.glb` (a Quaternius-style animation library) into one virtual per-clip
   asset (`Source.Clip`) that shares the file's bytes; serves each asset's bytes and thumbnail
-  on demand. HTTP-free — the `browse` server queries it.
+  on demand. It also assembles Synty **Sidekick** modular characters: a Sidekick pack ships
+  no whole-character mesh, so `sidekick.go` parses each `.sk` definition, upgrades its entry
+  into a character asset (`ThumbSidekick`, `Source.Parts` = the part FBX ids), and drops the
+  per-character byproducts under the pack's `Characters/` tree (the magenta-baked prefab, its
+  material and avatar/mesh `.asset` data). HTTP-free — the `browse` server queries it.
 - `browse` — serves the `browse` web UI to search and preview the library, querying an
   `assetindex.Index` and streaming asset bytes and thumbnails (three.js 3D previews,
   copy-path). Read-only over the local library except for asset tagging and linking, its
