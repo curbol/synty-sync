@@ -66,16 +66,18 @@ func ParseLibraryPage(html []byte) ([]model.Pack, error) {
 	}
 	var packs []model.Pack
 	var parseErr error
-	doc.Find("a.sky-pilot-list-item").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+	doc.Find("a.sky-pilot-list-item").EachWithBreak(func(i int, s *goquery.Selection) bool {
 		href, _ := s.Attr("href")
+		name := collapse(s.Text())
 		m := libAnchorRe.FindStringSubmatch(href)
 		if m == nil {
-			parseErr = fmt.Errorf("library anchor without order_item url: %q", href)
+			// The href carries the customer id, so the anchor is identified by its
+			// index and (non-identifying) link text instead of by URL.
+			parseErr = fmt.Errorf("library anchor %d (%q) has no order_item url", i, name)
 			return false
 		}
 		orderID, _ := strconv.Atoi(m[2])
 		orderItemID, _ := strconv.Atoi(m[3])
-		name := collapse(s.Text())
 		icon, _ := s.Find("img").First().Attr("src")
 		packs = append(packs, model.Pack{
 			Slug:        model.Slug(name),
@@ -87,7 +89,10 @@ func ParseLibraryPage(html []byte) ([]model.Pack, error) {
 		})
 		return true
 	})
-	return packs, parseErr
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return packs, nil
 }
 
 // ParseItemPage extracts the downloadable files on one pack's item page. Versionless
@@ -106,6 +111,7 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 	}
 	var files []model.FileEntry
 	var parseErr error
+	versioned := 0
 	rows.EachWithBreak(func(_ int, row *goquery.Selection) bool {
 		heading := row.Find(".sky-pilot-file-heading")
 		sizeText := strings.TrimSpace(row.Find(".sky-pilot-file-size").Text())
@@ -115,6 +121,7 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		if !strings.Contains(label, " | ") {
 			return true // versionless icon row
 		}
+		versioned++
 		href, ok := row.Find(".sky-pilot-actions a[href]").First().Attr("href")
 		if !ok {
 			href, _ = row.Find("a[href*='/apps/downloads/downloads/']").First().Attr("href")
@@ -153,7 +160,16 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		})
 		return true
 	})
-	return files, parseErr
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	if versioned == 0 {
+		// The zero-rows guard above only covers the row selector. If the file-heading
+		// class moves, every row parses to an empty label and is skipped as an icon
+		// row, and this pack would silently rebuild its lockfile entry as empty.
+		return nil, fmt.Errorf("item page for %q: %d rows, none carrying a version label", packSlug, rows.Length())
+	}
+	return files, nil
 }
 
 // splitLabel turns "POLYGON_PirateGodot_4_5_1 | v1_0_1" (or the underscore-fused

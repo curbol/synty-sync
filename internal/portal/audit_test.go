@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -111,6 +112,173 @@ func TestParseItemPageErrorsOnNoRows(t *testing.T) {
 		<div class='renamed-list-item'>POLYGON_Pack<br><span>SourceFiles | v3</span></div></div>`)
 	if _, err := ParseItemPage(html, "pack"); err == nil {
 		t.Error("a page with no recognizable file rows must be a loud error")
+	}
+}
+
+// The zero-rows guard covers the row selector but not the label separator. If the
+// file-heading class moves, every row parses to an empty label, is skipped as a
+// versionless icon row, and the page yields zero files with no error — which lets
+// the syncer rewrite the pack's lockfile entry as empty.
+func TestParseItemPageErrorsWhenNoRowCarriesAVersion(t *testing.T) {
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-title'>POLYGON_Pirate_Godot_4_5_1 | v1_0_1 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222'>Download</a></div>
+	</div>`)
+	files, err := ParseItemPage(html, "polygon-pirate")
+	if err == nil {
+		t.Errorf("rows present but none versioned must be a loud error; got %d files, nil error", len(files))
+	}
+	if files != nil {
+		t.Errorf("a failed parse must not return partial files, got %+v", files)
+	}
+}
+
+// A pack whose item page legitimately carries only its versionless icon row is
+// still an error: every owned pack ships at least one downloadable file, so zero
+// means the markup moved.
+func TestParseItemPageErrorsOnIconOnlyPage(t *testing.T) {
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_Pirate_icon.png</div>
+	</div>`)
+	if _, err := ParseItemPage(html, "polygon-pirate"); err == nil {
+		t.Error("an item page yielding no versioned rows must be a loud error")
+	}
+}
+
+// Library anchors embed the customer id, so the parser's own error — which fires
+// exactly when the anchor shape changes — must not quote the href.
+func TestParseLibraryPageErrorHidesCustomerID(t *testing.T) {
+	html := []byte(`<a class='sky-pilot-list-item'
+	  href='/apps/downloads/customers/1000000000001/orders/114478945/nope'>POLYGON - Pirate Pack</a>`)
+	packs, err := ParseLibraryPage(html)
+	if err == nil {
+		t.Fatal("expected an error for an anchor without an order_item url")
+	}
+	if strings.Contains(err.Error(), "1000000000001") {
+		t.Errorf("error leaks the customer id: %q", err)
+	}
+	if !strings.Contains(err.Error(), "POLYGON - Pirate Pack") {
+		t.Errorf("error should identify the anchor by its link text, got %q", err)
+	}
+	if packs != nil {
+		t.Errorf("a failed parse must not return partial packs, got %+v", packs)
+	}
+}
+
+// A logged-out shell served part way through the walk must abort, not read as the
+// terminator: a truncated pack list makes `select` drop the user's enabled flags.
+// The real terminator page carries the sentinel, so it is still distinguishable.
+func TestEnumerateExpiredSessionMidWalk(t *testing.T) {
+	const page = `<div class='sky-pilot'><input class='sky-pilot-search-input'>
+	  <a href='/apps/downloads/customers/1/orders/100/order_items/%d' class='sky-pilot-list-item'>Pack %d</a></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("line_items_page") {
+		case "1":
+			fmt.Fprintf(w, page, 1, 1)
+		default:
+			fmt.Fprint(w, `<html><body><h1>Login</h1></body></html>`)
+		}
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	packs, err := c.Enumerate(context.Background())
+	if !errors.Is(err, ErrExpiredSession) {
+		t.Errorf("mid-walk logout: err = %v, want ErrExpiredSession (got %d packs)", err, len(packs))
+	}
+}
+
+// A paginator that clamps an out-of-range page to the last one would otherwise
+// loop forever, re-appending the same packs and hammering the store.
+func TestEnumerateStopsWhenPaginationRepeats(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'>
+		  <a href='/apps/downloads/customers/1/orders/100/order_items/7' class='sky-pilot-list-item'>Pack</a></div>`)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	_, err := c.Enumerate(context.Background())
+	if err == nil {
+		t.Fatal("a paginator that never advances must error, not loop forever")
+	}
+	if calls > 4 {
+		t.Errorf("made %d requests before giving up; want it to notice on the second page", calls)
+	}
+}
+
+// A 408 is the server saying the request did not complete in time, which is
+// retryable. Failing fast on it aborts the whole run over one blip.
+func TestGetBodyRetriesRequestTimeout(t *testing.T) {
+	fastBackoff(t)
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		fmt.Fprint(w, "OK")
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	body, err := c.getBody(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("getBody: %v", err)
+	}
+	if string(body) != "OK" || calls != 2 {
+		t.Errorf("body=%q calls=%d; want OK after one retry", body, calls)
+	}
+}
+
+// An oversized page must error rather than truncate: a silently shortened library
+// page parses as a valid short page and quietly ends enumeration early.
+func TestGetBodyRejectsOversizedPage(t *testing.T) {
+	fastBackoff(t)
+	old := maxPageBytes
+	maxPageBytes = 1024
+	t.Cleanup(func() { maxPageBytes = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", 4096))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	if _, err := c.getBody(context.Background(), srv.URL); err == nil {
+		t.Error("a page past the size bound must error, not truncate")
+	}
+}
+
+// Headers arrive and then the body stalls. Without a per-attempt read deadline the
+// run blocks forever: ResponseHeaderTimeout has already been satisfied.
+func TestGetBodyTimesOutOnStalledBody(t *testing.T) {
+	fastBackoff(t)
+	old := pageTimeout
+	pageTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { pageTimeout = old })
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer func() { close(release); srv.Close() }()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	done := make(chan error, 1)
+	go func() { _, err := c.getBody(context.Background(), srv.URL); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a stalled body must fail, not return successfully")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("getBody hung on a stalled body: no per-attempt read deadline")
 	}
 }
 

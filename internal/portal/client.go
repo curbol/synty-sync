@@ -76,20 +76,37 @@ const httpAttempts = 4
 
 var httpBackoff = 500 * time.Millisecond // var so tests can shorten it
 
+// pageTimeout bounds one page-fetch attempt end to end. The client sets no
+// whole-request timeout (asset downloads are large) and only a response-header
+// timeout, which a server can satisfy and then stall the body forever.
+// maxPageBytes bounds the read: a library page is HTML, never megabytes.
+// Both are vars so tests can shrink them.
+var (
+	pageTimeout  = 60 * time.Second
+	maxPageBytes = int64(8 << 20)
+)
+
 // getBody fetches a page, retrying transient failures (network errors, 5xx) with
 // bounded exponential backoff. A 4xx fails fast (retrying won't help). The store
 // occasionally returns a one-off 500, which would otherwise abort the whole run.
 func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
 	var body []byte
 	err := retry.Do(ctx, httpAttempts, httpBackoff, func() error {
-		resp, err := c.get(ctx, rawURL)
+		attemptCtx, cancel := context.WithTimeout(ctx, pageTimeout)
+		defer cancel()
+		resp, err := c.get(attemptCtx, rawURL)
 		if err != nil {
 			return c.redactErr(rawURL, err) // network error, retryable
 		}
 		defer drainClose(resp)
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
 		if err != nil {
 			return c.redactErr(rawURL, err)
+		}
+		if int64(len(b)) > maxPageBytes {
+			// Erroring beats truncating: a shortened library page still parses as a
+			// valid short page and would quietly end enumeration early.
+			return retry.Stop(fmt.Errorf("GET %s: page exceeds %d bytes", c.redact(rawURL), maxPageBytes))
 		}
 		if resp.StatusCode != http.StatusOK {
 			se := &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
@@ -104,10 +121,11 @@ func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
 	return body, err
 }
 
-// transientStatus reports a status worth another attempt: a 5xx, or a 429 rate
-// limit, which is the one 4xx that backing off actually clears.
+// transientStatus reports a status worth another attempt: a 5xx, or the two 4xx
+// codes that are about timing rather than the request being wrong — 429 (back off
+// and it clears) and 408 (the server says the request did not finish in time).
 func transientStatus(code int) bool {
-	return code >= 500 || code == http.StatusTooManyRequests
+	return code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout
 }
 
 // drainReadLimit bounds the drain of a body whose content is being discarded, so a
@@ -164,16 +182,21 @@ func withShop(rawURL string) string {
 	return rawURL + sep + "shop=" + shopParam
 }
 
+// maxLibraryPages backstops the pagination walk. At 15 packs per page this is far
+// past any real library; it only bounds a store that stops advancing.
+const maxLibraryPages = 500
+
 // Enumerate walks the library pages until a zero-row page (the terminator) and
 // returns all owned packs. The terminator is a page with no order_item anchors; a
-// short page (fewer than the page size) is not the terminator. The logged-in
-// sentinel only disambiguates page 1's zero-row case: with the Sky Pilot library
-// UI it is an empty library, without it the session is expired. (Pages past the
-// last one are a bare overflow shell with neither the UI nor anchors, so the
-// sentinel cannot serve as a per-page terminator marker.)
+// short page (fewer than the page size) is not the terminator. Every zero-row page
+// is checked for the logged-in sentinel, which is present on authenticated library
+// pages including the empty one past the last: with it, the walk ended legitimately
+// (or the library is empty); without it, the session expired mid-walk and a
+// truncated pack list must not be mistaken for the whole library.
 func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 	var all []model.Pack
-	for page := 1; ; page++ {
+	seen := map[int]bool{}
+	for page := 1; page <= maxLibraryPages; page++ {
 		u := withShop(fmt.Sprintf("%s/apps/downloads/orders/%s?line_items_page=%d", c.BaseURL, c.CustomerID, page))
 		body, err := c.getBody(ctx, u)
 		if err != nil {
@@ -184,19 +207,31 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 			return nil, fmt.Errorf("page %d: %w", page, err)
 		}
 		if len(packs) == 0 {
-			if page == 1 {
-				ok, err := HasLibrarySentinel(body)
-				if err != nil {
-					return nil, err
-				}
-				if !ok {
-					return nil, ErrExpiredSession
-				}
+			ok, err := HasLibrarySentinel(body)
+			if err != nil {
+				return nil, err
 			}
-			return all, nil // empty library (page 1 + sentinel) or terminator
+			if !ok {
+				return nil, ErrExpiredSession
+			}
+			return all, nil // empty library or terminator
 		}
-		all = append(all, packs...)
+		added := 0
+		for _, p := range packs {
+			if seen[p.OrderItemID] {
+				continue
+			}
+			seen[p.OrderItemID] = true
+			all = append(all, p)
+			added++
+		}
+		if added == 0 {
+			// A paginator that clamps an out-of-range page to the last one would
+			// otherwise re-serve the same packs forever.
+			return nil, fmt.Errorf("page %d repeated the previous page's packs; pagination is not advancing", page)
+		}
 	}
+	return nil, fmt.Errorf("library pagination exceeded %d pages", maxLibraryPages)
 }
 
 // ItemFiles fetches and parses one pack's item page.
