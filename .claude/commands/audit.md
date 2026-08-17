@@ -37,17 +37,16 @@ flag/env and is out of scope; don't try to run it.
 Use `feature-dev:code-reviewer` sub-agents to review the scoped files. Split by area so agents run
 in parallel:
 
-- **Portal / network** — `internal/portal/` (`client.go`, `parse.go`). HTTP, retry/backoff, the
-  failure model, strict parsing, `ErrExpiredSession`.
+- **Portal / network** — `internal/portal/` (`client.go`, `parse.go`), `internal/retry/`. HTTP,
+  retry/backoff, the failure model, strict parsing, `ErrExpiredSession`.
 - **Sync core** — `internal/syncer/`, `internal/model/`, `internal/lockfile/`, `internal/manifest/`.
   `classify`, the `Class` enum, fileId dedup, opt-in selection, concurrency, lockfile/manifest
   stability.
 - **Storage & identity** — `internal/cache/`, `internal/session/`, `internal/config/`,
-  `internal/selfupdate/`, `internal/fixtures/`. Atomic writes, XDG path resolution, cookie
-  building, PII, self-update.
-- **Asset index & local UI** — `internal/assetindex/`, `internal/browse/`, `internal/web/`. Archive
-  scanning (.zip / .unitypackage), serving bytes and thumbnails, embedded frontends.
-- **CLI** — `main.go`. Flag parsing, subcommand dispatch, config → session → client wiring.
+  `internal/selfupdate/`, `internal/fixtures/`, `cmd/scrubfixtures/`. Atomic writes, XDG path
+  resolution, cookie building, PII, self-update, fixture scrubbing.
+- **CLI & selection page** — `main.go`, `internal/web/`. Flag parsing, subcommand dispatch,
+  config → session → client wiring, and the local pack-selection page `select` serves.
 
 For each sub-agent, provide:
 - The full list of files in its area (not a diff).

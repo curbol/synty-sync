@@ -3,8 +3,12 @@ module github.com/curbol/synty-sync
 go 1.26
 
 require (
-	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/PuerkitoBio/goquery v1.12.0 // indirect
+	github.com/BurntSushi/toml v1.6.0
+	github.com/PuerkitoBio/goquery v1.12.0
+	modernc.org/sqlite v1.52.0
+)
+
+require (
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -16,5 +20,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
 )
