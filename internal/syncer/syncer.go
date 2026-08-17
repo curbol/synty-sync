@@ -84,17 +84,19 @@ type Report struct {
 
 // Options configures a run.
 type Options struct {
-	LibraryRoot  string
-	Filter       func(model.Variant) bool
-	OnlyGlob     string // optional pack-slug glob; empty = all
-	DryRun       bool   // status: classify only, no downloads, no save
-	FullVerify   bool   // sha-verify cache (sync) vs presence-only (status)
-	Concurrency  int
-	Now          string                 // timestamp for generatedAt/downloadedAt
-	Attempts     int                    // download attempts (default 3)
-	Backoff      time.Duration          // base backoff between attempts (default 500ms)
-	PackSelected func(slug string) bool // manifest allowlist; nil = all packs
-	Progress     func(string)           // optional per-step progress sink; nil = silent
+	LibraryRoot string
+	Filter      func(model.Variant) bool
+	OnlyGlob    string // optional pack-slug glob; empty = all
+	DryRun      bool   // status: classify only, no downloads, no save
+	FullVerify  bool   // sha-verify cache (sync) vs presence-only (status)
+	Concurrency int
+	Now         string        // timestamp for generatedAt/downloadedAt
+	Attempts    int           // download attempts (default 3)
+	Backoff     time.Duration // base backoff between attempts (default 500ms)
+	// PackSelected is the manifest allowlist and is required: selection is opt-in, so
+	// a run states which packs it may touch rather than defaulting to all of them.
+	PackSelected func(slug string) bool
+	Progress     func(string) // optional per-step progress sink; nil = silent
 }
 
 type resolved struct {
@@ -107,6 +109,9 @@ type resolved struct {
 // Run executes a sync (or status when DryRun) and returns a Report. The lockfile
 // is saved only on a non-dry run.
 func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath string, opts Options) (Report, error) {
+	if opts.PackSelected == nil {
+		return Report{}, fmt.Errorf("syncer: PackSelected is required (selection is opt-in)")
+	}
 	progress := opts.Progress
 	if progress == nil {
 		progress = func(string) {}
@@ -158,10 +163,16 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	resolvedByID := map[int]resolved{}
 
 	// Adopt pre-existing flat zips into the layout so they are not re-downloaded.
+	// Files the lockfile already tracks are excluded: cache.Migrate matches on name
+	// alone, so adopting one would move unverified content over a verified copy and
+	// repoint the lockfile at it without ever consulting classify.
 	adoptedByID := map[int]resolved{}
 	if !opts.DryRun {
 		var wanted []cache.Wanted
 		for _, id := range selOrder {
+			if prior, hasPrior := priorByID[id]; hasPrior && prior.Tracked {
+				continue
+			}
 			f := selectedByID[id][0].file
 			wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
 		}
@@ -320,11 +331,14 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string
 }
 
 // permanentDownloadFailure reports a download error a retry cannot fix: a 4xx,
-// except 403 — an expired CloudFront signature that a fresh Resolve re-signs, so
-// those keep retrying.
+// except 403 — an expired CloudFront signature that a fresh Resolve re-signs — and
+// 429, a rate limit that backing off clears.
 func permanentDownloadFailure(err error) bool {
 	code, ok := portal.StatusOf(err)
-	return ok && code >= 400 && code < 500 && code != http.StatusForbidden
+	if !ok || code < 400 || code >= 500 {
+		return false
+	}
+	return code != http.StatusForbidden && code != http.StatusTooManyRequests
 }
 
 func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {
@@ -436,7 +450,7 @@ func cacheChecker(opts Options) func(relPath, sha string) bool {
 func filterPacks(packs []model.Pack, glob string, selected func(string) bool) []model.Pack {
 	var out []model.Pack
 	for _, p := range packs {
-		if selected != nil && !selected(p.Slug) {
+		if !selected(p.Slug) {
 			continue
 		}
 		if glob != "" {

@@ -86,21 +86,40 @@ func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
 		if err != nil {
 			return c.redactErr(rawURL, err) // network error, retryable
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 500 {
-			return &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
-		}
+		defer drainClose(resp)
 		b, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return c.redactErr(rawURL, err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			return retry.Stop(&StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)})
+			se := &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
+			if transientStatus(resp.StatusCode) {
+				return se
+			}
+			return retry.Stop(se)
 		}
 		body = b
 		return nil
 	})
 	return body, err
+}
+
+// transientStatus reports a status worth another attempt: a 5xx, or a 429 rate
+// limit, which is the one 4xx that backing off actually clears.
+func transientStatus(code int) bool {
+	return code >= 500 || code == http.StatusTooManyRequests
+}
+
+// drainReadLimit bounds the drain of a body whose content is being discarded, so a
+// server that streams without end cannot stall the close.
+const drainReadLimit = 1 << 20
+
+// drainClose reads off any unconsumed body before closing, so the transport can
+// return the connection to the pool instead of tearing it down. A retried request
+// would otherwise pay a fresh handshake on every attempt.
+func drainClose(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, drainReadLimit))
+	resp.Body.Close()
 }
 
 // redact removes the customer id from a string bound for an error message; the id
@@ -118,6 +137,17 @@ func (c *Client) redactErr(rawURL string, err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		return fmt.Errorf("GET %s: %w", c.redact(rawURL), ue.Err)
+	}
+	return err
+}
+
+// transportCause drops the URL from a net/http transport error entirely, keeping
+// only the underlying cause. Used where the URL cannot be made safe by redaction:
+// a download href carries the account email as well as the customer id.
+func transportCause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
 	}
 	return err
 }
@@ -186,10 +216,12 @@ func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) ([]model.FileEn
 func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.ReadCloser, filename string, err error) {
 	resp, err := c.get(ctx, withShop(c.BaseURL+file.DownloadHref))
 	if err != nil {
-		return nil, "", err
+		// The href carries the account email and customer id, so the URL never
+		// reaches the message; the file key identifies the request instead.
+		return nil, "", fmt.Errorf("download %s: %w", file.Key(), transportCause(err))
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		drainClose(resp)
 		return nil, "", &StatusError{Status: resp.StatusCode, Op: "download " + file.Key()}
 	}
 	filename = filenameFromURL(resp.Request.URL)
@@ -197,7 +229,7 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 		filename = filenameFromDisposition(resp.Header.Get("Content-Disposition"))
 	}
 	if filename == "" {
-		resp.Body.Close()
+		drainClose(resp)
 		return nil, "", fmt.Errorf("download %s: could not determine filename", file.Key())
 	}
 	return resp.Body, filename, nil

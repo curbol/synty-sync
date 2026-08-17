@@ -97,9 +97,16 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	rows := doc.Find("div.sky-pilot-list-item")
+	if rows.Length() == 0 {
+		// Every owned pack's item page carries at least an icon row, so zero rows
+		// means the markup moved, not that the pack is empty. Failing here keeps a
+		// selector change from rewriting the pack's lockfile entry as empty.
+		return nil, fmt.Errorf("item page for %q: no file rows found", packSlug)
+	}
 	var files []model.FileEntry
 	var parseErr error
-	doc.Find("div.sky-pilot-list-item").EachWithBreak(func(_ int, row *goquery.Selection) bool {
+	rows.EachWithBreak(func(_ int, row *goquery.Selection) bool {
 		heading := row.Find(".sky-pilot-file-heading")
 		sizeText := strings.TrimSpace(row.Find(".sky-pilot-file-size").Text())
 		heading.Find(".sky-pilot-file-size").Remove()

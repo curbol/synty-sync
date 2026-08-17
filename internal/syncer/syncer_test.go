@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -136,6 +137,7 @@ func runOpts(lib string, dry bool) Options {
 	return Options{
 		LibraryRoot: lib, Filter: godotSourceFilter, DryRun: dry,
 		FullVerify: !dry, Concurrency: 4, Now: "2026-06-17T00:00:00Z",
+		PackSelected: func(string) bool { return true },
 	}
 }
 
@@ -502,9 +504,12 @@ func TestExpiredSessionAborts(t *testing.T) {
 	if err := lockfile.Save(lockPath, seed); err != nil {
 		t.Fatal(err)
 	}
+	// errors.Is, not a substring: main.go and any future caller distinguish an expired
+	// session from other failures by identity, so a %v somewhere up the chain must fail
+	// here rather than slip through on the word "session".
 	_, err := Run(context.Background(), newClient(srv.URL), seed, lockPath, runOpts(lib, false))
-	if err == nil || !strings.Contains(err.Error(), "session") {
-		t.Fatalf("want expired-session error, got %v", err)
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		t.Fatalf("want ErrExpiredSession, got %v", err)
 	}
 	lf, _ := lockfile.Load(lockPath)
 	if _, ok := lf.Packs["keep"]; !ok {
