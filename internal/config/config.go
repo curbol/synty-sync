@@ -18,7 +18,6 @@ import (
 type Config struct {
 	CustomerID    string
 	LibraryPath   string
-	BrowseRoot    string // asset-browser scan root; may span more than the synty cache
 	Concurrency   int
 	SessionSource string // "firefox" or a path to a cookies.txt / curl file
 }
@@ -26,7 +25,6 @@ type Config struct {
 type fileConfig struct {
 	CustomerID    string `toml:"customer_id"`
 	LibraryPath   string `toml:"library_path"`
-	BrowseRoot    string `toml:"browse_root"`
 	Concurrency   int    `toml:"concurrency"`
 	SessionSource string `toml:"session_source"`
 }
@@ -49,26 +47,6 @@ func ResolveDir(flag string) string {
 		return filepath.Join(home, ".config", "synty-sync")
 	}
 	return "synty-sync"
-}
-
-// ResolveCacheDir picks the directory for regenerable browse state (the asset
-// index and unpacked archive contents): an explicit flag, else $SYNTY_CACHE_DIR,
-// else $XDG_CACHE_HOME/synty-sync, else ~/.cache/synty-sync. This is expendable
-// data, so it lives under the cache home, separate from config and the library.
-func ResolveCacheDir(flag string) string {
-	if flag != "" {
-		return flag
-	}
-	if v := os.Getenv("SYNTY_CACHE_DIR"); v != "" {
-		return v
-	}
-	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
-		return filepath.Join(v, "synty-sync")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "synty-sync")
-	}
-	return "synty-sync-cache"
 }
 
 // defaultLibraryPath is the cache location when nothing overrides it:
@@ -110,11 +88,7 @@ func Load(dir string) (Config, error) {
 	if v := os.Getenv("SYNTY_LIBRARY"); v != "" {
 		c.LibraryPath = v
 	}
-	if v := os.Getenv("SYNTY_BROWSE_ROOT"); v != "" {
-		c.BrowseRoot = v
-	}
 	c.LibraryPath = expandHome(c.LibraryPath)
-	c.BrowseRoot = expandHome(c.BrowseRoot)
 	return c, nil
 }
 
@@ -124,9 +98,6 @@ func overlay(c *Config, fc fileConfig) {
 	}
 	if fc.LibraryPath != "" {
 		c.LibraryPath = fc.LibraryPath
-	}
-	if fc.BrowseRoot != "" {
-		c.BrowseRoot = fc.BrowseRoot
 	}
 	if fc.Concurrency > 0 {
 		c.Concurrency = fc.Concurrency

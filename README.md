@@ -98,95 +98,19 @@ synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # what a sync would change (no downloads, no writes)
 synty-sync sync     # download the delta and rewrite the lockfile
 synty-sync list     # print the current lockfile
-synty-sync browse   # search & preview the local library in a web UI
 ```
 
 Useful flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml`
 walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
 `--customer <id>`, `--config <dir>` (user config dir; default `~/.config/synty-sync`).
 
-## Browsing the library
+## Browsing what you have
 
-`synty-sync browse` indexes the local library and opens a web page to search it by
-name, filter by type / vendor / engine variant, see thumbnails, click to enlarge
-(images, plus live 3D for GLB and FBX), and copy an asset's path. It reads inside
-`.zip` and `.unitypackage` archives, so individual models, sprites, and materials are
-searchable without unpacking anything.
-
-The same file shipped across engine variants or bundled in several packs collapses
-into one card (a `×N` badge); the enlarged view lists every copy's path with a
-copy-all. Toggle "group dupes" off to see each occurrence separately.
-
-### Tagging
-
-Tag assets to organize the library your way. Hover a card and hit the tag button to
-assign existing tags or type a new one (created on the spot with a random color); the
-enlarged view has the same controls plus a color swatch on each tag. Tagged assets
-show a thin colored sliver per tag along the card's bottom edge, and the header **tags**
-filter narrows the grid to the tags you pick, with an **ANY / ALL** toggle (match any
-selected tag, or only assets carrying all of them) and a **manage** mode to rename,
-recolor, or delete tags. A tag is just a label; `key:value` labels (e.g. `biome:forest`)
-are a convention, not enforced.
-
-Assets can also be **linked** into a set that belongs together (a UI frame and its
-background fill, say). The enlarged view lists a linked asset's companions as *parts of
-this set* (click to open one), and the tags filter's **linked** toggle folds each
-match's companions into the grid, so a `verdict:` query keeps the frame and its fill
-together instead of dropping the untagged one. Links are made through the API (below) or
-a project seeder, not the tag buttons.
-
-Tags and links live in `synty-sync.tags.toml` beside the project manifest, committed to
-the consuming project so they travel with it and diff cleanly. They key on each asset's
-**content**, so a tag follows the file across packs and survives a `sync` — an unchanged
-file keeps its tags, and a file Synty re-exports starts fresh. Tagging needs a project
-manifest to sit next to (discovered by walking up from the working directory, or
-`--tags <path>` / `--manifest <path>`); with no manifest found, browse still runs and
-the tag controls are simply hidden.
-
-Animated models play in the viewer with a scrub bar and clip selector. A mesh-less
-animation clip (Synty `ANIMATION_*` packs, kevdev, etc.) plays on a character whose
-rig it matches, auto-picked from the same vendor's library assets. Use "change" to
-swap the body, or "pin" one as the default for its rig. Cross-rig cases that need
-true retargeting (e.g. an A-pose rig onto a T-pose body) are out of scope for the
-preview — bake those offline.
-
-```bash
-synty-sync browse --root ~/code/raw-assets   # scan a whole asset tree
-synty-sync browse                            # defaults to the library dir
-```
-
-The scan root resolves as `--root` > `browse_root` (config.toml) / `SYNTY_BROWSE_ROOT`
-> the library dir, so set `browse_root` once to browse everything. Browse flags:
-`--addr <host:port>` (default `localhost:8788`), `--reindex` (rebuild the index),
-`--cache <dir>` (index / unpacked-archive cache; default `~/.cache/synty-sync`). The
-index is cached and refreshed incrementally, so only the first run pays the full scan.
-Textureless Synty source FBX render as neutral clay; animation-only FBX (no mesh) show
-an icon.
-
-The page is backed by a small read-only JSON API you can script against. `GET /api/assets`
-takes `q` (a Google-style query: space is AND, `OR` / `|` alternate, `-` excludes, `"…"` is
-an exact phrase, `( )` groups, and `field:value` scopes a term to one field — `name`, `pack`,
-`vendor`, `type`, `variant`, `ext`, `guid`, `path` — so `turn loop vendor:kevdev -idle` works;
-a bare term matches name, pack, and path), repeatable `type` / `vendor` / `variant` / `guid` filters, repeatable `tag` with
-`tagmode=and` (match all selected tags) or `tagmode=or` (any; the default), `group=0` to keep
-duplicates separate, `sort=path`, and `offset` / `limit`; each asset carries its `source`
-locator (`kind`, `archivePath`, `entry`, `guid`, `pathname`, `hasPreview`, `clip`), pixel
-`width` / `height` for images, and every duplicate copy. A multi-animation `.glb` (an
-animation library like Quaternius, one file holding ~120 clips) is split into one card per
-clip: each shares the file's bytes and names its animation in `source.clip`, so the clips are
-individually searchable, taggable, and previewable. An animation that also ships a root-motion
-(`_RM`) variant collapses to one card carrying `rootMotionId` (the travel variant's id); the RM
-card is hidden and the preview's toggle plays it to show the travel. `?guid=` resolves a scene or
-prefab's asset references (bare GUIDs) straight back to the owning asset, so composition
-extraction is one request rather than tar-scraping the archive. Each asset also carries
-its content `fingerprints`, current `tags`, and any linked `related` fingerprints;
-`includeRelated=1` folds each tag match's linked companions into the results. `GET
-/api/content?id=` streams an asset's bytes and `GET /api/thumb?id=` its Unity preview.
-When tagging is enabled, `GET /api/tags` returns the palette, `POST/PATCH/DELETE
-/api/tags` create/rename/recolor/delete a tag, `POST /api/assign` toggles a tag across an
-asset's fingerprint set, `POST /api/link` links or unlinks a set of fingerprints as one
-travel-together group, and `GET /api/related?fingerprint=` returns the cards linked to a
-fingerprint set.
+Searching and previewing the mirrored library lives in a separate tool,
+[quarry](https://github.com/curbol/quarry): it indexes a whole asset tree, reads inside
+`.zip` and `.unitypackage` archives, previews GLB/FBX in 3D, and tags assets by content
+fingerprint. Point its `root` at your library path (or at a wider tree, to cover other
+vendors too).
 
 ## Selecting packs
 

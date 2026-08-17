@@ -18,7 +18,7 @@ import (
 
 // Asking a subcommand for help is not a failure.
 func TestSubcommandHelpSucceeds(t *testing.T) {
-	for _, args := range [][]string{{"sync", "-h"}, {"status", "--help"}, {"browse", "-h"}} {
+	for _, args := range [][]string{{"sync", "-h"}, {"status", "--help"}, {"select", "-h"}} {
 		if err := run(args); err != nil {
 			t.Errorf("%v: %v", args, err)
 		}

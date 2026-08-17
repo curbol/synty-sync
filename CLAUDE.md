@@ -10,6 +10,9 @@ Synty-store purchases. See `README.md` (user-facing) and `docs/design.md` (the
 authoritative design doc: page shapes, lockfile schema, failure model). Read
 `docs/design.md` before changing enumeration, parsing, the lockfile, or the cache layout.
 
+Searching and previewing the mirrored library is a separate tool,
+[quarry](https://github.com/curbol/quarry). This repo acquires files; quarry reads them.
+
 ## Build & test
 
 ```bash
@@ -26,12 +29,11 @@ suite is fully offline (no network, no real session): portal tests run against
 
 ## Architecture
 
-A subcommand CLI. `main.go` `run()` parses flags and dispatches seven subcommands:
-`select`, `status`, `sync`, `list`, `browse`, `update`, `version`. `select`/`status`/`sync`
-resolve config → session cookie → `portal.Client`; `list` needs only the lockfile; `browse`
-needs only config (a read-only server over the local library); `update` and `version` need
-neither. `status` is `sync` with `DryRun` (classify only, no downloads, no lockfile write) —
-both go through `syncer.Run`.
+A subcommand CLI. `main.go` `run()` parses flags and dispatches six subcommands:
+`select`, `status`, `sync`, `list`, `update`, `version`. `select`/`status`/`sync`
+resolve config → session cookie → `portal.Client`; `list` needs only the lockfile;
+`update` and `version` need neither. `status` is `sync` with `DryRun` (classify only, no
+downloads, no lockfile write) — both go through `syncer.Run`.
 
 Layered `internal/` packages, each with a package doc comment stating its contract:
 
@@ -68,33 +70,6 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   it. `sync`/`status` act only on enabled packs.
 - `web` — serves the local pack-selection page for `select` (checkbox grid, returns the
   chosen set).
-- `assetindex` — scans the local library into a searchable index of individual assets,
-  seeing inside `.zip` and `.unitypackage` archives as well as loose files, and splitting a
-  multi-animation `.glb` (a Quaternius-style animation library) into one virtual per-clip
-  asset (`Source.Clip`) that shares the file's bytes; serves each asset's bytes and thumbnail
-  on demand. It also assembles Synty **Sidekick** modular characters: a Sidekick pack ships
-  no whole-character mesh, so `sidekick.go` parses each `.sk` definition, upgrades its entry
-  into a character asset (`ThumbSidekick`, `Source.Parts` = the part FBX ids), and drops the
-  per-character byproducts under the pack's `Characters/` tree (the magenta-baked prefab, its
-  material and avatar/mesh `.asset` data). HTTP-free — the `browse` server queries it.
-- `browse` — serves the `browse` web UI to search and preview the library, querying an
-  `assetindex.Index` and streaming asset bytes and thumbnails (three.js 3D previews,
-  copy-path). Read-only over the local library except for asset tagging and linking, its
-  one write surface (see `tagstore`); no session. It discovers the project manifest
-  (best-effort, never required) only to locate the tag store beside it. `includeRelated=1`
-  folds each tag match's linked companions into results; `/api/link` and `/api/related`
-  write and resolve links. It also pairs each in-place animation with its root-motion (`_RM`)
-  sibling (`pairing.go`): the in-place card carries `rootMotionId` and the RM card is hidden,
-  so the preview's toggle can play the travel variant.
-- `tagstore` — `synty-sync.tags.toml`, a committed project file beside the manifest: a
-  palette of user tags (label + color), per-asset **assignments keyed by content
-  fingerprint**, and **link groups** (undirected sets of fingerprints that travel
-  together, merged transitively) — all keyed on content (see the invariant below). Pure
-  model + atomic, sorted TOML IO like `manifest`; the `browse` server loads it, mutates it
-  under a mutex, and re-saves on each change. Rename onto an existing tag merges; links are
-  result-expansion only, orthogonal to tags (a link never changes a fingerprint's tags);
-  the store never prunes assignments or groups to a scanned set, so both survive a resync /
-  another machine.
 - `selfupdate` — the `update` subcommand: fetches a GitHub release, downloads the
   current-platform binary, and atomically replaces the running executable. The repo is
   private, so it resolves a token from `GITHUB_TOKEN` / `GH_TOKEN` / the `gh` CLI.
@@ -111,16 +86,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
-- **Tags and links key on content, not the browse `id`.** `Asset.Fingerprint`
-  (`crc32:<hex>:<size>` for zip/loose, `uguid:<guid>` for unitypackage, `<file-fp>#<clip>` for
-  a split GLB clip) is the tag and link
-  identity; it is portable and stable across updates, unlike `Asset.ID` (a machine-absolute,
-  version-bearing locator hash used only to serve bytes). Bump `assetindex.indexVersion` when
-  the fingerprint scheme or any indexed field changes so stale caches rebuild.
 - **No PII in the repo.** The customer id, emails, cookies, and session captures
   (`config.toml`, `*.curl`, `cookies.txt`) live in the config dir outside this repo. The
-  project manifest, lockfile, and tag store (`synty-sync.toml`, `synty-sync.lock.json`,
-  `synty-sync.tags.toml`) belong with the consuming project and are gitignored here
+  project manifest and lockfile (`synty-sync.toml`, `synty-sync.lock.json`) belong with
+  the consuming project and are gitignored here
   defensively. The `internal/fixtures` guard test
   fails the build if real PII leaks into committed `testdata/`. Never commit these or
   hard-code a customer id / paths.

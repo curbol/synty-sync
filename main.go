@@ -21,8 +21,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/curbol/synty-sync/internal/assetindex"
-	"github.com/curbol/synty-sync/internal/browse"
 	"github.com/curbol/synty-sync/internal/config"
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/manifest"
@@ -36,9 +34,6 @@ import (
 // version is the release version, set at build time via
 // -ldflags "-X main.version=<v>". It is "dev" for local builds.
 var version = "dev"
-
-// browseAddr is where `browse` serves by default.
-const browseAddr = "localhost:8788"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -71,13 +66,9 @@ func run(args []string) error {
 	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
 	customer := fs.String("customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
 	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
-	root := fs.String("root", "", "browse: asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)")
-	addr := fs.String("addr", browseAddr, "browse: server address (host:port)")
-	reindex := fs.Bool("reindex", false, "browse: rebuild the asset index from scratch")
-	browseCache := fs.String("cache", "", "browse: cache dir for the index and unpacked archives (default: $XDG_CACHE_HOME/synty-sync)")
-	tagsFlag := fs.String("tags", "", "browse: tag store path (default: synty-sync.tags.toml beside the discovered manifest)")
+	addr := fs.String("addr", selectAddr, "on select, the address to serve the page at (host:port)")
 	switch cmd {
-	case "status", "sync", "list", "select", "browse", "update", "version", "-h", "--help", "help", "--version", "-v":
+	case "status", "sync", "list", "select", "update", "version", "-h", "--help", "help", "--version", "-v":
 	default:
 		usage()
 		return fmt.Errorf("unknown subcommand %q", cmd)
@@ -124,14 +115,6 @@ func run(args []string) error {
 	}
 	if *customer != "" {
 		cfg.CustomerID = *customer
-	}
-
-	// browse is a standalone read-only server over the local library: it needs no
-	// customer id, cookie, or lockfile, so it branches before the manifest is
-	// required. It still discovers the manifest best-effort to locate the tag store
-	// (tagging stays off when none is found).
-	if cmd == "browse" {
-		return browseAssets(cfg, *root, *addr, *browseCache, *reindex, resolveTagsPath(*tagsFlag, *manifestFlag))
 	}
 
 	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
@@ -261,12 +244,11 @@ func resolveManifestPath(flag, cmd string) (string, error) {
 	return "", fmt.Errorf("no %s found (searched up from %s); run `synty-sync select` or pass --manifest <path>", manifest.FileName, wd)
 }
 
-// selectAddr is where `select` serves its page when --addr is not given. It is a
-// different port from browse's so the two can run side by side.
+// selectAddr is where `select` serves its page when --addr is not given.
 const selectAddr = "localhost:8787"
 
 func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr string) error {
-	if addr == "" || addr == browseAddr {
+	if addr == "" {
 		addr = selectAddr
 	}
 	packs, err := client.Enumerate(ctx)
@@ -299,61 +281,6 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr 
 		fmt.Fprintf(stdout, "note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
 	}
 	return nil
-}
-
-// resolveTagsPath locates the browse tag store: an explicit --tags wins; otherwise
-// it is the synty-sync.tags.toml beside the manifest (an explicit --manifest, or one
-// discovered by walking up from cwd). Returns "" when no manifest neighborhood
-// exists, which leaves tagging disabled — browse never requires a manifest.
-func resolveTagsPath(tagsFlag, manifestFlag string) string {
-	if tagsFlag != "" {
-		return tagsFlag
-	}
-	if manifestFlag != "" {
-		return manifest.TagsPath(manifestFlag)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		if p, ok := manifest.Discover(wd); ok {
-			return manifest.TagsPath(p)
-		}
-	}
-	return ""
-}
-
-// browseAssets indexes the asset library and serves the browse UI. The scan root
-// resolves as --root > browse_root/SYNTY_BROWSE_ROOT > the library dir, so browsing
-// a broader tree (e.g. all vendors) just needs browse_root set or --root passed.
-// tagsPath is the resolved tag store ("" disables tagging).
-func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool, tagsPath string) error {
-	if root == "" {
-		root = cfg.BrowseRoot
-	}
-	if root == "" {
-		root = cfg.LibraryPath
-	}
-	cacheDir := config.ResolveCacheDir(cacheFlag)
-	cachePath := filepath.Join(cacheDir, "browse-index.json")
-
-	warn := func(m string) { fmt.Fprintln(os.Stderr, "warning:", m) }
-	fmt.Fprintf(os.Stderr, "indexing %s …\n", root)
-	ix, err := assetindex.LoadOrBuild(root, cacheDir, cachePath, reindex, warn)
-	if err != nil {
-		return fmt.Errorf("build asset index: %w", err)
-	}
-	for _, s := range ix.Skipped {
-		warn(fmt.Sprintf("skipped %s: %s", s.RelPath, s.Reason))
-	}
-	// Each pack update extracts to a new fingerprint-keyed dir; without this the
-	// previous extraction stays in the cache forever.
-	if err := ix.PruneUnpacked(); err != nil {
-		warn(fmt.Sprintf("could not prune stale unpacked archives: %v", err))
-	}
-	if tagsPath == "" {
-		fmt.Fprintln(os.Stderr, "tags: disabled (no synty-sync.toml found; run from your project or pass --tags/--manifest)")
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	return browse.Serve(ctx, addr, ix, tagsPath)
 }
 
 func printVersion() {
@@ -428,7 +355,6 @@ usage:
   synty-sync status [flags]   show what a sync would change (no downloads)
   synty-sync sync   [flags]   download the delta and update the lockfile
   synty-sync list   [flags]   print the current lockfile
-  synty-sync browse [flags]   search & preview the local library in a web UI
   synty-sync update [ver]     update to the latest release (or a specific version)
   synty-sync version          print the version
 
@@ -443,16 +369,12 @@ flags:
   -dry-run            on sync, report only (no downloads or lockfile write)
   -addr <host:port>   on select, the address to serve the page at (default: localhost:8787)
 
-browse flags:
-  -root <dir>         asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)
-  -addr <host:port>   server address (default: localhost:8788)
-  -reindex            rebuild the asset index from scratch
-  -cache <dir>        index / unpacked-archive cache dir (default: $XDG_CACHE_HOME/synty-sync)
-  -tags <path>        tag store path (default: synty-sync.tags.toml beside the manifest)
-
 Auth is user-scoped: config.toml (customer id, session, cache default) lives in the
 config dir. The project manifest (synty-sync.toml: variant_includes + the pack
 allowlist) and its lockfile (synty-sync.lock.json beside it) are committed with the
 consuming project. The customer id comes from --customer, SYNTY_CUSTOMER_ID, or config.toml.
+
+To search and preview what you have mirrored, see quarry:
+https://github.com/curbol/quarry
 `)
 }

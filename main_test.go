@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,31 +33,6 @@ func TestRunListEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	if err := run([]string{"list", "-config", tmp, "-manifest", filepath.Join(tmp, "synty-sync.toml")}); err != nil {
 		t.Errorf("list: %v", err)
-	}
-}
-
-func TestResolveTagsPath(t *testing.T) {
-	// An explicit --tags wins outright.
-	if got := resolveTagsPath("/custom/tags.toml", "/some/synty-sync.toml"); got != "/custom/tags.toml" {
-		t.Errorf("explicit --tags = %q", got)
-	}
-	// Otherwise it derives from --manifest.
-	if got := resolveTagsPath("", filepath.Join("proj", "synty-sync.toml")); got != filepath.Join("proj", "synty-sync.tags.toml") {
-		t.Errorf("from --manifest = %q", got)
-	}
-	// With neither, and no manifest discoverable up from cwd, it is empty (disabled).
-	t.Chdir(t.TempDir())
-	if got := resolveTagsPath("", ""); got != "" {
-		t.Errorf("no manifest neighborhood should disable tagging, got %q", got)
-	}
-	// A manifest up the tree is discovered and its sibling returned.
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "synty-sync.toml"), []byte("variant_includes = []\n"), 0o644)
-	sub := filepath.Join(dir, "a", "b")
-	os.MkdirAll(sub, 0o755)
-	t.Chdir(sub)
-	if got, want := resolveTagsPath("", ""), filepath.Join(dir, "synty-sync.tags.toml"); got != want {
-		t.Errorf("discovered tags path = %q, want %q", got, want)
 	}
 }
 

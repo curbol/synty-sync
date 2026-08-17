@@ -5,7 +5,9 @@ library cache, detecting and downloading only what changed since the last run. I
 Unity-Hub-equivalent that direct Synty-store purchases don't get. This tool covers
 acquisition and library management; promoting specific assets into a given game/project,
 format conversion (FBX→glTF, sprites), and a local-edit/patch model are out of scope here
-and belong in the consuming project.
+and belong in the consuming project. Searching and previewing what has been mirrored is
+also out of scope: that is [quarry](https://github.com/curbol/quarry), a separate tool that
+reads the library this one writes.
 
 ## Goals
 
@@ -72,7 +74,6 @@ synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # enumerate + diff, print what would change. No downloads.
 synty-sync sync     # status, then download the delta, verify, rewrite the lockfile.
 synty-sync list     # print the current lockfile as a readable table.
-synty-sync browse   # local web UI to search and preview the mirrored library.
 synty-sync update   # self-replace the running binary from the latest GitHub release.
 synty-sync version  # print the installed version.
 ```
@@ -80,9 +81,9 @@ synty-sync version  # print the installed version.
 Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
 from cwd), `--config <dir>` (user config dir), `--cookies <curl|file>` (override session
 source), `--only <pack-glob>`, `--dry-run` (alias of `status` semantics on `sync`),
-`--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the local page's address:
-`select` serves on 8787, `browse` on 8788). Subcommands take no positional arguments, so a
-stray one is an error rather than silently swallowing the flags after it.
+`--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the `select` page's address,
+default 8787). Subcommands take no positional arguments, so a stray one is an error rather
+than silently swallowing the flags after it.
 
 ## Run flow
 
@@ -236,75 +237,6 @@ committed in the consuming repo, discovered by walking up from cwd or via `--man
 the project-scoped settings: `variant_includes` and the `[[pack]]` allowlist. The manifest
 schema has no account field, so no account PII can be committed through it. Machine paths also
 via env (`SYNTY_LIBRARY`).
-
-## Tag store
-
-`synty-sync.tags.toml`, a third project-scoped file committed beside the manifest and
-lockfile (discovered the same way; `--tags` / `--manifest` override), records user tags and
-links for the `browse` UI. It holds a palette of `[[tag]]` definitions (`id` = the label text,
-which is its identity; `color` = `#rrggbb`), `[[assignment]]` rows mapping a content
-**fingerprint** to its tag ids, and `[[group]]` rows recording link groups, all sorted for
-minimal diffs:
-
-```toml
-[[tag]]
-  id = "hero"
-  color = "#e11d48"
-[[assignment]]
-  fingerprint = "crc32:1a2b3c4d:41700000"
-  tags = ["biome:forest", "hero"]
-[[group]]
-  fingerprints = ["crc32:2c54c32c:8635", "uguid:98960c3a158d24c4a933f0d99fb26946"]
-```
-
-Assignments and groups key on an asset's content, not its location or the browse `id` (which
-embeds a machine-absolute path and a version-bearing archive name, so it is neither portable nor
-stable across updates). The fingerprint is `crc32:<hex>:<size>` for zip entries and loose files
-(the CRC is free from the zip central directory) and `uguid:<guid>` for unitypackage entries
-(Unity's stable per-asset GUID). Byte-identical copies therefore share one fingerprint, so a tag
-set once applies to every copy and survives a `sync` for unchanged files.
-
-A multi-animation `.glb` (a Quaternius-style animation library, one file holding ~120 clips on a
-shared rig) is split at scan time into one virtual asset per embedded clip: `assetindex` reads
-only the GLB's JSON chunk for the animation names, then emits a per-clip asset whose `Source.Clip`
-names the animation and whose bytes are the whole file (`/api/content` serves the file; the
-preview plays `Source.Clip`). Each clip fingerprints as `<file-fingerprint>#<clipName>`, so clips
-tag independently and stably. A root-motion (`_RM`) GLB is left whole (its clips would duplicate
-the base file's) and becomes the base clips' root-motion sibling (below).
-
-An animation that ships in two variants — one that travels (root motion baked in, an `_RM` file)
-and one that animates in place — collapses to a single card in the `browse` layer (not
-`assetindex`, which keeps both files as faithful assets). The in-place variant is the visible
-card carrying `rootMotionId`, the RM variant's asset id; the lightbox's root-motion toggle loads
-that file to show the travel, and the RM card is suppressed from the grid. Pairing groups assets
-by `(vendor, pack, canonical file base)` where the canonical base strips the `_RM` token — a
-trailing `_RM` (Quaternius/explosive GLBs) or a `_RM_` infix before a suffix (Synty FBX,
-`..._180L_RM_Masc`) — and pairs a group's in-place animations to its RM sibling (the same clip
-when the RM is also per-clip, else the whole-file RM). This is orthogonal to whether the clip has
-a body to preview on: it only decides which file the toggle plays.
-
-`GET /api/assets` filters by tags with a repeatable `tag` param combined by `tagmode`: `and`
-matches cards carrying all selected tags, `or` (the default) any. A card is matched on the
-**union** of tags over its fingerprints, so a grouped card can satisfy an `and` query even when no
-single copy carries every tag. (The browse UI's ANY/ALL toggle is this `tagmode`.)
-
-A `[[group]]` is an **undirected** set of fingerprints that belong together (a UI frame and its
-background fill, say). Groups merge transitively: linking `{A,B}` then `{B,C}` yields `{A,B,C}`.
-They are a result-expansion concern only, orthogonal to tags: a group never changes what tags a
-fingerprint carries. `GET /api/assets?includeRelated=1` takes each tag match's linked companions
-and folds them into the result (relaxing only the tag filter, so other facets and the text search
-still apply); each card's `related` field lists its companions' fingerprints; `GET
-/api/related?fingerprint=` resolves a fingerprint set's companions to whole cards (for the
-lightbox "parts of this set" strip); `POST /api/link {fingerprints, on}` links or unlinks.
-
-The store never prunes to a currently-scanned set: assignments and groups for fingerprints
-outside the current view are preserved, so tags and links survive a disabled pack, a narrowed
-`--root`, or another machine. `browse` is otherwise read-only; this is its one write surface,
-guarded by a mutex and written atomically. Because `browse` has no session, the write
-endpoints require an `application/json` content-type, which forces a CORS preflight the
-server does not answer and so keeps a page the user happens to have open from writing to
-the store; a failed save reloads from disk rather than leaving memory ahead of it. Tagging is disabled (the UI hides it) when no manifest
-neighborhood is found, so `browse` still needs no manifest.
 
 ## Testing
 

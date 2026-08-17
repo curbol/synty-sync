@@ -58,12 +58,6 @@ func LockPath(manifestPath string) string {
 	return strings.TrimSuffix(manifestPath, ".toml") + ".lock.json"
 }
 
-// TagsPath returns the tag-store path paired with a manifest: the manifest path with
-// its .toml suffix replaced by .tags.toml (synty-sync.toml -> synty-sync.tags.toml).
-func TagsPath(manifestPath string) string {
-	return strings.TrimSuffix(manifestPath, ".toml") + ".tags.toml"
-}
-
 // Validate reports a manifest the user has to fix by hand. A malformed
 // variant_includes glob is the case that matters: filepath.Match reports it as "no
 // match", so a typo looks exactly like a library with nothing for your engine.

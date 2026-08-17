@@ -133,19 +133,6 @@ func TestLockPath(t *testing.T) {
 	}
 }
 
-func TestTagsPath(t *testing.T) {
-	cases := map[string]string{
-		filepath.Join("proj", "synty-sync.toml"): filepath.Join("proj", "synty-sync.tags.toml"),
-		"synty-sync.toml":                        "synty-sync.tags.toml",
-		"foo.toml":                               "foo.tags.toml",
-	}
-	for in, want := range cases {
-		if got := TagsPath(in); got != want {
-			t.Errorf("TagsPath(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // A misspelled key decodes to nothing and is then deleted from the user's working
 // tree by the next Save, while the user sees a misleading "no variant_includes"
 // error rather than "unknown key".
