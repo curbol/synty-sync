@@ -4,7 +4,7 @@ import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   contentURL, loadModel, loadSidekick, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips,
-  hasBakedMotion, coversBones, posedBox, frameBox, isRenderable, captureRootRest, uprightRig,
+  coversBones, posedBox, frameBox, isRenderable, captureRootRest, uprightRig,
   prepareClipRig, cloneRig, poseAt, retargetedFor, stripRootMotion, dispose, CharRegistry, CLAY, _posedV,
 } from '/static/scene.js';
 
@@ -1157,7 +1157,7 @@ function startViewer(container, asset) {
     playInPlace = rmClips.length ? cs : cs.map((c) => stripRootMotion(c, rootBoneName, playUpAxis));
     playMotion = rmClips.length ? rmClips : cs;
     clips = motionOn ? playMotion : playInPlace;
-    moveBtn.hidden = !(rmClips.length || hasBakedMotion(asset.name));
+    moveBtn.hidden = !(rmClips.length || asset.bakedMotion);
     mixer = new THREE.AnimationMixer(mixerRoot);
     ctrls = makeControls();
     renderCharacter(charInfo);

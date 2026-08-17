@@ -128,13 +128,12 @@ func looseAsset(e libEntry) Asset {
 	return a
 }
 
-// isRootMotionVariant reports the Unreal/Quaternius root-motion sibling of an
-// animation library (e.g. "UAL1_RM.glb" beside "UAL1.glb"). It is left whole so its
-// clips don't duplicate the base file's; pairing the two as a root-motion toggle is
-// a later concern.
+// isRootMotionVariant reports a root-motion sibling of an animation library (e.g.
+// "UAL1_RM.glb" beside "UAL1.glb"). It is left whole so its clips don't duplicate the
+// base file's; pairing the two as a root-motion toggle is a later concern.
 func isRootMotionVariant(name string) bool {
-	base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
-	return strings.HasSuffix(base, "_rm")
+	_, isRM := RootMotionVariant(strings.TrimSuffix(name, filepath.Ext(name)))
+	return isRM
 }
 
 // clipAsset builds one virtual asset for a single embedded animation of a multi-clip

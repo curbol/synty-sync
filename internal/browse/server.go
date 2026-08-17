@@ -92,6 +92,9 @@ type assetDTO struct {
 	// RootMotionID is the id of this animation's root-motion (travel) sibling, when
 	// it ships one; the lightbox's toggle loads that file to show the travel.
 	RootMotionID string `json:"rootMotionId,omitempty"`
+	// BakedMotion marks a card whose own file carries baked root motion with no
+	// in-place sibling to pair; the lightbox strips it algorithmically instead.
+	BakedMotion bool `json:"bakedMotion,omitempty"`
 }
 
 // copyDTO is one occurrence of an asset (its variant/pack, the path to copy, and its
@@ -289,6 +292,9 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range grouped {
 		grouped[i].RootMotionID = s.rmSibling[grouped[i].ID]
+		if _, isRM := assetindex.RootMotionVariant(assetFileBase(grouped[i].Source)); isRM {
+			grouped[i].BakedMotion = true
+		}
 	}
 	// Resolve each card's tags (the union over its fingerprints) and its linked
 	// companions, then filter by the requested tags, so a card matches on its whole

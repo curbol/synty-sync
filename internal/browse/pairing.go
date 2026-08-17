@@ -8,36 +8,22 @@ import (
 )
 
 // Root-motion pairing collapses each animation that ships in two variants — one with
-// world travel baked into the root (an "_RM" file) and one that animates in place —
+// world travel baked into the root (a root-motion file) and one that animates in place —
 // into a single card. The in-place variant is the visible card; the browse lightbox's
-// root-motion toggle loads the RM sibling to show the travel. The token is a Synty/
-// Unreal convention: a trailing "_RM" (Quaternius/explosive GLBs) or a "_RM_" infix
-// before a suffix like the gender (Synty FBX, "..._180L_RM_Masc").
-
-// stripRootMotionToken removes the "_RM" token from a file base name, reporting
-// whether it was present. It matches the token only bounded by "_" or the end, so
-// substrings like "arm"/"Storm" are left alone.
-func stripRootMotionToken(base string) (canonical string, isRM bool) {
-	if strings.HasSuffix(base, "_RM") {
-		return base[:len(base)-3], true
-	}
-	if i := strings.Index(base, "_RM_"); i >= 0 {
-		return base[:i] + base[i+3:], true
-	}
-	return base, false
-}
+// root-motion toggle loads the RM sibling to show the travel. Which file base names are
+// root-motion variants is decided by assetindex.RootMotionVariant, the shared recognizer.
 
 // assetFileBase is the extension-less base name of the file an asset lives in (the
-// archive entry, unity pathname, or loose path), where the "_RM" token appears.
-func assetFileBase(a assetindex.Asset) string {
+// archive entry, unity pathname, or loose path), where the root-motion token appears.
+func assetFileBase(s assetindex.Source) string {
 	var name string
-	switch a.Source.Kind {
+	switch s.Kind {
 	case assetindex.SourceZip:
-		name = a.Source.Entry
+		name = s.Entry
 	case assetindex.SourceUnityPackage:
-		name = a.Source.Pathname
+		name = s.Pathname
 	default:
-		name = a.Source.FilePath
+		name = s.FilePath
 	}
 	name = path.Base(name)
 	return strings.TrimSuffix(name, path.Ext(name))
@@ -54,7 +40,7 @@ func buildRootMotionPairs(assets []assetindex.Asset) (sibling map[string]string,
 	type group struct{ nonRM, rm []int }
 	groups := map[string]*group{}
 	for i := range assets {
-		canon, isRM := stripRootMotionToken(assetFileBase(assets[i]))
+		canon, isRM := assetindex.RootMotionVariant(assetFileBase(assets[i].Source))
 		key := assets[i].Vendor + "\x00" + assets[i].Pack + "\x00" + canon
 		g := groups[key]
 		if g == nil {

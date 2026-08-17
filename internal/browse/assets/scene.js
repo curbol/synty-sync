@@ -145,13 +145,6 @@ async function loadRMClips(asset) {
   } catch { return null; }
 }
 
-// hasBakedMotion detects a file that itself carries baked root motion (an _RM file
-// opened without a separate in-place sibling), so the toggle can still strip it in
-// place. Matches the "_RM" token bounded by _, space, brackets, dot, or ends.
-function hasBakedMotion(name) {
-  return /(?:^|[_\s[])rm(?:[_\s\].]|$)/i.test(name || '');
-}
-
 // coversBones reports whether a rig can actually play a clip: the clip must drive
 // most of the rig (≥60% of the rig's bones — so nearly the whole body animates) AND
 // cover a good part of the clip (≥45% of its bones). Requiring both rejects the
@@ -525,7 +518,7 @@ const CharRegistry = {
 };
 
 export {
-  loadModel, loadSidekick, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips, hasBakedMotion,
+  loadModel, loadSidekick, normalizeClip, boneNames, clipBones, clipsForAsset, loadRMClips,
   coversBones, posedBox, frameBox, isRenderable, captureRootRest, uprightRig, prepareClipRig,
   cloneRig, poseAt, retargetedFor, stripRootMotion, dispose, CharRegistry, CLAY, _posedV,
 };
