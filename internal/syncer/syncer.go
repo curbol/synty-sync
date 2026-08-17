@@ -6,6 +6,7 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/model"
 	"github.com/curbol/synty-sync/internal/portal"
+	"github.com/curbol/synty-sync/internal/retry"
 )
 
 // Class is the diff outcome for one selected file.
@@ -302,37 +304,58 @@ func download(ctx context.Context, c *portal.Client, libraryRoot string, f model
 }
 
 // downloadWithRetry retries a download with bounded exponential backoff, resolving
-// a fresh signed URL on each attempt (the CloudFront signature expires).
+// a fresh signed URL on each attempt (the CloudFront signature expires). A
+// permanently-failing 4xx aborts immediately instead of burning every attempt.
 func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string, f model.FileEntry, attempts int, base time.Duration) (resolved, error) {
-	var lastErr error
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return resolved{}, ctx.Err()
-			case <-time.After(base << (i - 1)):
-			}
+	var r resolved
+	err := retry.Do(ctx, attempts, base, func() error {
+		var err error
+		r, err = download(ctx, c, libraryRoot, f)
+		if err != nil && permanentDownloadFailure(err) {
+			return retry.Stop(err)
 		}
-		r, err := download(ctx, c, libraryRoot, f)
-		if err == nil {
-			return r, nil
-		}
-		lastErr = err
-	}
-	return resolved{}, lastErr
+		return err
+	})
+	return r, err
+}
+
+// permanentDownloadFailure reports a download error a retry cannot fix: a 4xx,
+// except 403 — an expired CloudFront signature that a fresh Resolve re-signs, so
+// those keep retrying.
+func permanentDownloadFailure(err error) bool {
+	code, ok := portal.StatusOf(err)
+	return ok && code >= 400 && code < 500 && code != http.StatusForbidden
 }
 
 func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
-	// --only scopes what this run enumerates and downloads; it must not drop the rest of
-	// the lockfile. Carry forward prior packs outside the glob (the in-scope ones are
-	// rebuilt from live data below, overwriting these).
-	if opts.OnlyGlob != "" {
-		for slug, p := range prev.Packs {
-			if ok, _ := filepath.Match(opts.OnlyGlob, slug); !ok {
-				report.NewLockfile.Packs[slug] = p
-			}
+	// A run acts only on the packs it fetched: those filtered out (disabled in the
+	// manifest, or outside --only) are never re-fetched, so carry their prior records
+	// forward rather than dropping them from the committed lockfile. The in-scope packs
+	// are rebuilt from live data below, overwriting these. A carried file whose fileId
+	// was (re)downloaded this run is repointed to the new cache path, so a bundled file
+	// shared with an in-scope pack never diverges across its owning packs.
+	inScope := make(map[string]bool, len(packFiles))
+	for _, pf := range packFiles {
+		inScope[pf.pack.Slug] = true
+	}
+	for slug, p := range prev.Packs {
+		if inScope[slug] {
+			continue
 		}
+		carried := lockfile.Pack{DisplayName: p.DisplayName, OrderID: p.OrderID, OrderItemID: p.OrderItemID, Files: map[string]lockfile.File{}}
+		for key, f := range p.Files {
+			if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked && f.CachePath != r.cachePath {
+				f.CachePath = r.cachePath
+				f.SHA256 = r.sha
+				f.SizeBytes = r.size
+				if r.now {
+					f.DownloadedAt = opts.Now
+				}
+			}
+			carried.Files[key] = f
+		}
+		report.NewLockfile.Packs[slug] = carried
 	}
 	for _, pf := range packFiles {
 		lp := lockfile.Pack{

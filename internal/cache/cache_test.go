@@ -9,6 +9,27 @@ import (
 	"testing"
 )
 
+func TestStoreRejectsUnsafeFilename(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"../evil.zip", "sub/evil.zip", "..", ".", ""} {
+		if _, _, _, err := Store(root, "TOKEN", name, strings.NewReader("x")); err == nil {
+			t.Errorf("Store accepted unsafe filename %q", name)
+		}
+	}
+	// Nothing escaped the library root.
+	if _, err := os.Stat(filepath.Join(root, "evil.zip")); err == nil {
+		t.Error("a traversal filename wrote outside the token dir")
+	}
+	// A bare filename still stores normally.
+	rel, _, _, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("Store rejected a valid filename: %v", err)
+	}
+	if rel != "TOKEN/pack.zip" {
+		t.Errorf("relPath = %q, want TOKEN/pack.zip", rel)
+	}
+}
+
 func TestStoreAndVerify(t *testing.T) {
 	lib := t.TempDir()
 	rel, sha, size, err := Store(lib, "POLYGON_Pirate", "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip", strings.NewReader("hello"))

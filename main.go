@@ -156,7 +156,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	dry := cmd == "status" || *dryRun
+	dry := isDryRun(cmd, *dryRun)
 	opts := syncer.Options{
 		LibraryRoot:  cfg.LibraryPath,
 		Filter:       man.Filter(),
@@ -181,6 +181,12 @@ func run(args []string) error {
 // not-yet-created manifest). Otherwise it is discovered by walking up from the working
 // directory; when nothing is found, `select` defaults to synty-sync.toml in the working
 // directory (it is about to create one), and the read commands error.
+// isDryRun reports whether a run should classify only, with no downloads and no
+// lockfile write: status is always dry, and sync honors --dry-run.
+func isDryRun(cmd string, flag bool) bool {
+	return cmd == "status" || flag
+}
+
 func resolveManifestPath(flag, cmd string) (string, error) {
 	if flag != "" {
 		return flag, nil

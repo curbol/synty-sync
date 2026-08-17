@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/model"
@@ -347,6 +349,96 @@ func TestPackSelectedLimitsToAllowlist(t *testing.T) {
 	}
 	if _, ok := rep.NewLockfile.Packs["polygon-pirate-pack"]; !ok {
 		t.Error("selected pack missing from lockfile")
+	}
+}
+
+func TestDisabledPackPreservedInLockfile(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	// First sync with every pack enabled populates the lockfile.
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatal(err)
+	}
+	lf, _ := lockfile.Load(lockPath)
+	if _, ok := lf.Packs["polygon-dungeon-pack"]; !ok {
+		t.Fatalf("setup: dungeon pack should be present after a full sync")
+	}
+
+	// Disable the dungeon pack, then re-sync: its record (and downloaded files) must
+	// survive rather than being silently erased from the committed lockfile.
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := lockfile.Load(lockPath)
+	if _, ok := after.Packs["polygon-dungeon-pack"]; !ok {
+		t.Error("disabled pack was dropped from the lockfile")
+	}
+	if _, ok := after.Packs["polygon-pirate-pack"]; !ok {
+		t.Error("enabled pack missing from the lockfile")
+	}
+}
+
+func TestBuildLockfileRepointsCarriedBundledFile(t *testing.T) {
+	// A file (id 42) shared by an in-scope and an out-of-scope pack, both pointing at
+	// one old path. This run re-downloads it (version bump) under the in-scope pack to
+	// a new path; the carried-forward out-of-scope pack must be repointed so the two
+	// owning packs never diverge on cachePath.
+	shared := lockfile.File{FileToken: "T", Variant: "V", FileID: 42, Version: "v1", Tracked: true, CachePath: "T/old.zip", SHA256: "oldsha"}
+	prev := lockfile.Lockfile{Packs: map[string]lockfile.Pack{
+		"in":  {Files: map[string]lockfile.File{"T|V": shared}},
+		"out": {Files: map[string]lockfile.File{"T|V": shared}},
+	}}
+	packFiles := []packWithFiles{{
+		pack:  model.Pack{Slug: "in"},
+		files: []model.FileEntry{{FileToken: "T", Variant: "V", FileID: 42, Version: "v2"}},
+	}}
+	resolvedByID := map[int]resolved{42: {cachePath: "T/new.zip", sha: "newsha", size: 10, now: true}}
+	opts := Options{Filter: func(model.Variant) bool { return true }, Now: "now"}
+	report := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
+
+	buildLockfile(&report, packFiles, opts, resolvedByID, prev)
+
+	got := report.NewLockfile.Packs["out"].Files["T|V"]
+	if got.CachePath != "T/new.zip" || got.SHA256 != "newsha" {
+		t.Errorf("carried out-of-scope pack not repointed to the new path: %+v", got)
+	}
+}
+
+func TestDownloadFailsFastOnPermanent4xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	f := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"}
+	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), t.TempDir(), f, 3, time.Millisecond); err == nil {
+		t.Fatal("expected an error")
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("permanent 4xx retried: %d attempts, want 1 (fail fast)", n)
+	}
+}
+
+func TestDownloadRetriesForbidden(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusForbidden) // an expired signature; a fresh resolve may fix it
+	}))
+	defer srv.Close()
+
+	f := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"}
+	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), t.TempDir(), f, 3, time.Millisecond); err == nil {
+		t.Fatal("expected an error after retries")
+	}
+	if n := atomic.LoadInt32(&calls); n != 3 {
+		t.Errorf("403 should keep retrying: %d attempts, want 3", n)
 	}
 }
 

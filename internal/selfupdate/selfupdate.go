@@ -239,9 +239,11 @@ func download(token, url, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func extractBinary(zipPath, dir string) (string, error) {
@@ -268,8 +270,13 @@ func extractBinary(zipPath, dir string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		defer w.Close()
 		if _, err := io.Copy(w, rc); err != nil {
+			w.Close()
+			return "", err
+		}
+		// Check the close: a flush failure here would otherwise yield a silently
+		// truncated binary that the caller renames over the running executable.
+		if err := w.Close(); err != nil {
 			return "", err
 		}
 		return out, nil

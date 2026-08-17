@@ -123,8 +123,12 @@ within a pack (one pack's files can read `POLYGON_Pirate`, `POLYGON_Pirate_Pack`
 single pack can carry two files of the same variant (its own `Godot_4_5_1` plus a bundled
 `GENERIC_Particle_FX Godot_4_5_1`); the file key is `fileToken|variant`. Files are deduped by
 `fileId`, so a file bundled under several packs is stored once and every owning pack's entry
-shares the same `cachePath`. The account-identifying `customerId` is **not** stored here (it
-is account PII; it lives in env / a gitignored local config). Schema:
+shares the same `cachePath`. A `sync` rebuilds only the packs it acted on; packs it did not
+fetch (disabled in the manifest, or outside `--only`) keep their prior records rather than
+being dropped, so the file stays a complete record of what is owned — and a bundled file
+shared with a re-downloaded pack is repointed in lockstep. The account-identifying
+`customerId` is **not** stored here (it is account PII; it lives in env / a gitignored local
+config). Schema:
 
 ```json
 {

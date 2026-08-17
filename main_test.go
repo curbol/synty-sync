@@ -62,6 +62,24 @@ func TestResolveTagsPath(t *testing.T) {
 	}
 }
 
+func TestIsDryRun(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		flag bool
+		want bool
+	}{
+		{"status", false, true}, // status is always dry, even without --dry-run
+		{"status", true, true},
+		{"sync", false, false}, // sync writes unless --dry-run
+		{"sync", true, true},
+	}
+	for _, c := range cases {
+		if got := isDryRun(c.cmd, c.flag); got != c.want {
+			t.Errorf("isDryRun(%q, %v) = %v, want %v", c.cmd, c.flag, got, c.want)
+		}
+	}
+}
+
 func TestRunStatusNoManifest(t *testing.T) {
 	// With no --manifest and nothing discoverable up from cwd, read commands error before
 	// any network/session. t.Chdir isolates cwd to an empty tree.

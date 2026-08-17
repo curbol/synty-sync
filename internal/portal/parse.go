@@ -119,12 +119,18 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		}
 		fileID, _ := strconv.Atoi(idMatch[1])
 
-		token, variant, version, ok := splitLabel(label)
+		token, variant, version, ok, err := splitLabel(label)
+		if err != nil {
+			// A row that already has a valid download id but is otherwise malformed
+			// (empty version, or a recognized variant keyword with no token) is
+			// structural breakage, not a skippable variant — fail loud.
+			parseErr = fmt.Errorf("file row %q: %w", label, err)
+			return false
+		}
 		if !ok {
 			// Unrecognized variant keyword (e.g. Synty's "Ureal" typo, or a future
 			// engine). Skip rather than abort: such variants are never in the
-			// Godot/SourceFiles filter. Structural breakage is still caught above
-			// (a versioned row with no download link errors).
+			// Godot/SourceFiles filter.
 			return true
 		}
 		size, _ := parseSize(sizeText)
@@ -145,15 +151,18 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 
 // splitLabel turns "POLYGON_PirateGodot_4_5_1 | v1_0_1" (or the underscore-fused
 // "INTERFACE_Dark_Fantasy_HUD_SourceSprites | v3") into token, variant, version.
-func splitLabel(label string) (token, variant, version string, ok bool) {
+// ok is false with a nil error only for the benign "no recognized variant keyword"
+// case (a safe skip); a non-nil error marks structural breakage a caller must not
+// silently drop.
+func splitLabel(label string) (token, variant, version string, ok bool, err error) {
 	bar := strings.Index(label, " | ")
 	if bar < 0 {
-		return "", "", "", false
+		return "", "", "", false, nil
 	}
 	left := strings.TrimSpace(label[:bar])
 	version = strings.TrimSpace(label[bar+len(" | "):])
 	if version == "" {
-		return "", "", "", false
+		return "", "", "", false, fmt.Errorf("empty version")
 	}
 	cut := -1
 	for _, kw := range variantKeywords {
@@ -161,15 +170,15 @@ func splitLabel(label string) (token, variant, version string, ok bool) {
 			cut = i
 		}
 	}
-	if cut <= 0 {
-		return "", "", "", false
+	if cut < 0 {
+		return "", "", "", false, nil // no recognized variant keyword — safe skip
 	}
 	token = strings.Trim(left[:cut], " _")
 	variant = strings.TrimSpace(left[cut:])
 	if token == "" || variant == "" {
-		return "", "", "", false
+		return "", "", "", false, fmt.Errorf("variant %q with empty token", variant)
 	}
-	return token, variant, version, true
+	return token, variant, version, true, nil
 }
 
 // parseSize converts a rounded portal size label ("2.6 MB") to an approximate byte

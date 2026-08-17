@@ -22,10 +22,24 @@ func RelPath(fileToken, filename string) string {
 	return path.Join(fileToken, filename)
 }
 
+// safeName rejects a portal-supplied filename that is not a bare filename, so a
+// crafted name (a "../" or a nested path) cannot escape the cache root when joined
+// to the destination dir. The portal already reduces both filename sources to a
+// basename; this is the hard boundary that backstops it.
+func safeName(filename string) error {
+	if filename == "" || filename == "." || filename == ".." || strings.ContainsAny(filename, `/\`) {
+		return fmt.Errorf("unsafe download filename %q", filename)
+	}
+	return nil
+}
+
 // Store streams r into <libraryRoot>/<fileToken>/<filename> via a temp file in the
 // destination dir, hashing while writing and renaming atomically. It returns the
 // relative cache path, the sha256, and the byte count.
 func Store(libraryRoot, fileToken, filename string, r io.Reader) (relPath, sha string, size int64, err error) {
+	if err := safeName(filename); err != nil {
+		return "", "", 0, err
+	}
 	rel := RelPath(fileToken, filename)
 	destDir := filepath.Join(libraryRoot, filepath.FromSlash(fileToken))
 	if err = os.MkdirAll(destDir, 0o755); err != nil {

@@ -176,6 +176,19 @@ func TestParseItemSkipsUnknownVariant(t *testing.T) {
 	}
 }
 
+func TestParseItemErrorsOnStructuralBreakage(t *testing.T) {
+	// A row with a valid download id whose heading is only the variant keyword and
+	// version (no product token) is structural breakage, not a skippable unknown
+	// variant — it must error loudly rather than silently vanish.
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222?x=1'>Download</a></div>
+	</div>`)
+	if _, err := ParseItemPage(html, "x"); err == nil {
+		t.Fatal("expected an error for a versioned row with a valid id but no token")
+	}
+}
+
 func TestSourceSpritesUnderscoreCanonicalized(t *testing.T) {
 	// Fantasy Warrior HUD labels the variant "Source_Sprites" (underscore); it must
 	// canonicalize to "SourceSprites" so the SourceSprites filter matches both HUDs.

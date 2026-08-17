@@ -13,12 +13,33 @@ import (
 	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
+	"github.com/curbol/synty-sync/internal/retry"
 )
 
 // ErrExpiredSession is returned when the library page lacks the logged-in
 // sentinel (a logout shell / login redirect), so the caller can refuse to
 // overwrite the lockfile and ask for a fresh session.
 var ErrExpiredSession = errors.New("expired or missing session: the library page is not logged in")
+
+// StatusError is a non-success HTTP response. Callers classify it with StatusOf to
+// decide whether to retry (5xx / transient) or fail fast (4xx). Op is a short,
+// PII-free context string (never the resolved URL, which carries the customer id).
+type StatusError struct {
+	Status int
+	Op     string
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("%s: status %d", e.Op, e.Status) }
+
+// StatusOf returns the HTTP status carried by err when it is (or wraps) a
+// StatusError, and whether one was found.
+func StatusOf(err error) (int, bool) {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Status, true
+	}
+	return 0, false
+}
 
 const shopParam = "synty-store.myshopify.com"
 
@@ -59,37 +80,46 @@ var httpBackoff = 500 * time.Millisecond // var so tests can shorten it
 // bounded exponential backoff. A 4xx fails fast (retrying won't help). The store
 // occasionally returns a one-off 500, which would otherwise abort the whole run.
 func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
-	var lastErr error
-	for i := 0; i < httpAttempts; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(httpBackoff << (i - 1)):
-			}
-		}
+	var body []byte
+	err := retry.Do(ctx, httpAttempts, httpBackoff, func() error {
 		resp, err := c.get(ctx, rawURL)
 		if err != nil {
-			lastErr = err
-			continue
+			return c.redactErr(rawURL, err) // network error, retryable
 		}
+		defer resp.Body.Close()
 		if resp.StatusCode >= 500 {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
-			continue
+			return &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
 		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
 		if err != nil {
-			lastErr = err
-			continue
+			return c.redactErr(rawURL, err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+			return retry.Stop(&StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)})
 		}
-		return body, nil
+		body = b
+		return nil
+	})
+	return body, err
+}
+
+// redact removes the customer id from a string bound for an error message; the id
+// is account PII and must never reach stderr.
+func (c *Client) redact(s string) string {
+	if c.CustomerID == "" {
+		return s
 	}
-	return nil, fmt.Errorf("GET %s failed after %d attempts: %w", rawURL, httpAttempts, lastErr)
+	return strings.ReplaceAll(s, c.CustomerID, "<redacted>")
+}
+
+// redactErr strips the request URL (which carries the customer id) out of a
+// net/http transport error, replacing it with the redacted URL.
+func (c *Client) redactErr(rawURL string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("GET %s: %w", c.redact(rawURL), ue.Err)
+	}
+	return err
 }
 
 // withShop appends the shop app-proxy param (harmless to a test server).
@@ -160,7 +190,7 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("download %s: status %d", file.Key(), resp.StatusCode)
+		return nil, "", &StatusError{Status: resp.StatusCode, Op: "download " + file.Key()}
 	}
 	filename = filenameFromURL(resp.Request.URL)
 	if filename == "" {
@@ -177,11 +207,7 @@ func filenameFromURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	base := path.Base(u.Path)
-	if base == "." || base == "/" || base == "" {
-		return ""
-	}
-	return base
+	return cleanBase(u.Path)
 }
 
 func filenameFromDisposition(cd string) string {
@@ -192,5 +218,16 @@ func filenameFromDisposition(cd string) string {
 	if err != nil {
 		return ""
 	}
-	return params["filename"]
+	return cleanBase(params["filename"])
+}
+
+// cleanBase reduces a path or a Content-Disposition filename to its bare last
+// element, so neither source can carry directory components (".." or a nested
+// path) into the cache's write path. A degenerate result is dropped.
+func cleanBase(name string) string {
+	base := path.Base(name)
+	if base == "." || base == ".." || base == "/" || base == "" {
+		return ""
+	}
+	return base
 }
