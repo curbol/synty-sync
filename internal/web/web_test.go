@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -82,4 +83,45 @@ func get(t *testing.T, u string) string {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
+}
+
+// /save persists the whole pack selection, and browse-adjacent pages run on
+// localhost too. Without a method guard, any page the user visits while `select` is
+// open can fire a GET at it, submit an empty form, and disable every pack.
+func TestSaveRejectsNonPost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan map[string]bool, 1)
+	go func() {
+		chosen, _ := Serve(ctx, "localhost:18789", []model.Pack{{Slug: "a", DisplayName: "A"}}, map[string]bool{"a": true})
+		done <- chosen
+	}()
+	waitForListener(t, "localhost:18789")
+
+	resp, err := http.Get("http://localhost:18789/save")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("GET /save returned %d; a drive-by request must not submit a selection", resp.StatusCode)
+	}
+	select {
+	case chosen := <-done:
+		t.Errorf("GET /save unblocked Serve with %v; the caller would disable every pack", chosen)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func waitForListener(t *testing.T, addr string) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server never came up on %s", addr)
 }

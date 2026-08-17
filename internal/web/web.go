@@ -86,7 +86,9 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 	}
 	result := make(chan map[string]bool, 1)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// The root pattern is anchored with {$} so it matches only "/" and does not
+	// swallow a non-POST /save, which must fail rather than render the page.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		count := 0
 		for _, e := range enabled {
 			if e {
@@ -95,7 +97,9 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 		}
 		_ = page.Execute(w, pageData{Rows: rows, Count: count})
 	})
-	mux.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
+	// POST only: this endpoint persists the whole pack selection, and any page the
+	// user visits while select is open can reach localhost with a GET.
+	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

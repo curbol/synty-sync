@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/config"
@@ -56,6 +58,77 @@ func TestSyncAbortsOnExpiredSessionWithoutTouchingLockfile(t *testing.T) {
 	}
 	if string(after) != seeded {
 		t.Errorf("lockfile rewritten on an expired session:\n%s", after)
+	}
+}
+
+// Go's flag parsing stops at the first non-flag argument, so a stray positional
+// silently drops every flag after it. `sync <pack> --dry-run` would then perform a
+// real sync: full delta downloaded, committed lockfile rewritten.
+func TestStrayArgumentIsRejected(t *testing.T) {
+	for _, args := range [][]string{
+		{"sync", "polygon-city", "--dry-run"},
+		{"status", "somepack"},
+		{"list", "extra"},
+		{"update", "v1", "v2"},
+	} {
+		err := run(args)
+		if err == nil {
+			t.Errorf("%v: accepted a stray positional argument", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "argument") {
+			t.Errorf("%v: err = %v, want it to explain the stray argument", args, err)
+		}
+	}
+}
+
+// An expired session must say what to do next, not just what broke. main is the
+// only layer that knows which cookie source was used.
+func TestExpiredSessionErrorNamesTheCookieSource(t *testing.T) {
+	base := errors.New("expired or missing session")
+	err := explainSession(fmt.Errorf("%w", portal.ErrExpiredSession), "zen")
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		t.Fatalf("wrapping lost the sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "zen") {
+		t.Errorf("err = %q, want it to name the session source", err)
+	}
+	// An unrelated error passes through untouched.
+	if got := explainSession(base, "zen"); got != base {
+		t.Errorf("unrelated error was rewritten: %v", got)
+	}
+}
+
+// list and the run summary are the tool's actual output; writing them to a
+// package-level stdout leaves every branch of them unassertable.
+func TestListWritesTheLockfileToItsWriter(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "synty-sync.lock.json")
+	if err := os.WriteFile(lockPath, []byte(`{
+  "generatedAt": "t",
+  "packs": {
+    "zeta-pack": {"displayName": "Zeta", "files": {
+      "T|Godot_4_5_1": {"fileToken": "T", "variant": "Godot_4_5_1", "version": "v2", "fileId": 1, "tracked": true}}},
+    "alpha-pack": {"displayName": "Alpha", "files": {
+      "U|SourceFiles": {"fileToken": "U", "variant": "SourceFiles", "version": "v1", "fileId": 2, "tracked": false}}}
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := list(&out, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Index(got, "alpha-pack") > strings.Index(got, "zeta-pack") {
+		t.Errorf("packs not sorted by slug:\n%s", got)
+	}
+	if !strings.Contains(got, "* T|Godot_4_5_1  v2") {
+		t.Errorf("tracked file not marked as downloaded:\n%s", got)
+	}
+	if strings.Contains(got, "* U|SourceFiles") {
+		t.Errorf("untracked file marked as downloaded:\n%s", got)
 	}
 }
 

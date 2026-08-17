@@ -37,12 +37,20 @@ import (
 // -ldflags "-X main.version=<v>". It is "dev" for local builds.
 var version = "dev"
 
+// browseAddr is where `browse` serves by default.
+const browseAddr = "localhost:8788"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "synty-sync:", err)
 		os.Exit(1)
 	}
 }
+
+// stdout is where the tool's actual output goes (the run summary, the lockfile
+// listing). It is a package variable so tests can capture and assert it; progress
+// and diagnostics stay on stderr.
+var stdout io.Writer = os.Stdout
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -64,7 +72,7 @@ func run(args []string) error {
 	customer := fs.String("customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
 	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
 	root := fs.String("root", "", "browse: asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)")
-	addr := fs.String("addr", "localhost:8788", "browse: server address (host:port)")
+	addr := fs.String("addr", browseAddr, "browse: server address (host:port)")
 	reindex := fs.Bool("reindex", false, "browse: rebuild the asset index from scratch")
 	browseCache := fs.String("cache", "", "browse: cache dir for the index and unpacked archives (default: $XDG_CACHE_HOME/synty-sync)")
 	tagsFlag := fs.String("tags", "", "browse: tag store path (default: synty-sync.tags.toml beside the discovered manifest)")
@@ -90,8 +98,17 @@ func run(args []string) error {
 		return err
 	}
 
+	// flag.Parse stops at the first non-flag argument, so an unchecked positional
+	// silently swallows every flag after it — `sync <pack> --dry-run` would download
+	// the delta and rewrite the lockfile.
 	if cmd == "update" {
+		if fs.NArg() > 1 {
+			return fmt.Errorf("update takes at most one version argument, got %d", fs.NArg())
+		}
 		return selfupdate.Run(version, fs.Arg(0))
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%s takes no positional arguments (got %q); to limit packs use --only %s", cmd, fs.Arg(0), fs.Arg(0))
 	}
 
 	authDir := config.ResolveDir(*cfgDir)
@@ -124,12 +141,13 @@ func run(args []string) error {
 	lockPath := manifest.LockPath(manifestPath)
 
 	if cmd == "list" {
-		return list(lockPath)
+		return list(stdout, lockPath)
 	}
 
 	if cfg.CustomerID == "" {
 		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
 	}
+	src := sessionSource(cfg, *cookies)
 	cookie, err := resolveCookie(cfg, *cookies)
 	if err != nil {
 		return err
@@ -139,9 +157,29 @@ func run(args []string) error {
 	defer stop()
 
 	if cmd == "select" {
-		return selectPacks(ctx, client, manifestPath)
+		return explainSession(selectPacks(ctx, client, manifestPath, *addr), src)
 	}
-	return runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, *only, isDryRun(cmd, *dryRun))
+	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, *only, isDryRun(cmd, *dryRun)), src)
+}
+
+// explainSession turns the bare expired-session sentinel into something actionable.
+// Only main knows which cookie source was actually resolved, so the hint belongs
+// here; the wrap keeps errors.Is working for callers that check the sentinel.
+func explainSession(err error, src string) error {
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		return err
+	}
+	return fmt.Errorf("%w\n  session source: %s\n  log in at https://syntystore.com in that browser (or re-export your cookie file) and run again", err, src)
+}
+
+func sessionSource(cfg config.Config, override string) string {
+	if override != "" {
+		return override
+	}
+	if cfg.SessionSource != "" {
+		return cfg.SessionSource
+	}
+	return "firefox"
 }
 
 // newPortalClient builds the store client. There is no whole-request timeout (asset
@@ -170,6 +208,9 @@ func runSyncOrStatus(ctx context.Context, client *portal.Client, cfg config.Conf
 	if len(man.VariantIncludes) == 0 {
 		return fmt.Errorf("no variant_includes in %s: add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\"]   (also Unity_*, Unreal_*, SourceFiles, SourceSprites)", manifestPath)
 	}
+	if err := man.Validate(); err != nil {
+		return fmt.Errorf("%s: %w", manifestPath, err)
+	}
 	enabled := man.EnabledSet()
 	if len(enabled) == 0 {
 		fmt.Fprintln(os.Stderr, "note: no packs enabled; run `synty-sync select` to choose (nothing will download).")
@@ -193,7 +234,7 @@ func runSyncOrStatus(ctx context.Context, client *portal.Client, cfg config.Conf
 	if err != nil {
 		return err
 	}
-	printReport(dry, cfg, rep)
+	printReport(stdout, dry, cfg, rep)
 	return nil
 }
 
@@ -225,7 +266,14 @@ func resolveManifestPath(flag, cmd string) (string, error) {
 	return "", fmt.Errorf("no %s found (searched up from %s); run `synty-sync select` or pass --manifest <path>", manifest.FileName, wd)
 }
 
-func selectPacks(ctx context.Context, client *portal.Client, manifestPath string) error {
+// selectAddr is where `select` serves its page when --addr is not given. It is a
+// different port from browse's so the two can run side by side.
+const selectAddr = "localhost:8787"
+
+func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr string) error {
+	if addr == "" || addr == browseAddr {
+		addr = selectAddr
+	}
 	packs, err := client.Enumerate(ctx)
 	if err != nil {
 		return err
@@ -234,19 +282,26 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	if err != nil {
 		return err
 	}
+	prev := man.EnabledSet()
 	man.Reconcile(packs)
-	chosen, err := web.Serve(ctx, "localhost:8787", packs, man.EnabledSet())
+	chosen, err := web.Serve(ctx, addr, packs, man.EnabledSet())
 	if err != nil {
 		return err
+	}
+	// Turning off every pack is a real choice, but it is also what an empty or
+	// drive-by submission looks like, and it costs the user their whole selection in
+	// a committed file. Make them state it.
+	if len(chosen) == 0 && len(prev) > 0 {
+		return fmt.Errorf("the selection came back empty while %d packs were enabled; %s left unchanged (deselect them in the manifest if that is what you meant)", len(prev), manifestPath)
 	}
 	man.SetEnabled(chosen)
 	if err := manifest.Save(manifestPath, man); err != nil {
 		return err
 	}
-	fmt.Printf("saved %s: %d of %d packs enabled. Run `synty-sync sync` to download.\n",
+	fmt.Fprintf(stdout, "saved %s: %d of %d packs enabled. Run `synty-sync sync` to download.\n",
 		manifestPath, len(chosen), len(packs))
 	if len(man.VariantIncludes) == 0 {
-		fmt.Printf("note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
+		fmt.Fprintf(stdout, "note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
 	}
 	return nil
 }
@@ -302,7 +357,7 @@ func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool,
 }
 
 func printVersion() {
-	fmt.Printf("synty-sync %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(stdout, "synty-sync %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func resolveCookie(cfg config.Config, override string) (string, error) {
@@ -313,28 +368,28 @@ func resolveCookie(cfg config.Config, override string) (string, error) {
 	return session.Resolve(src)
 }
 
-func printReport(dry bool, cfg config.Config, rep syncer.Report) {
+func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 	counts := map[syncer.Class]int{}
 	for _, d := range rep.Diffs {
 		counts[d.Class]++
 	}
-	fmt.Printf("library: %s\n", cfg.LibraryPath)
-	fmt.Printf("packs: %d  files selected: %d\n", len(rep.NewLockfile.Packs), len(rep.Diffs))
-	fmt.Printf("  new=%d changed=%d download-now=%d cache-missing=%d adopted=%d unchanged=%d\n",
+	fmt.Fprintf(w, "library: %s\n", cfg.LibraryPath)
+	fmt.Fprintf(w, "packs: %d  files selected: %d\n", len(rep.NewLockfile.Packs), len(rep.Diffs))
+	fmt.Fprintf(w, "  new=%d changed=%d download-now=%d cache-missing=%d adopted=%d unchanged=%d\n",
 		counts[syncer.New], counts[syncer.Changed], counts[syncer.DownloadNow],
 		counts[syncer.CacheMissing], counts[syncer.Adopted], counts[syncer.Unchanged])
 	if dry {
 		pending := counts[syncer.New] + counts[syncer.Changed] + counts[syncer.DownloadNow] + counts[syncer.CacheMissing]
-		fmt.Printf("would download: %d files\n", pending)
+		fmt.Fprintf(w, "would download: %d files\n", pending)
 	} else {
-		fmt.Printf("downloaded: %d files  adopted: %d existing\n", len(rep.Downloaded), len(rep.Adopted))
+		fmt.Fprintf(w, "downloaded: %d files  adopted: %d existing\n", len(rep.Downloaded), len(rep.Adopted))
 	}
-	for _, w := range rep.Warnings {
-		fmt.Printf("  warning: %s\n", w)
+	for _, warning := range rep.Warnings {
+		fmt.Fprintf(w, "  warning: %s\n", warning)
 	}
 }
 
-func list(lockPath string) error {
+func list(w io.Writer, lockPath string) error {
 	lf, err := lockfile.Load(lockPath)
 	if err != nil {
 		return err
@@ -346,7 +401,7 @@ func list(lockPath string) error {
 	sort.Strings(slugs)
 	for _, s := range slugs {
 		p := lf.Packs[s]
-		fmt.Printf("%s  (%s)\n", s, p.DisplayName)
+		fmt.Fprintf(w, "%s  (%s)\n", s, p.DisplayName)
 		keys := make([]string, 0, len(p.Files))
 		for k := range p.Files {
 			keys = append(keys, k)
@@ -358,10 +413,10 @@ func list(lockPath string) error {
 			if f.Tracked {
 				mark = "*"
 			}
-			fmt.Printf("  %s %s  %s\n", mark, k, f.Version)
+			fmt.Fprintf(w, "  %s %s  %s\n", mark, k, f.Version)
 		}
 	}
-	fmt.Printf("(* = downloaded into the cache)\n")
+	fmt.Fprintf(w, "(* = downloaded into the cache)\n")
 	return nil
 }
 
@@ -385,12 +440,15 @@ flags:
   -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
   -only <glob>        limit to packs whose slug matches the glob
   -concurrency <n>    max concurrent item-page fetches
+  -dry-run            on sync, report only (no downloads or lockfile write)
+  -addr <host:port>   on select, the address to serve the page at (default: localhost:8787)
 
 browse flags:
   -root <dir>         asset scan root (overrides browse_root / SYNTY_BROWSE_ROOT; default: library dir)
   -addr <host:port>   server address (default: localhost:8788)
   -reindex            rebuild the asset index from scratch
   -cache <dir>        index / unpacked-archive cache dir (default: $XDG_CACHE_HOME/synty-sync)
+  -tags <path>        tag store path (default: synty-sync.tags.toml beside the manifest)
 
 Auth is user-scoped: config.toml (customer id, session, cache default) lives in the
 config dir. The project manifest (synty-sync.toml: variant_includes + the pack
