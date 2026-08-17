@@ -5,15 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/curbol/synty-sync/internal/config"
+	"github.com/curbol/synty-sync/internal/manifest"
 	"github.com/curbol/synty-sync/internal/portal"
+	"github.com/curbol/synty-sync/internal/web"
 )
 
 // Asking a subcommand for help is not a failure.
@@ -130,6 +135,122 @@ func TestListWritesTheLockfileToItsWriter(t *testing.T) {
 	if strings.Contains(got, "* U|SourceFiles") {
 		t.Errorf("untracked file marked as downloaded:\n%s", got)
 	}
+}
+
+// selectPacks rewrites the committed allowlist from whatever the page hands back,
+// so each of these is a way the user's selection can be lost: a save that drops the
+// packs they kept, an empty submission that disables everything, and a tab left open
+// from an earlier run whose slugs no longer name anything owned.
+func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
+	openBrowserWas := web.OpenBrowser
+	web.OpenBrowser = func(string) {}
+	t.Cleanup(func() { web.OpenBrowser = openBrowserWas })
+
+	const seeded = "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n"
+	for _, tc := range []struct {
+		name        string
+		addr        string
+		seed        string
+		post        []string
+		wantErr     bool
+		wantEnabled []string
+	}{
+		{
+			name:        "the chosen pack is enabled and the rest stay off",
+			addr:        "localhost:18811",
+			seed:        "variant_includes = [\"Godot_*\"]\n",
+			post:        []string{"pirate-pack"},
+			wantEnabled: []string{"pirate-pack"},
+		},
+		{
+			name:        "an empty submission will not wipe a live selection",
+			addr:        "localhost:18812",
+			seed:        seeded,
+			post:        nil,
+			wantErr:     true,
+			wantEnabled: []string{"pirate-pack"},
+		},
+		{
+			name:        "a stale tab's slugs will not wipe a live selection",
+			addr:        "localhost:18813",
+			seed:        seeded,
+			post:        []string{"long-gone"},
+			wantErr:     true,
+			wantEnabled: []string{"pirate-pack"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const sentinel = `<input class='sky-pilot-search-input'>`
+				if r.URL.Query().Get("line_items_page") == "1" {
+					fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
+						`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate Pack</a>`+
+						`<a href='/apps/downloads/customers/1/orders/2/order_items/4' class='sky-pilot-list-item'>Dungeon Pack</a></div>`)
+					return
+				}
+				fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
+			}))
+			defer srv.Close()
+
+			manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
+			if err := os.WriteFile(manifestPath, []byte(tc.seed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			stdoutWas := stdout
+			stdout = &bytes.Buffer{}
+			defer func() { stdout = stdoutWas }()
+
+			client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+			done := make(chan error, 1)
+			go func() { done <- selectPacks(context.Background(), client, manifestPath, tc.addr) }()
+
+			waitForSelectPage(t, tc.addr)
+			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			select {
+			case err := <-done:
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("selectPacks err = %v, wantErr = %v", err, tc.wantErr)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("selectPacks did not return after the save")
+			}
+
+			man, err := manifest.Load(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := man.EnabledSet()
+			if len(got) != len(tc.wantEnabled) {
+				t.Fatalf("enabled = %v, want %v", got, tc.wantEnabled)
+			}
+			for _, slug := range tc.wantEnabled {
+				if !got[slug] {
+					t.Errorf("enabled = %v, want it to contain %q", got, slug)
+				}
+			}
+			if len(man.VariantIncludes) != 1 || man.VariantIncludes[0] != "Godot_*" {
+				t.Errorf("variant_includes lost on write: %v", man.VariantIncludes)
+			}
+		})
+	}
+}
+
+func waitForSelectPage(t *testing.T, addr string) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("select page never came up on %s", addr)
 }
 
 // A sync must not act on packs the manifest has not enabled.

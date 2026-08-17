@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/lockfile"
+	"github.com/curbol/synty-sync/internal/model"
 	"github.com/curbol/synty-sync/internal/portal"
 )
 
@@ -239,6 +241,44 @@ func TestPackParsingToZeroFilesAbortsRun(t *testing.T) {
 	}
 	if got := len(after.Packs["polygon-pirate-pack"].Files); got != want {
 		t.Errorf("lockfile lost entries: %d -> %d", want, got)
+	}
+}
+
+// One bad pack ends the run, and every pack is launched at once with only the
+// semaphore staggering them, so the queue behind the failure would otherwise fetch a
+// whole library's item pages for a run that is already going to abort.
+func TestFailedPackStopsTheRemainingFetches(t *testing.T) {
+	var fetches int32
+	srv := newServer(t, serverOpts{itemHTML: func(string) (string, bool) {
+		atomic.AddInt32(&fetches, 1)
+		return `<html><body><div class='sky-pilot'>no rows</div></body></html>`, true
+	}})
+	opts := runOpts(t.TempDir(), true)
+	opts.Concurrency = 1
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), "", opts); err == nil {
+		t.Fatal("an item page with no file rows must abort the run")
+	}
+	// The library page lists four packs; only the one that failed should have been
+	// fetched before the rest were abandoned.
+	if got := atomic.LoadInt32(&fetches); got != 1 {
+		t.Errorf("fetched %d item pages, want 1: the queue kept going after the failure", got)
+	}
+}
+
+// A run the user interrupts skips the packs still queued, leaving zero entries in
+// their slots. Those read downstream as packs that own no files, and rebuilding a
+// lockfile from them erases every record they hold, so the cancellation has to
+// surface as an error rather than as a short result.
+func TestCancelledFetchIsAnErrorNotAnEmptyLibrary(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	packs := []model.Pack{{Slug: "polygon-pirate-pack", ItemURL: "/apps/downloads/customers/1/orders/100/order_items/1"}}
+	out, err := fetchAll(ctx, newClient(srv.URL), packs, 1)
+	if err == nil {
+		t.Fatalf("cancelled fetch returned %+v with no error; the caller would rebuild these packs as empty", out)
 	}
 }
 

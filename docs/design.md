@@ -224,7 +224,9 @@ interrupted download leaves only the temp file, so the next run re-fetches.
   every row look like a versionless icon row), and the syncer refuses a pack that reaches it
   with no files at all, since rebuilding one from an empty list erases every entry it holds.
 - **Partial / corrupt downloads:** temp-file + atomic-rename + size/sha verification, as above.
-- **Politeness:** capped concurrency, small inter-request delay, honor obvious rate limits.
+- **Politeness:** capped concurrency, honor obvious rate limits (429 and 408 back off and
+  retry), and abandon the queue once a pack fails rather than fetching a whole library's
+  item pages for a run that is going to abort.
 
 ## Configuration
 

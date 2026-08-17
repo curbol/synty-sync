@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -75,8 +76,10 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 // cancelled), returning the chosen set of enabled slugs.
 func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
 	rows := make([]row, 0, len(packs))
+	known := make(map[string]bool, len(packs))
 	for _, p := range packs {
 		rows = append(rows, row{Slug: p.Slug, Name: p.DisplayName, IconURL: p.IconURL, Enabled: enabled[p.Slug]})
+		known[p.Slug] = true
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
@@ -104,9 +107,14 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// A slug this page never offered comes from a stale tab. The returned set is
+		// the user's whole selection, so passing one through would make an empty
+		// submission read as a deliberate choice of packs that no longer exist.
 		chosen := map[string]bool{}
 		for _, slug := range r.Form["pack"] {
-			chosen[slug] = true
+			if known[slug] {
+				chosen[slug] = true
+			}
 		}
 		fmt.Fprintf(w, "Saved %d packs. You can close this tab.", len(chosen))
 		result <- chosen
@@ -115,7 +123,7 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 	url := "http://" + ln.Addr().String()
-	fmt.Printf("select packs at %s  (Ctrl-C to cancel)\n", url)
+	fmt.Fprintf(os.Stderr, "select packs at %s  (Ctrl-C to cancel)\n", url)
 	OpenBrowser(url)
 
 	select {
@@ -135,8 +143,9 @@ func shutdown(srv *http.Server) {
 }
 
 // OpenBrowser best-effort opens the default browser at url. Failure is ignored:
-// the caller has already printed the URL for the user to open manually.
-func OpenBrowser(url string) {
+// the caller has already printed the URL for the user to open manually. It is a var
+// so tests can stub the launch out rather than spawning a real browser.
+var OpenBrowser = func(url string) {
 	var cmd string
 	var args []string
 	switch runtime.GOOS {

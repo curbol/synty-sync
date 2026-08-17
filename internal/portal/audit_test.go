@@ -49,6 +49,27 @@ func TestResolveTransportErrorHidesURL(t *testing.T) {
 	}
 }
 
+// A library or item page URL carries the customer id in its path, and a connection
+// refused / DNS / TLS failure arrives as a *url.Error that quotes the whole URL back.
+// That is the path every real network failure takes, and it is separate from the
+// status-code path a 4xx exercises.
+func TestGetBodyRedactsCustomerIDOnTransportError(t *testing.T) {
+	fastBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close() // force a dial failure
+
+	const id = "9876543"
+	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: id}
+	_, err := c.Enumerate(context.Background())
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), id) {
+		t.Errorf("customer id leaked on a transport error: %q", err)
+	}
+}
+
 // A rate limit is transient: it must back off and retry, not fail the run like a
 // permanent 4xx.
 func TestGetBodyRetriesRateLimit(t *testing.T) {

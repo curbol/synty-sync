@@ -6,12 +6,20 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
 )
+
+// Serve launches a browser at the address it binds. Left alone, every test here
+// would open a real tab at a URL that dies with the test.
+func TestMain(m *testing.M) {
+	OpenBrowser = func(string) {}
+	os.Exit(m.Run())
+}
 
 func TestServeRendersAndSaves(t *testing.T) {
 	packs := []model.Pack{
@@ -111,6 +119,58 @@ func TestSaveRejectsNonPost(t *testing.T) {
 	case chosen := <-done:
 		t.Errorf("GET /save unblocked Serve with %v; the caller would disable every pack", chosen)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A tab left open from an earlier run posts the slugs it was rendered with. Those
+// no longer name anything owned, and returning them would hand back a set that looks
+// like a deliberate choice while selecting nothing, instead of the empty submission
+// the caller knows how to refuse.
+func TestSaveIgnoresUnknownSlugs(t *testing.T) {
+	packs := []model.Pack{
+		{Slug: "current", DisplayName: "Current"},
+		{Slug: "other", DisplayName: "Other"},
+	}
+	for _, tc := range []struct {
+		name string
+		addr string
+		post []string
+		want map[string]bool
+	}{
+		{"every slug is stale", "localhost:18791", []string{"long-gone", "also-gone"}, map[string]bool{}},
+		{"a stale slug alongside a real one", "localhost:18792", []string{"current", "long-gone"}, map[string]bool{"current": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			done := make(chan map[string]bool, 1)
+			go func() {
+				chosen, _ := Serve(ctx, tc.addr, packs, map[string]bool{"current": true})
+				done <- chosen
+			}()
+			waitForListener(t, tc.addr)
+
+			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			select {
+			case chosen := <-done:
+				if len(chosen) != len(tc.want) {
+					t.Fatalf("chosen = %v, want %v", chosen, tc.want)
+				}
+				for slug := range tc.want {
+					if !chosen[slug] {
+						t.Errorf("chosen = %v, want it to keep %q", chosen, slug)
+					}
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Serve did not return after save")
+			}
+		})
 	}
 }
 

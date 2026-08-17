@@ -287,6 +287,12 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 	if concurrency < 1 {
 		concurrency = 1
 	}
+	// One failed pack ends the run, so stop the queue behind it. Every pack is
+	// launched at once and only the semaphore staggers them, so without this a
+	// library's worth of item pages is still fetched, with retries, for a run that
+	// has already decided to abort.
+	fetchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	out := make([]packWithFiles, len(packs))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -298,7 +304,10 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			files, err := c.ItemFiles(ctx, p)
+			if fetchCtx.Err() != nil {
+				return
+			}
+			files, err := c.ItemFiles(fetchCtx, p)
 			if err == nil && len(files) == 0 {
 				// Rebuilding a pack from an empty list erases every entry it holds, and
 				// an owned pack always ships at least one downloadable file, so this is
@@ -311,6 +320,7 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 					firstErr = fmt.Errorf("item page for %s: %w", p.Slug, err)
 				}
 				mu.Unlock()
+				cancel()
 				return
 			}
 			out[i] = packWithFiles{pack: p, files: files}
@@ -319,6 +329,12 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 	wg.Wait()
 	if firstErr != nil {
 		return nil, firstErr
+	}
+	// A pack skipped on the way out leaves a zero entry behind, which reads
+	// downstream as a pack that owns no files and rebuilds its lockfile record as
+	// empty. Only an interrupted run gets here with nothing to report.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
