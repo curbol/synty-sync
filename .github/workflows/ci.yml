@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A push to a PR branch would otherwise run twice (once for the push, once for the
+# pull_request); superseded runs on the same ref are also pointless once a newer
+# commit exists.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - run: go build ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      # syncer fans out with a WaitGroup and a mutex, so the suite is worth running
+      # under the detector. No network or session is needed: the tests run against
+      # httptest servers and the committed testdata fixtures.
+      - run: go test -race ./...
