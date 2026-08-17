@@ -103,6 +103,7 @@ type resolved struct {
 	cachePath string
 	sha       string
 	size      int64
+	version   string
 	now       bool
 }
 
@@ -111,6 +112,14 @@ type resolved struct {
 func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath string, opts Options) (Report, error) {
 	if opts.PackSelected == nil {
 		return Report{}, fmt.Errorf("syncer: PackSelected is required (selection is opt-in)")
+	}
+	if opts.Filter == nil {
+		return Report{}, fmt.Errorf("syncer: Filter is required (variant_includes has no default)")
+	}
+	if opts.OnlyGlob != "" {
+		if _, err := filepath.Match(opts.OnlyGlob, ""); err != nil {
+			return Report{}, fmt.Errorf("bad --only pattern %q: %w", opts.OnlyGlob, err)
+		}
 	}
 	progress := opts.Progress
 	if progress == nil {
@@ -196,7 +205,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		if _, done := adoptedByID[id]; done {
 			continue
 		}
-		if _, hasPrior := priorByID[id]; hasPrior {
+		if prior, hasPrior := priorByID[id]; hasPrior && prior.Tracked {
 			continue // classify handles tracked files (Unchanged / Changed / CacheMissing)
 		}
 		f := selectedByID[id][0].file
@@ -216,6 +225,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		adoptedByID[id] = resolved{cachePath: rel, sha: sha, size: size, now: true}
 	}
 
+	var pruneWarnings []string
 	for _, id := range selOrder {
 		rep := selectedByID[id][0].file
 		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}
@@ -224,6 +234,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			fd.Class = Adopted
 			report.Diffs = append(report.Diffs, fd)
 			report.Adopted = append(report.Adopted, fd)
+			r.version = rep.Version
 			resolvedByID[id] = r
 			continue
 		}
@@ -234,7 +245,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 		switch {
 		case fd.Class == Unchanged:
-			resolvedByID[id] = resolved{cachePath: prior.CachePath, sha: prior.SHA256, size: prior.SizeBytes}
+			resolvedByID[id] = resolved{cachePath: prior.CachePath, sha: prior.SHA256, size: prior.SizeBytes, version: rep.Version}
 		case opts.DryRun:
 			// classify only; nothing resolved
 		default:
@@ -244,15 +255,20 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 				return Report{}, fmt.Errorf("download %s: %w", rep.Key(), err)
 			}
 			if fd.Class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
-				_ = cache.Remove(opts.LibraryRoot, prior.CachePath)
+				// Best-effort, but not silent: a prune that fails leaves the prior
+				// version in the cache with nothing recording it.
+				if err := cache.Remove(opts.LibraryRoot, prior.CachePath); err != nil {
+					pruneWarnings = append(pruneWarnings, fmt.Sprintf("could not remove the prior %s: %v", prior.CachePath, err))
+				}
 			}
+			r.version = rep.Version
 			resolvedByID[id] = r
 			report.Downloaded = append(report.Downloaded, fd)
 		}
 	}
 
 	buildLockfile(&report, packFiles, opts, resolvedByID, lf)
-	report.Warnings = warnings(packFiles, opts.Filter)
+	report.Warnings = append(warnings(packFiles, opts.Filter), pruneWarnings...)
 
 	if !opts.DryRun {
 		if err := lockfile.Save(lockPath, report.NewLockfile); err != nil {
@@ -283,6 +299,12 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			files, err := c.ItemFiles(ctx, p)
+			if err == nil && len(files) == 0 {
+				// Rebuilding a pack from an empty list erases every entry it holds, and
+				// an owned pack always ships at least one downloadable file, so this is
+				// markup we failed to read rather than a pack with nothing in it.
+				err = fmt.Errorf("no files parsed (markup may have changed)")
+			}
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -359,7 +381,14 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 		}
 		carried := lockfile.Pack{DisplayName: p.DisplayName, OrderID: p.OrderID, OrderItemID: p.OrderItemID, Files: map[string]lockfile.File{}}
 		for key, f := range p.Files {
-			if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked && f.CachePath != r.cachePath {
+			// The question is whether this fileId was re-resolved on this run, not
+			// whether its path moved: a re-fetch to the same filename still changes the
+			// bytes, and the version has to travel with them or the carried entry ends
+			// up naming one version against another version's sha.
+			if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked {
+				if r.version != "" {
+					f.Version = r.version
+				}
 				f.CachePath = r.cachePath
 				f.SHA256 = r.sha
 				f.SizeBytes = r.size

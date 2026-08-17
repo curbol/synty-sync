@@ -25,21 +25,36 @@ func TestClassify(t *testing.T) {
 	av := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", Version: "v2", FileID: 9}
 	cacheHit := func(string, string) bool { return true }
 	cacheMiss := func(string, string) bool { return false }
+	tracked := func(version string) lockfile.File {
+		return lockfile.File{Tracked: true, Version: version, CachePath: "p", SHA256: "s"}
+	}
+	// A cache check that fails the test if consulted, for the branches that must
+	// decide before ever touching the disk.
+	neverCalled := func(string, string) bool {
+		t.Error("cacheOK consulted on a branch that should decide without it")
+		return false
+	}
 
-	if c := classify(av, lockfile.File{}, false, cacheHit); c != New {
-		t.Errorf("no prior => %v, want New", c)
-	}
-	if c := classify(av, lockfile.File{Tracked: false, Version: "v2"}, true, cacheHit); c != DownloadNow {
-		t.Errorf("untracked prior => %v, want DownloadNow", c)
-	}
-	if c := classify(av, lockfile.File{Tracked: true, Version: "v1", CachePath: "p", SHA256: "s"}, true, cacheHit); c != Changed {
-		t.Errorf("version differs => %v, want Changed", c)
-	}
-	if c := classify(av, lockfile.File{Tracked: true, Version: "v2", CachePath: "p", SHA256: "s"}, true, cacheMiss); c != CacheMissing {
-		t.Errorf("cache gone => %v, want CacheMissing", c)
-	}
-	if c := classify(av, lockfile.File{Tracked: true, Version: "v2", CachePath: "p", SHA256: "s"}, true, cacheHit); c != Unchanged {
-		t.Errorf("all match => %v, want Unchanged", c)
+	for _, tc := range []struct {
+		name     string
+		prior    lockfile.File
+		hasPrior bool
+		cacheOK  func(string, string) bool
+		want     Class
+	}{
+		{"no prior at all", lockfile.File{}, false, neverCalled, New},
+		{"prior was filtered out", lockfile.File{Version: "v2"}, true, neverCalled, DownloadNow},
+		{"untracked prior also outdated stays DownloadNow", lockfile.File{Version: "v1"}, true, neverCalled, DownloadNow},
+		{"version bumped", tracked("v1"), true, neverCalled, Changed},
+		{"same version, bytes gone", tracked("v2"), true, cacheMiss, CacheMissing},
+		{"same version, no recorded path", lockfile.File{Tracked: true, Version: "v2"}, true, neverCalled, CacheMissing},
+		{"everything matches", tracked("v2"), true, cacheHit, Unchanged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classify(av, tc.prior, tc.hasPrior, tc.cacheOK); got != tc.want {
+				t.Errorf("classify = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -75,7 +90,16 @@ const emptyAuthPage = `<!doctype html><html><body><div class='sky-pilot'>` + sea
 
 const logoutShell = `<!doctype html><html><body><h1>Login</h1><form action='/account/login'></form></body></html>`
 
-type serverOpts struct{ page1 string }
+// serverOpts tunes the fixture store. itemHTML replaces the fixture served for a
+// given order_item id, so a test can bump a version or break one pack's markup
+// without hand-rolling a second mux. downloadName overrides the served filename for
+// a fileId, so a test can use Synty's real <token>_<variant>_<version>.zip shape
+// (which is what the cache matches on) instead of the default fileId-based name.
+type serverOpts struct {
+	page1        string
+	itemHTML     func(orderItem string) (string, bool)
+	downloadName func(fileID string) (string, bool)
+}
 
 func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 	t.Helper()
@@ -97,6 +121,12 @@ func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
+		if opts.itemHTML != nil {
+			if html, ok := opts.itemHTML(m[1]); ok {
+				fmt.Fprint(w, html)
+				return
+			}
+		}
 		name, ok := itemFixtureByOrderItem[m[1]]
 		if !ok {
 			http.NotFound(w, r)
@@ -114,7 +144,13 @@ func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
-		http.Redirect(w, r, "/files/"+m[1]+".zip", http.StatusFound)
+		name := m[1] + ".zip"
+		if opts.downloadName != nil {
+			if n, ok := opts.downloadName(m[1]); ok {
+				name = n
+			}
+		}
+		http.Redirect(w, r, "/files/"+name, http.StatusFound)
 	})
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment")
@@ -398,7 +434,7 @@ func TestBuildLockfileRepointsCarriedBundledFile(t *testing.T) {
 		pack:  model.Pack{Slug: "in"},
 		files: []model.FileEntry{{FileToken: "T", Variant: "V", FileID: 42, Version: "v2"}},
 	}}
-	resolvedByID := map[int]resolved{42: {cachePath: "T/new.zip", sha: "newsha", size: 10, now: true}}
+	resolvedByID := map[int]resolved{42: {cachePath: "T/new.zip", sha: "newsha", size: 10, version: "v2", now: true}}
 	opts := Options{Filter: func(model.Variant) bool { return true }, Now: "now"}
 	report := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
 
@@ -407,6 +443,11 @@ func TestBuildLockfileRepointsCarriedBundledFile(t *testing.T) {
 	got := report.NewLockfile.Packs["out"].Files["T|V"]
 	if got.CachePath != "T/new.zip" || got.SHA256 != "newsha" {
 		t.Errorf("carried out-of-scope pack not repointed to the new path: %+v", got)
+	}
+	// The version travels with the bytes: leaving v1 here would name one version
+	// against another version's sha, and split the two owning packs' records.
+	if got.Version != "v2" {
+		t.Errorf("carried entry version = %q, want v2 to match the bytes it now points at", got.Version)
 	}
 }
 
