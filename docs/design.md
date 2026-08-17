@@ -80,7 +80,9 @@ synty-sync version  # print the installed version.
 Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
 from cwd), `--config <dir>` (user config dir), `--cookies <curl|file>` (override session
 source), `--only <pack-glob>`, `--dry-run` (alias of `status` semantics on `sync`),
-`--concurrency <n>`, `--library <path>`.
+`--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the local page's address:
+`select` serves on 8787, `browse` on 8788). Subcommands take no positional arguments, so a
+stray one is an error rather than silently swallowing the flags after it.
 
 ## Run flow
 
@@ -185,6 +187,10 @@ is missing or fails its sha check on disk re-downloads instead of being reported
 The existing flat zips in the library are migrated into this layout on first run
 (matched by a normalized filename key, since the real names render the variant unlike the
 item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` collision suffixes).
+Migration never replaces a copy already in the layout: the match is on name alone, and the
+adopted file's hash is what gets recorded, so overwriting would let a stale flat zip be
+adopted as verified content. Cache paths read back from the lockfile are confined to the
+library root before use, since that file is committed and travels with the project.
 
 ## Download integrity
 
@@ -200,15 +206,22 @@ interrupted download leaves only the temp file, so the next run re-fetches.
 
 - **Expired session vs terminator:** the terminator is a page with zero order_item anchors;
   enumeration walks until one (a short page is not the terminator). The logged-in sentinel
-  (the real `.sky-pilot-search-input` element, the "Search My Products" box) is checked only
-  on **page 1's** zero-anchor case to tell an empty library (sentinel present) from an
-  expired session (absent → exit with "refresh your session", do not overwrite the
-  lockfile). The page past the last is a bare overflow shell with neither the heading nor a
-  real search element nor anchors (confirmed live), so no per-page element can mark the
-  terminator; zero anchors does.
+  (the real `.sky-pilot-search-input` element, the "Search My Products" box) is checked on
+  **every** zero-anchor page to tell a legitimate end-of-walk (sentinel present: an empty
+  library on page 1, the overflow page beyond the last otherwise) from an expired session
+  (absent → exit with "refresh your session", do not overwrite the lockfile). The page past
+  the last drops the "Your Library" heading but keeps the search box, so the sentinel is a
+  reliable per-page marker while the heading is not; a session that expires mid-walk is
+  therefore caught rather than read as the terminator, which would silently truncate the
+  library and, through `select`, drop the user's enabled flags. The walk also stops if a
+  page adds no packs it has not already seen, so a paginator that clamps an out-of-range
+  page cannot loop forever.
 - **Changed markup:** parsing is defensive and asserts invariants (each tracked row yields a
   `fileId` and a version). A parse that yields zero files for a non-empty page is a loud
-  error, not a silent skip.
+  error, not a silent skip — enforced at both layers: the item parser fails when a page has
+  rows but none carry a version label (the file-heading class moving would otherwise make
+  every row look like a versionless icon row), and the syncer refuses a pack that reaches it
+  with no files at all, since rebuilding one from an empty list erases every entry it holds.
 - **Partial / corrupt downloads:** temp-file + atomic-rename + size/sha verification, as above.
 - **Politeness:** capped concurrency, small inter-request delay, honor obvious rate limits.
 
@@ -287,7 +300,10 @@ lightbox "parts of this set" strip); `POST /api/link {fingerprints, on}` links o
 The store never prunes to a currently-scanned set: assignments and groups for fingerprints
 outside the current view are preserved, so tags and links survive a disabled pack, a narrowed
 `--root`, or another machine. `browse` is otherwise read-only; this is its one write surface,
-guarded by a mutex and written atomically. Tagging is disabled (the UI hides it) when no manifest
+guarded by a mutex and written atomically. Because `browse` has no session, the write
+endpoints require an `application/json` content-type, which forces a CORS preflight the
+server does not answer and so keeps a page the user happens to have open from writing to
+the store; a failed save reloads from disk rather than leaving memory ahead of it. Tagging is disabled (the UI hides it) when no manifest
 neighborhood is found, so `browse` still needs no manifest.
 
 ## Testing
