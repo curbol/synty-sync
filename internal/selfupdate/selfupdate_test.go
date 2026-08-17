@@ -28,7 +28,12 @@ func TestPlatformAssetSelectsCurrentOS(t *testing.T) {
 		"linux":   map[string]string{"amd64": "u/linux-intel", "arm64": "u/linux-arm64"}[runtime.GOARCH],
 		"windows": "u/win",
 	}[runtime.GOOS]
-	if want != "" && url != want {
+	// Skip rather than pass silently: an unmapped GOOS/GOARCH means this test asserts
+	// nothing, and a quiet no-op is worse than a visible gap.
+	if want == "" {
+		t.Skipf("no expected asset mapped for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if url != want {
 		t.Errorf("platformAsset = %q, want %q for %s/%s", url, want, runtime.GOOS, runtime.GOARCH)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -26,12 +25,7 @@ func TestDeriveVariant(t *testing.T) {
 }
 
 func TestGLBClipSplit(t *testing.T) {
-	root := t.TempDir()
-	mk := func(p ...string) string {
-		full := filepath.Join(append([]string{root}, p...)...)
-		os.MkdirAll(filepath.Dir(full), 0o755)
-		return full
-	}
+	root, mk := libRoot(t)
 	writeGLB(t, mk("quaternius", "UAL", "UAL1.glb"), "Walk", "Run", "Idle") // multi-anim -> split into clips
 	writeGLB(t, mk("quaternius", "UAL", "UAL1_RM.glb"), "Walk", "Run")      // _RM sibling -> kept whole
 	writeGLB(t, mk("quaternius", "UAL", "Prop.glb"), "Spin")                // single anim -> kept whole
@@ -159,12 +153,7 @@ func byName(assets []Asset) map[string][]Asset {
 }
 
 func TestScanImageDimensions(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 
 	// A loose png, a png inside a zip, and a png inside a unitypackage — each a
 	// distinct size so the source can't be confused. The unitypackage helper writes
@@ -202,12 +191,7 @@ func TestScanImageDimensions(t *testing.T) {
 }
 
 func TestScanFixtureLibrary(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 
 	// synty zip variant (SourceFiles): a heart model + a sprite.
 	writeZip(t, mk("synty", "Foo_Pack", "Foo_Pack_SourceFiles_v3.zip"), map[string]string{

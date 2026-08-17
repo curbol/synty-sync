@@ -320,3 +320,31 @@ func TestPruneUnpackedDropsStaleExtractions(t *testing.T) {
 		t.Errorf("stale extraction %s survived the prune (err=%v)", stale, err)
 	}
 }
+
+// The lexical check alone would pass a path that sits inside the root but points
+// out of it. underRoot resolves symlinks first; only a test with a real symlink
+// proves that, and the existing outside-root test uses a plain path the lexical
+// check would already catch.
+func TestOpenRejectsSymlinkEscapingRoot(t *testing.T) {
+	root, mk := libRoot(t)
+	os.WriteFile(mk("v", "Pack", "Sword.glb"), []byte("GLBBYTES"), 0o644)
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "v", "Pack", "innocent.glb")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	ix, err := Build(root, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The path is lexically inside the root; only resolving it reveals the escape.
+	bad := Asset{Source: Source{Kind: SourceLoose, FilePath: link}}
+	if _, _, err := ix.Open(bad); err != ErrOutsideRoot {
+		t.Errorf("Open through a symlink out of the root err = %v, want ErrOutsideRoot", err)
+	}
+}

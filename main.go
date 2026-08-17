@@ -189,12 +189,7 @@ func sessionSource(cfg config.Config, override string) string {
 func newPortalClient(customerID, cookie string) *portal.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = 60 * time.Second
-	return &portal.Client{
-		HTTP:       &http.Client{Transport: tr},
-		BaseURL:    "https://syntystore.com",
-		CustomerID: customerID,
-		Cookie:     cookie,
-	}
+	return portal.New(&http.Client{Transport: tr}, "https://syntystore.com", customerID, cookie)
 }
 
 // runSyncOrStatus loads the manifest and lockfile, runs the diff (downloading unless

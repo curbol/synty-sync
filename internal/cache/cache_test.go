@@ -9,21 +9,44 @@ import (
 	"testing"
 )
 
-func TestStoreRejectsUnsafeFilename(t *testing.T) {
+// Both components of a cache path are portal-derived: the filename from the signed
+// URL, the token from item-page label text. They go through one guard, so they are
+// tested as one table — a third component added to safeIdentity cannot then be
+// covered in only half the cases.
+func TestStoreRejectsUnsafePathComponents(t *testing.T) {
+	for _, tc := range []struct{ what, token, filename string }{
+		{"filename traversal", "TOKEN", "../evil.zip"},
+		{"filename nested", "TOKEN", "sub/evil.zip"},
+		{"filename dotdot", "TOKEN", ".."},
+		{"filename dot", "TOKEN", "."},
+		{"filename empty", "TOKEN", ""},
+		{"token dotdot", "..", "pack.zip"},
+		{"token traversal", "../escaped", "pack.zip"},
+		{"token nested", "a/b", "pack.zip"},
+		{"token empty", "", "pack.zip"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "library")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := Store(root, tc.token, tc.filename, strings.NewReader("x")); err == nil {
+				t.Errorf("Store accepted token=%q filename=%q", tc.token, tc.filename)
+			}
+			for _, escaped := range []string{filepath.Join(base, "evil.zip"), filepath.Join(base, "escaped")} {
+				if _, err := os.Stat(escaped); err == nil {
+					t.Errorf("a write escaped the library root to %s", escaped)
+				}
+			}
+		})
+	}
+
+	// A bare token and filename still store normally.
 	root := t.TempDir()
-	for _, name := range []string{"../evil.zip", "sub/evil.zip", "..", ".", ""} {
-		if _, _, _, err := Store(root, "TOKEN", name, strings.NewReader("x")); err == nil {
-			t.Errorf("Store accepted unsafe filename %q", name)
-		}
-	}
-	// Nothing escaped the library root.
-	if _, err := os.Stat(filepath.Join(root, "evil.zip")); err == nil {
-		t.Error("a traversal filename wrote outside the token dir")
-	}
-	// A bare filename still stores normally.
 	rel, _, _, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("x"))
 	if err != nil {
-		t.Fatalf("Store rejected a valid filename: %v", err)
+		t.Fatalf("Store rejected a valid path: %v", err)
 	}
 	if rel != "TOKEN/pack.zip" {
 		t.Errorf("relPath = %q, want TOKEN/pack.zip", rel)

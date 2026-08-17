@@ -1,8 +1,6 @@
 package assetindex
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -43,12 +41,7 @@ func TestParseSidekickEmpty(t *testing.T) {
 // category, sidekick thumb, and Source.Parts listing the FBX parts' ids in the same
 // package. The character's own id/fingerprint stay tied to the .sk guid (stable).
 func TestScanSidekickCharacter(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 
 	sk := "Name: Warrior_01\nParts:\n- Name: SK_HEAD\n- Name: SK_TORS\n- Name: SK_MISSING\n"
 	writeUnityPackage(t, mk("synty", "SIDEKICK_X", "SIDEKICK_X_Unity_2021_3_v1_0_0.unitypackage"), []unityGUID{
@@ -91,12 +84,7 @@ func TestScanSidekickCharacter(t *testing.T) {
 // dropped in favour of the assembled .sk character. The reusable parts (Resources/)
 // and the character's textures stay browseable.
 func TestScanSidekickDeclutter(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 	base := "Assets/Synty/SidekickCharacters/"
 	writeUnityPackage(t, mk("synty", "SIDEKICK_X", "SIDEKICK_X_Unity_2021_3_v1_0_0.unitypackage"), []unityGUID{
 		{guid: "sk1", pathname: base + "Characters/W/W_01/W_01.sk", asset: "Name: W_01\nParts:\n- Name: SK_HEAD\n"},

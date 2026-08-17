@@ -43,13 +43,28 @@ func StatusOf(err error) (int, bool) {
 
 const shopParam = "synty-store.myshopify.com"
 
-// Client talks to the Sky Pilot portal with an authenticated cookie.
+// Client talks to the Sky Pilot portal with an authenticated cookie. Build one with
+// New: it supplies the two things a zero value gets wrong, a non-nil HTTP client and
+// a BaseURL without a trailing slash (the request URLs are built by concatenation).
 type Client struct {
 	HTTP       *http.Client
 	BaseURL    string // e.g. https://syntystore.com (no trailing slash)
 	CustomerID string
 	Cookie     string
 	UserAgent  string
+}
+
+// New returns a Client for baseURL. A nil httpClient means http.DefaultClient.
+func New(httpClient *http.Client, baseURL, customerID, cookie string) *Client {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &Client{
+		HTTP:       httpClient,
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		CustomerID: customerID,
+		Cookie:     cookie,
+	}
 }
 
 func (c *Client) ua() string {

@@ -257,3 +257,62 @@ func TestReplaceBinaryClearsAStaleAside(t *testing.T) {
 		t.Errorf("binary content = %q, want the new one", got)
 	}
 }
+
+// The gh CLI is the last tier of token resolution and the one most likely to break,
+// and it was the only tier with no coverage. A stub gh on PATH exercises both the
+// success path and the "gh present but not logged in" path.
+func TestResolveTokenFallsBackToGhCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub is POSIX-only")
+	}
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+
+	stubDir := t.TempDir()
+	writeGh := func(script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(stubDir, "gh"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", stubDir)
+
+	writeGh("#!/bin/sh\necho gh-cli-token\n")
+	if got := resolveToken(); got != "gh-cli-token" {
+		t.Errorf("token = %q, want the gh CLI's", got)
+	}
+
+	// Not logged in: gh exits non-zero, and the caller must get "" rather than gh's
+	// error text masquerading as a token.
+	writeGh("#!/bin/sh\necho 'not logged in' >&2\nexit 1\n")
+	if got := resolveToken(); got != "" {
+		t.Errorf("token = %q, want empty when gh fails", got)
+	}
+
+	// No gh at all.
+	t.Setenv("PATH", t.TempDir())
+	if got := resolveToken(); got != "" {
+		t.Errorf("token = %q, want empty with no gh on PATH", got)
+	}
+}
+
+// The env tiers must still win over the CLI.
+func TestResolveTokenPrefersEnvOverGhCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub is POSIX-only")
+	}
+	stubDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubDir, "gh"), []byte("#!/bin/sh\necho gh-cli-token\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+	t.Setenv("GH_TOKEN", "from-gh-token")
+	t.Setenv("GITHUB_TOKEN", "")
+	if got := resolveToken(); got != "from-gh-token" {
+		t.Errorf("token = %q, want GH_TOKEN to beat the CLI", got)
+	}
+	t.Setenv("GITHUB_TOKEN", "from-github-token")
+	if got := resolveToken(); got != "from-github-token" {
+		t.Errorf("token = %q, want GITHUB_TOKEN to win outright", got)
+	}
+}

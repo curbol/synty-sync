@@ -3,7 +3,6 @@ package assetindex
 import (
 	"hash/crc32"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -21,12 +20,7 @@ func fpByName(assets []Asset) map[string]string {
 }
 
 func TestFingerprintPerSourceKind(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 
 	writeZip(t, mk("synty", "Foo_Pack", "Foo_Pack_SourceFiles_v3.zip"), map[string]string{
 		"SourceFiles/Models/Heart.fbx": "FBXHEARTDATA",
@@ -52,12 +46,7 @@ func TestFingerprintPerSourceKind(t *testing.T) {
 // Byte-identical content shares one fingerprint across packs and across the
 // zip/loose boundary, so a tag set on one copy applies to every copy.
 func TestFingerprintSharedForIdenticalBytes(t *testing.T) {
-	root := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
+	root, mk := libRoot(t)
 	writeZip(t, mk("synty", "A", "A.zip"), map[string]string{"Models/Tree.fbx": "TREEBYTES"})
 	writeZip(t, mk("synty", "B", "B.zip"), map[string]string{"Models/Tree.fbx": "TREEBYTES"})
 	os.WriteFile(mk("synty", "C", "loose", "Tree.fbx"), []byte("TREEBYTES"), 0o644)
@@ -73,14 +62,11 @@ func TestFingerprintSharedForIdenticalBytes(t *testing.T) {
 // A cold Build and a Refresh over an unchanged tree yield identical fingerprints,
 // and a changed loose file's fingerprint is recomputed.
 func TestFingerprintStableAndRefreshRecomputes(t *testing.T) {
-	root := t.TempDir()
+	root, mk := libRoot(t)
 	cacheDir := t.TempDir()
-	loose := filepath.Join(root, "explosive", "RPG", "Sword.glb")
-	os.MkdirAll(filepath.Dir(loose), 0o755)
+	loose := mk("explosive", "RPG", "Sword.glb")
 	os.WriteFile(loose, []byte("GLBSWORD"), 0o644)
-	zipPath := filepath.Join(root, "synty", "A", "A.zip")
-	os.MkdirAll(filepath.Dir(zipPath), 0o755)
-	writeZip(t, zipPath, map[string]string{"Models/Tree.fbx": "TREEBYTES"})
+	writeZip(t, mk("synty", "A", "A.zip"), map[string]string{"Models/Tree.fbx": "TREEBYTES"})
 
 	ix, err := Build(root, cacheDir)
 	if err != nil {

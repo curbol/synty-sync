@@ -11,13 +11,8 @@ import (
 // buildFixture creates a small library and returns a built index plus its root.
 func buildFixture(t *testing.T) (*Index, string) {
 	t.Helper()
-	root := t.TempDir()
+	root, mk := libRoot(t)
 	cacheDir := t.TempDir()
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
 	writeZip(t, mk("synty", "Foo_Pack", "Foo_Pack_SourceFiles_v3.zip"), map[string]string{
 		"SourceFiles/Models/Heart.fbx":   "FBXHEARTDATA",
 		"SourceFiles/Textures/Heart.png": "PNGDATA",
@@ -167,14 +162,9 @@ func TestLookupUnknownID(t *testing.T) {
 }
 
 func TestSaveLoadRefresh(t *testing.T) {
-	root := t.TempDir()
+	root, mk := libRoot(t)
 	cacheDir := t.TempDir()
 	cachePath := filepath.Join(cacheDir, "index.json")
-	mk := func(parts ...string) string {
-		p := filepath.Join(append([]string{root}, parts...)...)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		return p
-	}
 	writeZip(t, mk("synty", "P", "P_SourceFiles_v1.zip"), map[string]string{"A/x.fbx": "X"})
 
 	ix, err := LoadOrBuild(root, cacheDir, cachePath, false, nil)

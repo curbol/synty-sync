@@ -9,15 +9,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
 )
 
 func TestGetBodyRetriesTransient(t *testing.T) {
-	old := httpBackoff
-	httpBackoff = time.Millisecond
-	defer func() { httpBackoff = old }()
+	fastBackoff(t)
 
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,9 +40,7 @@ func TestGetBodyRetriesTransient(t *testing.T) {
 }
 
 func TestGetBodyFailsFastOn4xx(t *testing.T) {
-	old := httpBackoff
-	httpBackoff = time.Millisecond
-	defer func() { httpBackoff = old }()
+	fastBackoff(t)
 
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +59,7 @@ func TestGetBodyFailsFastOn4xx(t *testing.T) {
 }
 
 func TestGetBodyRedactsCustomerID(t *testing.T) {
-	old := httpBackoff
-	httpBackoff = time.Millisecond
-	defer func() { httpBackoff = old }()
+	fastBackoff(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

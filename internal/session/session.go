@@ -75,10 +75,28 @@ func FromFile(path string) (string, error) {
 		return "", err
 	}
 	content := string(raw)
-	if strings.Contains(content, "curl ") || curlCookieSingle.MatchString(content) || curlCookieDouble.MatchString(content) {
+	if isCurlPaste(content) {
 		return FromCurl(content)
 	}
 	return FromCookiesTxt(content)
+}
+
+// isCurlPaste distinguishes a pasted curl command from a Netscape cookies.txt by
+// structure rather than by the word "curl" appearing anywhere: an exported
+// cookies.txt often carries a header comment mentioning curl, and treating that as a
+// command sends it to a parser that can only fail.
+func isCurlPaste(content string) bool {
+	if curlCookieSingle.MatchString(content) || curlCookieDouble.MatchString(content) {
+		return true
+	}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return strings.HasPrefix(line, "curl ")
+	}
+	return false
 }
 
 // browserBases maps a session source name to its Gecko profile base dir (relative

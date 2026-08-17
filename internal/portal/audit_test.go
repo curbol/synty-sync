@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -297,5 +298,107 @@ func TestEnumerateEmptyLibrary(t *testing.T) {
 	}
 	if len(packs) != 0 {
 		t.Errorf("packs = %+v, want none", packs)
+	}
+}
+
+// New supplies the two things a zero-value Client gets wrong.
+func TestNewNormalizesTheClient(t *testing.T) {
+	c := New(nil, "https://syntystore.com/", "42", "a=b")
+	if c.HTTP == nil {
+		t.Error("HTTP left nil; a zero-value client panics on first use")
+	}
+	if c.BaseURL != "https://syntystore.com" {
+		t.Errorf("BaseURL = %q, want the trailing slash trimmed (URLs are concatenated)", c.BaseURL)
+	}
+}
+
+// The whole committed capture set walked end to end: five real library pages, the
+// real overflow terminator, and the real anchor shape. The synthetic terminator used
+// elsewhere happens to include the sentinel, which is exactly the fact the paging
+// logic turns on, so only the real pages prove the walk.
+func TestEnumerateWalksTheRealCaptures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("line_items_page")
+		name := "library_empty_authenticated.html"
+		if n, err := strconv.Atoi(page); err == nil && n >= 1 && n <= 5 {
+			name = fmt.Sprintf("library_p%d.html", n)
+		}
+		w.Write(read(t, name))
+	}))
+	defer srv.Close()
+
+	packs, err := New(nil, srv.URL, "1000000000001", "x=y").Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate over the real captures: %v", err)
+	}
+	if len(packs) != 61 {
+		t.Errorf("enumerated %d packs, want the 61 in the captures", len(packs))
+	}
+	seen := map[int]bool{}
+	for _, p := range packs {
+		if p.Slug == "" || p.OrderItemID == 0 || p.ItemURL == "" {
+			t.Errorf("incomplete pack: %+v", p)
+		}
+		if seen[p.OrderItemID] {
+			t.Errorf("duplicate order item %d", p.OrderItemID)
+		}
+		seen[p.OrderItemID] = true
+	}
+}
+
+// A logged-out shell on page 1, using the real capture rather than a stub.
+func TestEnumerateRealLogoutShell(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(read(t, "library_logout_shell.html"))
+	}))
+	defer srv.Close()
+
+	_, err := New(nil, srv.URL, "1000000000001", "x=y").Enumerate(context.Background())
+	if !errors.Is(err, ErrExpiredSession) {
+		t.Errorf("err = %v, want ErrExpiredSession", err)
+	}
+}
+
+// The syncer classifies a download failure by the status it recovers with StatusOf,
+// so the code has to survive the retry.Stop wrapper. Nothing covered that path: the
+// only StatusOf test goes through Resolve, which never touches retry.
+func TestFailFastErrorKeepsItsStatusAndBound(t *testing.T) {
+	fastBackoff(t)
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	_, err := c.getBody(context.Background(), srv.URL)
+	if code, ok := StatusOf(err); !ok || code != http.StatusNotFound {
+		t.Errorf("StatusOf = (%d, %v), want (404, true) through the retry wrapper", code, ok)
+	}
+	if calls != 1 {
+		t.Errorf("a 4xx was attempted %d times, want 1", calls)
+	}
+}
+
+// Exhausting the retries must stop at the bound and still surface the status.
+func TestRetriesAreBounded(t *testing.T) {
+	fastBackoff(t)
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	_, err := c.getBody(context.Background(), srv.URL)
+	if code, ok := StatusOf(err); !ok || code != http.StatusInternalServerError {
+		t.Errorf("StatusOf = (%d, %v), want (500, true)", code, ok)
+	}
+	if int(calls) != httpAttempts {
+		t.Errorf("made %d attempts, want exactly httpAttempts (%d)", calls, httpAttempts)
 	}
 }

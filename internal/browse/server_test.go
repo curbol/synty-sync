@@ -59,6 +59,33 @@ func writeUnity(t *testing.T, path string, guids []struct {
 	os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
+// serverWith builds a library from the files seed writes and serves it read-only,
+// replacing the root/cache/mk/Build/newServer/httptest block these tests would
+// otherwise each repeat.
+func serverWith(t *testing.T, seed func(mk func(...string) string)) *httptest.Server {
+	t.Helper()
+	root := t.TempDir()
+	mk := func(p ...string) string {
+		full := filepath.Join(append([]string{root}, p...)...)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	seed(mk)
+	ix, err := assetindex.Build(root, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := newServer(ix, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	root := t.TempDir()
@@ -166,8 +193,27 @@ func TestSearchAndFacets(t *testing.T) {
 			t.Errorf("non-heart result %q", it.Name)
 		}
 	}
-	if len(r.Facets.Categories) == 0 || len(r.Facets.Vendors) == 0 || len(r.Facets.Variants) == 0 {
-		t.Error("missing facets")
+	// Assert the values, not just that the lists are non-empty: a facet builder
+	// returning one bogus bucket would satisfy a length check.
+	hasFacet := func(buckets []struct {
+		Value string
+		Count int
+	}, value string) bool {
+		for _, b := range buckets {
+			if b.Value == value && b.Count > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasFacet(r.Facets.Vendors, "synty") {
+		t.Errorf("vendor facet missing \"synty\": %v", r.Facets.Vendors)
+	}
+	if !hasFacet(r.Facets.Variants, "SourceFiles") {
+		t.Errorf("variant facet missing \"SourceFiles\": %v", r.Facets.Variants)
+	}
+	if len(r.Facets.Categories) == 0 {
+		t.Errorf("category facet empty: %v", r.Facets.Categories)
 	}
 }
 
@@ -267,29 +313,17 @@ func TestVariantFilterNonLossy(t *testing.T) {
 // The same file shipped in two variants collapses to one grouped item exposing
 // both copy-paths; group=0 shows them separately.
 func TestGroupDuplicates(t *testing.T) {
-	root := t.TempDir()
-	cache := t.TempDir()
-	mk := func(p ...string) string {
-		full := filepath.Join(append([]string{root}, p...)...)
-		os.MkdirAll(filepath.Dir(full), 0o755)
-		return full
-	}
-	writeZip(t, mk("synty", "Dup_Pack", "Dup_Pack_SourceFiles_v3.zip"), map[string]string{
-		"SourceFiles/Coin.fbx": "COINDATA",
+	srv := serverWith(t, func(mk func(...string) string) {
+		writeZip(t, mk("synty", "Dup_Pack", "Dup_Pack_SourceFiles_v3.zip"), map[string]string{
+			"SourceFiles/Coin.fbx": "COINDATA",
+		})
+		writeUnity(t, mk("synty", "Dup_Pack", "Dup_Pack_Unity_2022_3_v1_0_0.unitypackage"), []struct {
+			guid, pathname, asset string
+			preview               bool
+		}{
+			{"g1", "Assets/Dup/Coin.fbx", "COINDATA", false}, // same name + bytes -> same size
+		})
 	})
-	writeUnity(t, mk("synty", "Dup_Pack", "Dup_Pack_Unity_2022_3_v1_0_0.unitypackage"), []struct {
-		guid, pathname, asset string
-		preview               bool
-	}{
-		{"g1", "Assets/Dup/Coin.fbx", "COINDATA", false}, // same name + bytes -> same size
-	})
-	ix, err := assetindex.Build(root, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, _ := newServer(ix, nil, "")
-	srv := httptest.NewServer(s.handler())
-	t.Cleanup(srv.Close)
 
 	grouped := getAssets(t, srv, "q=Coin")
 	if grouped.Total != 1 {
@@ -320,29 +354,17 @@ func TestGroupDuplicates(t *testing.T) {
 // separator Synty's Unity export inserts (Gem09 vs Gem_09); grouping should still
 // fold them together since the bytes (size) match.
 func TestGroupNameVariants(t *testing.T) {
-	root := t.TempDir()
-	cache := t.TempDir()
-	mk := func(p ...string) string {
-		full := filepath.Join(append([]string{root}, p...)...)
-		os.MkdirAll(filepath.Dir(full), 0o755)
-		return full
-	}
-	writeZip(t, mk("synty", "HUD", "HUD_SourceSprites_v3.zip"), map[string]string{
-		"Source_Sprites/SPR_Gem09.png": "SAMEPNGBYTES",
+	srv := serverWith(t, func(mk func(...string) string) {
+		writeZip(t, mk("synty", "HUD", "HUD_SourceSprites_v3.zip"), map[string]string{
+			"Source_Sprites/SPR_Gem09.png": "SAMEPNGBYTES",
+		})
+		writeUnity(t, mk("synty", "HUD", "HUD_Unity_2022_1_v1_0_0.unitypackage"), []struct {
+			guid, pathname, asset string
+			preview               bool
+		}{
+			{"g1", "Assets/Synty/HUD/SPR_Gem_09.png", "SAMEPNGBYTES", false},
+		})
 	})
-	writeUnity(t, mk("synty", "HUD", "HUD_Unity_2022_1_v1_0_0.unitypackage"), []struct {
-		guid, pathname, asset string
-		preview               bool
-	}{
-		{"g1", "Assets/Synty/HUD/SPR_Gem_09.png", "SAMEPNGBYTES", false},
-	})
-	ix, err := assetindex.Build(root, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, _ := newServer(ix, nil, "")
-	srv := httptest.NewServer(s.handler())
-	t.Cleanup(srv.Close)
 
 	grouped := getAssets(t, srv, "q=Gem")
 	if grouped.Total != 1 {
@@ -373,8 +395,10 @@ func TestEmptyVariantFilter(t *testing.T) {
 func TestPagination(t *testing.T) {
 	srv := testServer(t)
 	r := getAssets(t, srv, "limit=1")
+	// Fail rather than skip: the fixture is built by this test, so "too small" means
+	// the fixture regressed, and a skip would hide that.
 	if r.Total <= 1 {
-		t.Skip("fixture too small to paginate")
+		t.Fatalf("fixture has %d assets; pagination needs at least 2", r.Total)
 	}
 	if len(r.Items) != 1 {
 		t.Errorf("limit=1 returned %d items", len(r.Items))
@@ -412,22 +436,9 @@ func pngBytes(t *testing.T, w, h int) []byte {
 // The API carries an image's pixel dimensions, so a consumer gets WxH (and aspect)
 // without decoding the bytes client-side.
 func TestDimensionsExposed(t *testing.T) {
-	root := t.TempDir()
-	cache := t.TempDir()
-	mk := func(p ...string) string {
-		full := filepath.Join(append([]string{root}, p...)...)
-		os.MkdirAll(filepath.Dir(full), 0o755)
-		return full
-	}
-	os.WriteFile(mk("v", "Pack", "Banner.png"), pngBytes(t, 40, 8), 0o644)
-
-	ix, err := assetindex.Build(root, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, _ := newServer(ix, nil, "")
-	srv := httptest.NewServer(s.handler())
-	t.Cleanup(srv.Close)
+	srv := serverWith(t, func(mk func(...string) string) {
+		os.WriteFile(mk("v", "Pack", "Banner.png"), pngBytes(t, 40, 8), 0o644)
+	})
 
 	r := getAssets(t, srv, "q=Banner")
 	if len(r.Items) != 1 {
