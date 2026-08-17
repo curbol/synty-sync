@@ -22,22 +22,31 @@ func RelPath(fileToken, filename string) string {
 	return path.Join(fileToken, filename)
 }
 
-// safeName rejects a portal-supplied filename that is not a bare filename, so a
-// crafted name (a "../" or a nested path) cannot escape the cache root when joined
-// to the destination dir. The portal already reduces both filename sources to a
-// basename; this is the hard boundary that backstops it.
-func safeName(filename string) error {
-	if filename == "" || filename == "." || filename == ".." || strings.ContainsAny(filename, `/\`) {
-		return fmt.Errorf("unsafe download filename %q", filename)
+// safeName rejects a portal-supplied path component that is not a bare name, so a
+// crafted one (a "../" or a nested path) cannot escape the cache root when joined to
+// the library root. Both components are portal-derived — the filename from the signed
+// URL or Content-Disposition, the file token from item-page label text — so both are
+// checked here rather than trusting the parser upstream.
+func safeName(kind, name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("unsafe %s %q", kind, name)
 	}
 	return nil
+}
+
+// safeIdentity checks both components of a cache path together.
+func safeIdentity(fileToken, filename string) error {
+	if err := safeName("file token", fileToken); err != nil {
+		return err
+	}
+	return safeName("download filename", filename)
 }
 
 // Store streams r into <libraryRoot>/<fileToken>/<filename> via a temp file in the
 // destination dir, hashing while writing and renaming atomically. It returns the
 // relative cache path, the sha256, and the byte count.
 func Store(libraryRoot, fileToken, filename string, r io.Reader) (relPath, sha string, size int64, err error) {
-	if err := safeName(filename); err != nil {
+	if err := safeIdentity(fileToken, filename); err != nil {
 		return "", "", 0, err
 	}
 	rel := RelPath(fileToken, filename)
@@ -153,6 +162,9 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	}
 	byNorm := map[string]Wanted{}
 	for _, w := range wanted {
+		if safeName("file token", w.FileToken) != nil {
+			continue
+		}
 		key := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
 		byNorm[key] = w
 	}
@@ -185,6 +197,9 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 // files already in the layout that no lockfile records, instead of re-downloading them.
 // The extension is stripped before normalizing, so both .zip and .unitypackage match.
 func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
+	if safeName("file token", w.FileToken) != nil {
+		return "", false
+	}
 	dir := filepath.Join(libraryRoot, filepath.FromSlash(w.FileToken))
 	entries, err := os.ReadDir(dir)
 	if err != nil {

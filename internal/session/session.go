@@ -20,12 +20,18 @@ import (
 
 const cookieHost = "syntystore.com"
 
+// httpOnlyPrefix marks an HttpOnly cookie in a Netscape cookies.txt.
+const httpOnlyPrefix = "#HttpOnly_"
+
 // FromCookiesTxt parses a Netscape cookies.txt and returns the Cookie header for
 // syntystore.com.
 func FromCookiesTxt(content string) (string, error) {
 	pairs := map[string]string{}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
+		// "#HttpOnly_<domain>" is a record, not a comment: exporters mark HttpOnly
+		// cookies this way, and the storefront session cookie is one of them.
+		line = strings.TrimPrefix(line, httpOnlyPrefix)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -121,16 +127,19 @@ func geckoCookieHeader(dbPath string) (string, error) {
 		return "", fmt.Errorf("cookies.sqlite not found at %s: %w", dbPath, err)
 	}
 	// Copy first: a running browser holds a lock on the live DB.
-	tmp, err := copyToTemp(dbPath)
+	dir, copied, err := copyDBToTemp(dbPath)
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp)
-	return readSQLiteCookies(tmp)
+	defer os.RemoveAll(dir)
+	return readSQLiteCookies(copied)
 }
 
 func readSQLiteCookies(dbPath string) (string, error) {
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&immutable=1")
+	// mode=ro, not immutable=1: immutable tells SQLite the file cannot change and so
+	// skips WAL recovery, which would hide every write the browser has not yet
+	// checkpointed into the main file. The path is a private copy, so ro is enough.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		return "", err
 	}
@@ -183,26 +192,52 @@ func joinCookies(pairs map[string]string) (string, error) {
 	return b.String(), nil
 }
 
-func copyToTemp(src string) (string, error) {
+// walSidecars are the files SQLite keeps beside a WAL-mode database. A running
+// browser can hold recent cookie writes in -wal for the whole session, so the copy
+// has to bring them along or it reads a stale snapshot.
+var walSidecars = []string{"-wal", "-shm"}
+
+// copyDBToTemp copies a SQLite database and its WAL sidecars into a fresh temp
+// directory, keeping the basename so SQLite finds the sidecars on open. It returns
+// the directory to remove and the path of the copied database.
+func copyDBToTemp(src string) (dir, dbPath string, err error) {
+	dir, err = os.MkdirTemp("", "synty-cookies-")
+	if err != nil {
+		return "", "", err
+	}
+	base := filepath.Base(src)
+	dbPath = filepath.Join(dir, base)
+	if err := copyFile(src, dbPath); err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
+	}
+	for _, suffix := range walSidecars {
+		if _, err := os.Stat(src + suffix); err != nil {
+			continue
+		}
+		if err := copyFile(src+suffix, dbPath+suffix); err != nil {
+			os.RemoveAll(dir)
+			return "", "", err
+		}
+	}
+	return dir, dbPath, nil
+}
+
+func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer in.Close()
-	out, err := os.CreateTemp("", "synty-cookies-*.sqlite")
+	out, err := os.Create(dst)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
-		os.Remove(out.Name())
-		return "", err
+		return err
 	}
-	if err := out.Close(); err != nil {
-		os.Remove(out.Name())
-		return "", err
-	}
-	return out.Name(), nil
+	return out.Close()
 }
 
 // locateGeckoCookieDB finds the best cookies.sqlite under a Gecko profile base dir.

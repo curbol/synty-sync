@@ -313,7 +313,7 @@ func (s *server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	sortItems(grouped, query.Get("sort"))
 
 	total := len(grouped)
-	lo := min(offset, total)
+	lo := min(max(offset, 0), total)
 	hi := min(lo+limit, total)
 
 	writeJSON(w, map[string]any{
