@@ -53,8 +53,13 @@ func TestBuildRootMotionPairs(t *testing.T) {
 	if _, ok := sibling["solo"]; ok {
 		t.Error("an animation with no RM sibling must not be paired")
 	}
-	if !suppressed["r1"] || !suppressed["gr"] || !suppressed["grf"] {
-		t.Errorf("all RM siblings must be suppressed: r1=%v gr=%v grf=%v", suppressed["r1"], suppressed["gr"], suppressed["grf"])
+	if !suppressed["r1"] || !suppressed["gr"] {
+		t.Errorf("RM siblings that a card actually plays must be suppressed: r1=%v gr=%v", suppressed["r1"], suppressed["gr"])
+	}
+	// grf is an RM file no in-place card selected (the glb clips prefer the glb RM).
+	// Hiding it too would make it unreachable in browse though the file exists.
+	if suppressed["grf"] {
+		t.Error("an RM file that no card plays must stay visible, not vanish from the grid")
 	}
 	if suppressed["n1"] || suppressed["g1"] {
 		t.Error("non-RM cards must never be suppressed")

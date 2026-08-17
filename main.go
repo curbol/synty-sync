@@ -348,6 +348,11 @@ func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool,
 	for _, s := range ix.Skipped {
 		warn(fmt.Sprintf("skipped %s: %s", s.RelPath, s.Reason))
 	}
+	// Each pack update extracts to a new fingerprint-keyed dir; without this the
+	// previous extraction stays in the cache forever.
+	if err := ix.PruneUnpacked(); err != nil {
+		warn(fmt.Sprintf("could not prune stale unpacked archives: %v", err))
+	}
 	if tagsPath == "" {
 		fmt.Fprintln(os.Stderr, "tags: disabled (no synty-sync.toml found; run from your project or pass --tags/--manifest)")
 	}

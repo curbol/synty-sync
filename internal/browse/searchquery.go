@@ -196,17 +196,29 @@ func (p *parser) peek() (token, bool) {
 	return token{}, false
 }
 
+// parseOr and parseAnd return nil for a branch that carries no terms, rather than
+// an empty node. An empty andNode evaluates to true (the identity for AND), so a
+// half-typed "sword OR " would otherwise compile to "sword OR everything" and match
+// the whole library on the way to being finished.
 func (p *parser) parseOr() searchNode {
-	kids := []searchNode{p.parseAnd()}
+	var kids []searchNode
+	if k := p.parseAnd(); k != nil {
+		kids = append(kids, k)
+	}
 	for {
 		t, ok := p.peek()
 		if !ok || t.kind != tokOr {
 			break
 		}
 		p.pos++ // consume OR
-		kids = append(kids, p.parseAnd())
+		if k := p.parseAnd(); k != nil {
+			kids = append(kids, k)
+		}
 	}
-	if len(kids) == 1 {
+	switch len(kids) {
+	case 0:
+		return nil
+	case 1:
 		return kids[0]
 	}
 	return orNode{kids: kids}
@@ -219,9 +231,14 @@ func (p *parser) parseAnd() searchNode {
 		if !ok || t.kind == tokOr || t.kind == tokRParen {
 			break
 		}
-		kids = append(kids, p.parsePrimary())
+		if k := p.parsePrimary(); k != nil {
+			kids = append(kids, k)
+		}
 	}
-	if len(kids) == 1 {
+	switch len(kids) {
+	case 0:
+		return nil
+	case 1:
 		return kids[0]
 	}
 	return andNode{kids: kids}
@@ -235,7 +252,10 @@ func (p *parser) parsePrimary() searchNode {
 		if nt, ok := p.peek(); ok && nt.kind == tokRParen {
 			p.pos++
 		}
-		return inner
+		return inner // nil when the group held no terms
+	}
+	if t.kind == tokRParen {
+		return nil // unbalanced close; nothing to match on
 	}
 	var node searchNode = termNode{field: t.field, value: t.value}
 	if t.neg {

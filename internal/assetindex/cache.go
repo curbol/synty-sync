@@ -13,7 +13,7 @@ import (
 
 // indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
 // classified), so a cached index from older logic is rebuilt rather than reused.
-const indexVersion = 13
+const indexVersion = 14
 
 // SkippedFile records a library file the scan could not read. A damaged archive
 // costs its own contents, not the rest of the library, so the failure is carried

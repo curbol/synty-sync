@@ -27,6 +27,10 @@ type unityEntry struct {
 // splitUnityName splits a tar member name into its GUID dir and member, tolerating
 // a leading "./". It returns ok=false for names that aren't a two-part
 // <guid>/<member> or whose guid is unsafe.
+// maxPathnameBytes bounds the `pathname` member, which holds one asset path. The
+// tar comes from a downloaded archive, so it is not trusted to be small.
+const maxPathnameBytes = 64 << 10
+
 func splitUnityName(name string) (guid, member string, ok bool) {
 	name = strings.TrimPrefix(name, "./")
 	parts := strings.SplitN(name, "/", 2)
@@ -83,11 +87,18 @@ func unityAssets(archivePath, displayRel, vendor, pack, variant string) ([]Asset
 			e.assetSize = hdr.Size
 			e.head = readHead(tr)
 		case "pathname":
-			b, err := io.ReadAll(tr)
+			b, err := io.ReadAll(io.LimitReader(tr, maxPathnameBytes))
 			if err != nil {
 				return nil, err
 			}
 			e.pathname = strings.TrimSpace(firstLine(string(b)))
+			// Only images consume the head buffer. Unity writes `asset` before
+			// `pathname`, so the read cannot be skipped up front, but a large pack has
+			// thousands of non-image entries whose buffers would otherwise be held for
+			// the whole archive pass.
+			if !isDimExt(strings.ToLower(strings.TrimPrefix(path.Ext(e.pathname), "."))) {
+				e.head = nil
+			}
 		case "preview.png":
 			e.hasPreview = true
 		}

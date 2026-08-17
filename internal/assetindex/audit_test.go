@@ -210,3 +210,113 @@ func TestAssembledSidekickDropsItsByproducts(t *testing.T) {
 		}
 	}
 }
+
+// glTF animation names are optional and not required to be unique. Two clips with
+// the same name build identical Sources, so they collide on both the id the content
+// API resolves and the fingerprint tags key on — one card's tag would land on the
+// other, and Lookup could only ever reach one of them.
+func TestDuplicateClipNamesGetDistinctIdentities(t *testing.T) {
+	root, mk := libRoot(t)
+	writeGLB(t, mk("Quaternius", "AnimLib", "anims.glb"), "Walk", "Walk", "", "Run")
+
+	assets, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 4 {
+		t.Fatalf("got %d assets, want one per clip: %+v", len(assets), assets)
+	}
+	ids, fps, names := map[string]int{}, map[string]int{}, map[string]int{}
+	for _, a := range assets {
+		ids[a.ID]++
+		fps[a.Fingerprint]++
+		names[a.Name]++
+	}
+	for id, n := range ids {
+		if n > 1 {
+			t.Errorf("%d assets share id %s", n, id)
+		}
+	}
+	for fp, n := range fps {
+		if n > 1 {
+			t.Errorf("%d assets share fingerprint %s (tagging one would tag the other)", n, fp)
+		}
+	}
+	for name, n := range names {
+		if name == "" {
+			t.Error("an unnamed clip kept an empty name")
+		}
+		if n > 1 {
+			t.Errorf("%d clips still display as %q", n, name)
+		}
+	}
+}
+
+// A hostile archive entry must never reach a filesystem path. Both guards are pure
+// and load-bearing, and neither was covered.
+func TestArchiveEntryNamesAreRejected(t *testing.T) {
+	for _, name := range []string{"../escape.png", "/etc/passwd", "a/../../escape.png", "..", ""} {
+		if safeEntry(name) {
+			t.Errorf("zip entry %q accepted", name)
+		}
+	}
+	for _, ok := range []string{"Assets/Sword.fbx", "a.png"} {
+		if !safeEntry(ok) {
+			t.Errorf("ordinary zip entry %q rejected", ok)
+		}
+	}
+	for _, name := range []string{"../x/asset", "../asset", "a/b/asset"} {
+		if guid, _, ok := splitUnityName(name); ok && (guid == ".." || strings.ContainsAny(guid, `/\`)) {
+			t.Errorf("unitypackage name %q yielded an escaping guid %q", name, guid)
+		}
+	}
+}
+
+// A .unitypackage is a gzipped tar from an untrusted-ish archive; a malformed one
+// must be skipped like any other bad archive, not panic or abort the build.
+func TestBuildSkipsMalformedUnityPackage(t *testing.T) {
+	root, mk := libRoot(t)
+	os.WriteFile(mk("good", "Pack", "Sword.glb"), []byte("GLBBYTES"), 0o644)
+	// Valid gzip header, garbage tar inside.
+	os.WriteFile(mk("bad", "Pack", "Broken_Unity_2022_3_v1.unitypackage"),
+		[]byte("\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xffgarbage"), 0o644)
+
+	ix, err := Build(root, t.TempDir())
+	if err != nil {
+		t.Fatalf("a malformed unitypackage aborted the build: %v", err)
+	}
+	if len(ix.Assets) == 0 {
+		t.Error("the readable file was dropped along with the bad archive")
+	}
+	if len(ix.Skipped) != 1 || !strings.Contains(ix.Skipped[0].RelPath, "Broken") {
+		t.Errorf("skipped = %+v, want the malformed unitypackage reported", ix.Skipped)
+	}
+}
+
+// Every pack update writes a new extraction dir keyed on the archive's mtime.
+// Nothing removed the old one, so each update stranded hundreds of MB.
+func TestPruneUnpackedDropsStaleExtractions(t *testing.T) {
+	root, mk := libRoot(t)
+	os.WriteFile(mk("v", "Pack", "Sword.glb"), []byte("GLBBYTES"), 0o644)
+	cacheDir := t.TempDir()
+
+	ix, err := Build(root, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpacked := filepath.Join(cacheDir, "unpacked")
+	stale := filepath.Join(unpacked, "deadbeefdeadbeef")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "asset"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.PruneUnpacked(); err != nil {
+		t.Fatalf("PruneUnpacked: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale extraction %s survived the prune (err=%v)", stale, err)
+	}
+}

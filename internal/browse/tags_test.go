@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/assetindex"
@@ -83,6 +84,9 @@ func doJSON(t *testing.T, method, url string, body any) *http.Response {
 	rq, err := http.NewRequest(method, url, r)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if body != nil {
+		rq.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := http.DefaultClient.Do(rq)
 	if err != nil {
@@ -295,5 +299,94 @@ func TestCardUnionAndFilter(t *testing.T) {
 	got := and.Items[0].Tags
 	if len(got) != 2 || got[0] != "hero" || got[1] != "wip" {
 		t.Errorf("card union tags = %v, want [hero wip]", got)
+	}
+}
+
+// browse has no session by design, so its one write surface is reachable from any
+// page the user has open. Requiring a JSON content-type forces a CORS preflight the
+// server never answers, which is what closes the drive-by path.
+func TestTagWritesRequireJSONContentType(t *testing.T) {
+	srv, _ := enabledServer(t)
+	body := `{"fingerprints":["crc32:1:1"],"tag":"hero","on":true}`
+	for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""} {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/assign", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Errorf("content-type %q: got %d, want a rejection", ct, resp.StatusCode)
+		}
+	}
+}
+
+// A body big enough to exhaust memory must be cut off rather than decoded.
+func TestTagWritesBoundTheRequestBody(t *testing.T) {
+	srv, _ := enabledServer(t)
+	huge := `{"fingerprints":["` + strings.Repeat("a", 4<<20) + `"],"tag":"x","on":true}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/assign", strings.NewReader(huge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 400 {
+		t.Errorf("an oversized body was accepted with %d", resp.StatusCode)
+	}
+}
+
+// When the save fails the mutation must not survive in memory: the UI would keep
+// reporting a tag that does not exist on disk until a restart silently undid it.
+func TestFailedSaveDoesNotLeaveMemoryAheadOfDisk(t *testing.T) {
+	srv, tagsPath := enabledServer(t)
+	post(t, srv, "/api/assign", `{"fingerprints":["crc32:1:1"],"tag":"hero","on":true}`, http.StatusOK)
+
+	// Make the tag store unwritable by turning its directory read-only.
+	dir := filepath.Dir(tagsPath)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("cannot make the tags dir read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	post(t, srv, "/api/assign", `{"fingerprints":["crc32:1:1"],"tag":"villain","on":true}`, http.StatusInternalServerError)
+
+	os.Chmod(dir, 0o700)
+	resp, err := http.Get(srv.URL + "/api/tags")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(b), "villain") {
+		t.Errorf("a tag that failed to save is still reported in memory: %s", b)
+	}
+}
+
+func post(t *testing.T, srv *httptest.Server, path, body string, wantStatus int) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s = %d, want %d: %s", path, resp.StatusCode, wantStatus, b)
 	}
 }

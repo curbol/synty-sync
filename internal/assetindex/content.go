@@ -78,6 +78,38 @@ func openFile(p string) (io.ReadCloser, int64, error) {
 // grid fetches of the same package wait rather than each decompressing hundreds of
 // MB), and is written to a temp dir renamed atomically into place so no reader ever
 // sees a half-written entry.
+// PruneUnpacked removes extraction directories whose archive fingerprint is no
+// longer in the index. The fingerprint includes the archive's mtime, so every pack
+// update writes to a new directory and would otherwise strand the previous
+// extraction (hundreds of MB per Synty pack) in the cache forever.
+func (ix *Index) PruneUnpacked() error {
+	if ix.cacheDir == "" {
+		return nil
+	}
+	dir := filepath.Join(ix.cacheDir, "unpacked")
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	live := make(map[string]bool, len(ix.ArchivePrint))
+	for _, fp := range ix.ArchivePrint {
+		live[fp] = true
+	}
+	var firstErr error
+	for _, e := range entries {
+		if !e.IsDir() || live[e.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (ix *Index) ensureExtracted(archivePath string) (string, error) {
 	fp, err := fingerprint(archivePath)
 	if err != nil {

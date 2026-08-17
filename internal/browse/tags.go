@@ -3,6 +3,7 @@ package browse
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/curbol/synty-sync/internal/assetindex"
 	"github.com/curbol/synty-sync/internal/tagstore"
@@ -373,14 +374,32 @@ func (s *server) requireEnabled(w http.ResponseWriter) bool {
 // persistLocked writes the store; the caller must hold the write lock.
 func (s *server) persistLocked(w http.ResponseWriter) bool {
 	if err := tagstore.Save(s.tagsPath, s.store); err != nil {
+		// Handlers mutate the store and then persist, so a failed save would otherwise
+		// leave memory claiming more than disk holds: the UI keeps reporting the tag
+		// until a restart silently takes it away again.
+		if reloaded, lerr := tagstore.Load(s.tagsPath); lerr == nil {
+			s.store = reloaded
+		}
 		writeErr(w, http.StatusInternalServerError, "could not save tags: "+err.Error())
 		return false
 	}
 	return true
 }
 
+// maxTagBodyBytes bounds a write request. The payloads are a handful of
+// fingerprints and a tag name; anything larger is a mistake or an attack.
+const maxTagBodyBytes = 1 << 20
+
+// decodeJSON reads a write request's body. browse has no session by design, so any
+// page the user has open can reach it on localhost; requiring a JSON content-type
+// forces a CORS preflight that this server does not answer, which is what keeps a
+// drive-by fetch from writing to the committed tag store.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeErr(w, http.StatusUnsupportedMediaType, "expected application/json")
+		return false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTagBodyBytes)).Decode(v); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return false
 	}

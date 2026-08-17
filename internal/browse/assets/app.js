@@ -20,7 +20,9 @@ const els = {
   empty: document.getElementById('empty'),
 };
 
-const state = { offset: 0, total: 0, loading: false, done: false, facetsLoaded: false, items: [] };
+// gen is bumped by reset() so a page still in flight from the previous filter can
+// tell that its results are stale and drop them.
+const state = { gen: 0, offset: 0, total: 0, loading: false, done: false, facetsLoaded: false, items: [] };
 
 // ---- data ----
 
@@ -51,9 +53,14 @@ function sentinelNear() {
 async function fetchPage() {
   if (state.loading || state.done) return;
   state.loading = true;
+  // reset() clears the grid and releases the loading latch, so a page already in
+  // flight would otherwise resume and append its now-stale items to the fresh grid
+  // while the new request does the same: duplicate cards and a wrong offset.
+  const gen = state.gen;
   const p = query({ offset: state.offset, limit: PAGE });
   const res = await fetch('/api/assets?' + p.toString());
   const data = await res.json();
+  if (gen !== state.gen) return;
   if (!state.facetsLoaded) { populateFacets(data.facets); state.facetsLoaded = true; }
   state.total = data.total;
   for (const a of data.items) { state.items.push(a); els.grid.appendChild(card(a)); }
@@ -68,6 +75,7 @@ async function fetchPage() {
 }
 
 function reset() {
+  state.gen++;
   state.offset = 0; state.total = 0; state.done = false; state.loading = false;
   state.items = [];
   els.grid.replaceChildren();

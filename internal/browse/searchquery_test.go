@@ -129,3 +129,30 @@ func TestSearchQueryEmptyIsNil(t *testing.T) {
 		t.Error("empty query must match everything")
 	}
 }
+
+// An empty conjunction must contribute nothing, not truth. Search is debounced, so
+// every OR query passes through its half-typed form on the way to being complete;
+// if that matches everything, the grid floods with the whole library mid-keystroke.
+func TestMalformedQueriesDoNotMatchEverything(t *testing.T) {
+	unrelated := assetindex.Asset{Name: "barrel", Pack: "polygon-dungeon", Category: "props"}
+	// A real term OR'd with an empty branch must not widen to everything.
+	for _, q := range []string{"sword OR ", "sword |", "sword OR", "(sword OR )", "sword OR ()"} {
+		if parseQuery(q).match(unrelated) {
+			t.Errorf("query %q matched an unrelated asset", q)
+		}
+	}
+	// The terms that are present still have to work.
+	sword := assetindex.Asset{Name: "sword", Pack: "polygon-fantasy", Category: "models"}
+	for _, q := range []string{"sword OR ", "sword |", "sword OR axe"} {
+		if !parseQuery(q).match(sword) {
+			t.Errorf("query %q dropped the term it did have", q)
+		}
+	}
+	// A query carrying no terms at all is no filter, whether it is blank or the user
+	// has typed only operators so far.
+	for _, q := range []string{"", "   ", "OR", "|", ")", "()"} {
+		if !parseQuery(q).match(unrelated) {
+			t.Errorf("term-free query %q should be treated as no filter", q)
+		}
+	}
+}

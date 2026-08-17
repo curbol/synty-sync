@@ -1,6 +1,7 @@
 package assetindex
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -181,6 +182,7 @@ func clipAsset(e libEntry, clip, fileFP string) Asset {
 func looseAssets(e libEntry) []Asset {
 	if strings.EqualFold(filepath.Ext(e.name), ".glb") && !isRootMotionVariant(e.name) {
 		if names, err := glbAnimationNames(e.path); err == nil && len(names) >= 2 {
+			names = uniqueClipNames(names)
 			fp := looseFingerprint(e.path)
 			out := make([]Asset, 0, len(names))
 			for _, n := range names {
@@ -192,6 +194,34 @@ func looseAssets(e libEntry) []Asset {
 	return []Asset{looseAsset(e)}
 }
 
+// uniqueClipNames makes a GLB's animation names usable as identity. glTF names are
+// optional and need not be unique, but the clip name is what distinguishes one
+// virtual asset's id and fingerprint from another's, so duplicates would collide on
+// both: two cards for the same clip, tagging either one tagging both.
+func uniqueClipNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := make(map[string]int, len(names))
+	for i, n := range names {
+		if n == "" {
+			n = fmt.Sprintf("clip %d", i+1)
+		}
+		if c, dup := seen[n]; dup {
+			base := n
+			for {
+				c++
+				n = fmt.Sprintf("%s (%d)", base, c)
+				if _, taken := seen[n]; !taken {
+					break
+				}
+			}
+			seen[base] = c
+		}
+		seen[n] = 1
+		out = append(out, n)
+	}
+	return out
+}
+
 // readHead reads up to dimsHeadBytes from r, enough to recover an image's
 // dimensions without pulling a whole file into memory.
 func readHead(r io.Reader) []byte {
@@ -201,25 +231,13 @@ func readHead(r io.Reader) []byte {
 
 // Scan walks the library root and returns every browseable asset: loose files and
 // the entries inside .zip / .unitypackage archives, de-duplicated (see dedup).
+// Unreadable archives are skipped; Build reports why in Index.Skipped.
 func Scan(root string) ([]Asset, error) {
-	absRoot, err := filepath.Abs(root)
+	ix, err := Build(root, "")
 	if err != nil {
 		return nil, err
 	}
-	entries, err := walkLibrary(absRoot)
-	if err != nil {
-		return nil, err
-	}
-	var assets []Asset
-	for _, e := range entries {
-		if e.kind == SourceLoose {
-			assets = append(assets, looseAssets(e)...)
-			continue
-		}
-		a, _ := archiveAssets(e)
-		assets = append(assets, a...)
-	}
-	return dedup(assets), nil
+	return ix.Assets, nil
 }
 
 // vendorPack derives the vendor (first path segment) and pack (second segment) of

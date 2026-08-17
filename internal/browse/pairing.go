@@ -70,13 +70,15 @@ func buildRootMotionPairs(assets []assetindex.Asset) (sibling map[string]string,
 		if !hasAnim {
 			continue
 		}
+		// Suppress only the RM files some in-place card actually plays. pickRM picks one
+		// per card (preferring the same container), so hiding the whole group would make
+		// an RM with no in-place counterpart in its own format unreachable in browse
+		// even though the file is right there on disk.
 		for _, ni := range g.nonRM {
 			if rmID := pickRM(assets, g.rm, assets[ni]); rmID != "" {
 				sibling[assets[ni].ID] = rmID
+				suppressed[rmID] = true
 			}
-		}
-		for _, ri := range g.rm {
-			suppressed[assets[ri].ID] = true
 		}
 	}
 	return sibling, suppressed
