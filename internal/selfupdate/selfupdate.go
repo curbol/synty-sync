@@ -7,6 +7,7 @@ package selfupdate
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,10 +21,10 @@ import (
 	"time"
 )
 
-const (
-	releasesAPI = "https://api.github.com/repos/curbol/synty-sync/releases"
-	binaryName  = "synty-sync"
-)
+const binaryName = "synty-sync"
+
+// releasesAPIURL is a var so tests can point it at a stub server.
+var releasesAPIURL = "https://api.github.com/repos/curbol/synty-sync/releases"
 
 type release struct {
 	TagName string `json:"tag_name"`
@@ -101,13 +102,13 @@ func newRequest(token, method, url string) (*http.Request, error) {
 }
 
 func fetchRelease(token, target string) (*release, error) {
-	url := releasesAPI + "/latest"
+	url := releasesAPIURL + "/latest"
 	if target != "" {
 		tag := target
 		if !strings.HasPrefix(tag, "v") {
 			tag = "v" + tag
 		}
-		url = releasesAPI + "/tags/" + tag
+		url = releasesAPIURL + "/tags/" + tag
 	}
 	req, err := newRequest(token, http.MethodGet, url)
 	if err != nil {
@@ -180,7 +181,14 @@ func downloadAndReplace(token, assetURL string) error {
 	if exe, err = filepath.EvalSymlinks(exe); err != nil {
 		return fmt.Errorf("resolving binary path: %w", err)
 	}
+	fmt.Fprintln(os.Stderr, "downloading update…")
+	return installTo(token, assetURL, exe)
+}
 
+// installTo downloads the release asset and swaps its binary over exe. Every step
+// happens beside exe and the target is only ever replaced by a rename, so a failure
+// at any point leaves the working binary exactly as it was.
+func installTo(token, assetURL, exe string) error {
 	// Stage next to the target binary so the final rename stays on one filesystem
 	// (a temp dir under /tmp is often a separate device, and rename can't cross it).
 	tmp, err := os.MkdirTemp(filepath.Dir(exe), ".synty-sync-update-*")
@@ -190,7 +198,6 @@ func downloadAndReplace(token, assetURL string) error {
 	defer os.RemoveAll(tmp)
 
 	zipPath := filepath.Join(tmp, "download.zip")
-	fmt.Fprintln(os.Stderr, "downloading update…")
 	if err := download(token, assetURL, zipPath); err != nil {
 		return err
 	}
@@ -198,25 +205,64 @@ func downloadAndReplace(token, assetURL string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkExecutable(binPath); err != nil {
+		return err
+	}
 	if err := os.Chmod(binPath, 0o755); err != nil {
 		return err
 	}
+	return replaceBinary(binPath, exe)
+}
 
-	// Back up the current binary, then swap the new one in; restore on failure.
-	backup := exe + ".backup"
-	if err := copyFile(exe, backup); err != nil {
-		return fmt.Errorf("creating backup: %w", err)
+// executableMagic is the leading signature of a native binary per platform. The zip
+// reader already verifies each entry's CRC, so this catches the other way an update
+// goes wrong: a release that shipped something that is not a binary at all (an
+// error page, a script, the wrong artifact) landing on top of a working install.
+var executableMagic = map[string][][]byte{
+	"linux":   {[]byte("\x7fELF")},
+	"darwin":  {{0xcf, 0xfa, 0xed, 0xfe}, {0xce, 0xfa, 0xed, 0xfe}, {0xca, 0xfe, 0xba, 0xbe}},
+	"windows": {[]byte("MZ")},
+}
+
+func checkExecutable(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
-	defer os.Remove(backup)
-	if err := os.Rename(binPath, exe); err != nil {
-		// Rename should stay on one device now, but fall back to an in-place copy
-		// for any exotic mount (overlay, bind) where it still can't.
-		if cerr := copyFile(binPath, exe); cerr != nil {
-			if restoreErr := copyFile(backup, exe); restoreErr != nil {
-				return fmt.Errorf("install failed: %w; restore also failed: %w", err, restoreErr)
-			}
-			return fmt.Errorf("install failed (original restored): %w", err)
+	defer f.Close()
+	head := make([]byte, 4)
+	n, err := io.ReadFull(f, head)
+	if err != nil && n == 0 {
+		return fmt.Errorf("downloaded binary is empty")
+	}
+	head = head[:n]
+	magics, known := executableMagic[runtime.GOOS]
+	if !known {
+		return nil
+	}
+	for _, m := range magics {
+		if bytes.HasPrefix(head, m) {
+			return nil
 		}
+	}
+	return fmt.Errorf("downloaded file is not a %s executable", runtime.GOOS)
+}
+
+// replaceBinary puts newPath at exe. The rename should succeed outright (both are in
+// the same directory); the fallback copies to a sibling and renames that, so an
+// exotic mount that refuses the first rename still never truncates exe in place.
+func replaceBinary(newPath, exe string) error {
+	if err := os.Rename(newPath, exe); err == nil {
+		return nil
+	}
+	staged := exe + ".new"
+	if err := copyFile(newPath, staged); err != nil {
+		os.Remove(staged)
+		return fmt.Errorf("staging the new binary: %w", err)
+	}
+	if err := os.Rename(staged, exe); err != nil {
+		os.Remove(staged)
+		return fmt.Errorf("installing the new binary: %w", err)
 	}
 	return nil
 }
@@ -298,7 +344,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	// Checked, not deferred: a flush failure here would otherwise yield a silently
+	// truncated copy that the caller renames over the running executable.
+	return out.Close()
 }

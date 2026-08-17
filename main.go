@@ -8,14 +8,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/assetindex"
@@ -49,6 +52,9 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	// Silence the flag package's own dump: help prints usage() below, and a bad flag
+	// comes back as an error that main reports once.
+	fs.SetOutput(io.Discard)
 	cfgDir := fs.String("config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
 	manifestFlag := fs.String("manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
 	cookies := fs.String("cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
@@ -77,6 +83,10 @@ func run(args []string) error {
 		return nil
 	}
 	if err := fs.Parse(rest); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage()
+			return nil
+		}
 		return err
 	}
 
@@ -124,23 +134,35 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	// No whole-request timeout (asset downloads are large), but a response-header
-	// timeout so a stalled connection fails instead of hanging forever.
-	client := &portal.Client{
-		HTTP: &http.Client{
-			Transport: &http.Transport{ResponseHeaderTimeout: 60 * time.Second},
-		},
-		BaseURL:    "https://syntystore.com",
-		CustomerID: cfg.CustomerID,
-		Cookie:     cookie,
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	client := newPortalClient(cfg.CustomerID, cookie)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if cmd == "select" {
 		return selectPacks(ctx, client, manifestPath)
 	}
+	return runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, *only, isDryRun(cmd, *dryRun))
+}
 
+// newPortalClient builds the store client. There is no whole-request timeout (asset
+// downloads are large), but a response-header timeout so a stalled connection fails
+// instead of hanging forever. The transport is cloned from the default so proxy
+// settings from the environment still apply.
+func newPortalClient(customerID, cookie string) *portal.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &portal.Client{
+		HTTP:       &http.Client{Transport: tr},
+		BaseURL:    "https://syntystore.com",
+		CustomerID: customerID,
+		Cookie:     cookie,
+	}
+}
+
+// runSyncOrStatus loads the manifest and lockfile, runs the diff (downloading unless
+// dry), and prints the summary. Taking the client as a parameter keeps the sync flow
+// testable against a stub store, separately from flag parsing and dispatch.
+func runSyncOrStatus(ctx context.Context, client *portal.Client, cfg config.Config, manifestPath, lockPath, onlyGlob string, dry bool) error {
 	man, err := manifest.Load(manifestPath)
 	if err != nil {
 		return err
@@ -156,11 +178,10 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	dry := isDryRun(cmd, *dryRun)
 	opts := syncer.Options{
 		LibraryRoot:  cfg.LibraryPath,
 		Filter:       man.Filter(),
-		OnlyGlob:     *only,
+		OnlyGlob:     onlyGlob,
 		DryRun:       dry,
 		FullVerify:   !dry,
 		Concurrency:  cfg.Concurrency,
@@ -176,17 +197,17 @@ func run(args []string) error {
 	return nil
 }
 
+// isDryRun reports whether a run should classify only, with no downloads and no
+// lockfile write: status is always dry, and sync honors --dry-run.
+func isDryRun(cmd string, dryRun bool) bool {
+	return cmd == "status" || dryRun
+}
+
 // resolveManifestPath locates the project manifest. An explicit --manifest is honored
 // verbatim (existence is not pre-checked, so `list` can derive a lockfile path beside a
 // not-yet-created manifest). Otherwise it is discovered by walking up from the working
 // directory; when nothing is found, `select` defaults to synty-sync.toml in the working
 // directory (it is about to create one), and the read commands error.
-// isDryRun reports whether a run should classify only, with no downloads and no
-// lockfile write: status is always dry, and sync honors --dry-run.
-func isDryRun(cmd string, flag bool) bool {
-	return cmd == "status" || flag
-}
-
 func resolveManifestPath(flag, cmd string) (string, error) {
 	if flag != "" {
 		return flag, nil

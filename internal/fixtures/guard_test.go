@@ -18,15 +18,19 @@ const testdataDir = "../../testdata/portal"
 // would trip on Shopify's own ids/timestamps). Order ids are retained by design as
 // the lockfile identity anchor, so they are deliberately not checked.
 var (
-	emailRe    = regexp.MustCompile(`[A-Za-z0-9._%+\-]+(@|%40)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
-	phoneRe    = regexp.MustCompile(`"phone":"([^"]*)"`)
-	nameJSONRe = regexp.MustCompile(`"(?:firstName|lastName)":"([^"]*)"`)
-	// Customer id appears in these contexts only; an order id never does.
+	emailRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+(@|%40)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+	// Key names are matched case-insensitively and allow either quote style, so a
+	// capture that spells the field differently still gets checked.
+	phoneRe    = regexp.MustCompile(`(?i)["']phone["']\s*:\s*["']([^"']*)["']`)
+	nameJSONRe = regexp.MustCompile(`(?i)["'](?:first_?name|last_?name)["']\s*:\s*["']([^"']*)["']`)
+	// Customer id appears in these contexts only; an order id never does. The
+	// storefront also emits it as a bare JSON number, which no URL pattern covers.
 	custIDRes = []*regexp.Regexp{
 		regexp.MustCompile(`logged_in_customer_id(?:=|%3D)(\d+)`),
 		regexp.MustCompile(`/apps/downloads/customers/(\d+)`),
 		regexp.MustCompile(`/apps/downloads/orders/(\d+)`),
 		regexp.MustCompile(`"id":"(\d+)","email"`),
+		regexp.MustCompile(`(?i)["']customer_?id["']\s*:\s*["']?(\d+)`),
 	}
 	okEmailDom = "example.com"
 	okPhone    = "+10000000000"

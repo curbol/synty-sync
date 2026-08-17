@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
-// ScrubMap is an ordered list of literal replacements. Order matters: longer,
-// more specific strings come first so a substring replacement cannot pre-empt a
-// fuller match (e.g. the full email before the bare local part).
+// ScrubMap is a list of literal replacements. The longest match at a position
+// always wins, whatever order the entries are written in: strings.Replacer resolves
+// overlaps by argument order, so a shorter entry listed first (the bare local part
+// before the full email) would otherwise scrub its prefix and leave the rest of a
+// real value in the fixtures. Entries of equal length keep their authored order.
 type ScrubMap struct {
 	Replacements [][2]string `json:"replacements"`
 }
@@ -38,12 +41,17 @@ func LoadScrubMap(path string) (ScrubMap, error) {
 	return m, nil
 }
 
-// Replacer builds a strings.Replacer that applies the map in order. Replacement
-// is single-pass and non-overlapping, so a fake value that contains a real
-// fragment is never re-scrubbed.
+// Replacer builds a strings.Replacer that tries the longest match first.
+// Replacement is single-pass and non-overlapping, so a fake value that contains a
+// real fragment is never re-scrubbed.
 func (m ScrubMap) Replacer() *strings.Replacer {
-	pairs := make([]string, 0, len(m.Replacements)*2)
-	for _, r := range m.Replacements {
+	ordered := make([][2]string, len(m.Replacements))
+	copy(ordered, m.Replacements)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len(ordered[i][0]) > len(ordered[j][0])
+	})
+	pairs := make([]string, 0, len(ordered)*2)
+	for _, r := range ordered {
 		pairs = append(pairs, r[0], r[1])
 	}
 	return strings.NewReplacer(pairs...)
