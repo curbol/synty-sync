@@ -52,8 +52,11 @@ func run(rawDir, mapPath, outDir string) error {
 		if err != nil {
 			return err
 		}
+		// The name is scrubbed too: a capture of /apps/downloads/orders/{customerId}
+		// is naturally saved under a name carrying that id, and a filename commits to
+		// git just as surely as the bytes inside it.
 		scrubbed := sm.Scrub(string(content))
-		if err := os.WriteFile(filepath.Join(outDir, e.Name()), []byte(scrubbed), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(outDir, sm.Scrub(e.Name())), []byte(scrubbed), 0o644); err != nil {
 			return err
 		}
 		n++

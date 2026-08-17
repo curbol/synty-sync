@@ -197,3 +197,63 @@ func TestFetchReleaseErrorOmitsToken(t *testing.T) {
 		t.Errorf("token leaked into the error: %q", err)
 	}
 }
+
+// replaceBinary has to work when the target is the image currently executing.
+// Windows refuses os.Rename onto a running .exe but does allow renaming it aside,
+// which is why the current binary is moved out of the way first. The observable
+// contract on every platform: the new bytes land, and no staging file survives.
+func TestReplaceBinaryLeavesNoResidue(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, fakeBinary("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(dir, "staged")
+	if err := os.WriteFile(staged, fakeBinary("NEW"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := replaceBinary(staged, exe); err != nil {
+		t.Fatalf("replaceBinary: %v", err)
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fakeBinary("NEW")) {
+		t.Errorf("binary content = %q, want the new one", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "synty-sync" {
+			t.Errorf("left %q behind", e.Name())
+		}
+	}
+}
+
+// A leftover .old from an interrupted update must not block the next one.
+func TestReplaceBinaryClearsAStaleAside(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, fakeBinary("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe+".old", fakeBinary("ANCIENT"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(dir, "staged")
+	if err := os.WriteFile(staged, fakeBinary("NEW"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := replaceBinary(staged, exe); err != nil {
+		t.Fatalf("replaceBinary with a stale .old: %v", err)
+	}
+	got, _ := os.ReadFile(exe)
+	if !bytes.Equal(got, fakeBinary("NEW")) {
+		t.Errorf("binary content = %q, want the new one", got)
+	}
+}

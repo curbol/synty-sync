@@ -38,3 +38,23 @@ func TestLoadScrubMapRejectsEmptyMatch(t *testing.T) {
 		t.Error("expected an empty-match error")
 	}
 }
+
+// The scrub pipeline rewrites file contents but the output name is copied from the
+// raw capture. A capture saved as orders-<realid>-p1.html — the natural name for a
+// capture of /apps/downloads/orders/{customerId} — would commit the id as a path,
+// and the guard only ever reads contents.
+func TestScrubAppliesToFilenames(t *testing.T) {
+	m := fixtures.ScrubMap{Replacements: [][2]string{
+		{"1234567890123", "1000000000001"},
+		{"real.person@example.org", "test.user@example.com"},
+	}}
+	for _, tc := range []struct{ in, want string }{
+		{"orders-1234567890123-p1.html", "orders-1000000000001-p1.html"},
+		{"library-real.person@example.org.html", "library-test.user@example.com.html"},
+		{"item_1.html", "item_1.html"},
+	} {
+		if got := m.Scrub(tc.in); got != tc.want {
+			t.Errorf("Scrub(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

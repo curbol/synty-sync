@@ -248,22 +248,26 @@ func checkExecutable(path string) error {
 	return fmt.Errorf("downloaded file is not a %s executable", runtime.GOOS)
 }
 
-// replaceBinary puts newPath at exe. The rename should succeed outright (both are in
-// the same directory); the fallback copies to a sibling and renames that, so an
-// exotic mount that refuses the first rename still never truncates exe in place.
+// replaceBinary puts newPath at exe, which is the image currently executing.
+// Windows refuses to rename over a running .exe but does permit renaming it aside,
+// so the current binary is moved out of the way first and restored if the install
+// then fails. exe is never truncated in place, on any platform.
 func replaceBinary(newPath, exe string) error {
-	if err := os.Rename(newPath, exe); err == nil {
-		return nil
+	aside := exe + ".old"
+	os.Remove(aside) // a leftover from an interrupted update must not block this one
+	if err := os.Rename(exe, aside); err != nil {
+		return fmt.Errorf("moving the current binary aside: %w", err)
 	}
-	staged := exe + ".new"
-	if err := copyFile(newPath, staged); err != nil {
-		os.Remove(staged)
-		return fmt.Errorf("staging the new binary: %w", err)
+	if err := os.Rename(newPath, exe); err != nil {
+		// Cross-device or an exotic mount: copy instead, and put the original back if
+		// even that fails, so the user is never left without a binary.
+		if copyErr := copyFile(newPath, exe); copyErr != nil {
+			os.Rename(aside, exe)
+			return fmt.Errorf("installing the new binary: %w", copyErr)
+		}
 	}
-	if err := os.Rename(staged, exe); err != nil {
-		os.Remove(staged)
-		return fmt.Errorf("installing the new binary: %w", err)
-	}
+	// Removing the running image fails on Windows; the next update clears it.
+	os.Remove(aside)
 	return nil
 }
 

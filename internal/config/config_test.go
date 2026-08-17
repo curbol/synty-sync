@@ -7,7 +7,18 @@ import (
 	"testing"
 )
 
+// clearSyntyEnv isolates a test from the maintainer's own environment. Load reads
+// these, so anyone who actually uses the tool would otherwise see these tests fail
+// on their own machine.
+func clearSyntyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"SYNTY_LIBRARY", "SYNTY_CUSTOMER_ID", "SYNTY_BROWSE_ROOT"} {
+		t.Setenv(k, "")
+	}
+}
+
 func TestDefaultsWhenNoConfig(t *testing.T) {
+	clearSyntyEnv(t)
 	c, err := Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -25,6 +36,7 @@ func TestDefaultsWhenNoConfig(t *testing.T) {
 }
 
 func TestConfigFileThenEnv(t *testing.T) {
+	clearSyntyEnv(t)
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "config.toml"), []byte(`
 concurrency = 2
@@ -49,6 +61,7 @@ library_path = "/from/file"
 }
 
 func TestBrowseRootPrecedence(t *testing.T) {
+	clearSyntyEnv(t)
 	dir := t.TempDir()
 	// default: unset
 	c, err := Load(dir)
