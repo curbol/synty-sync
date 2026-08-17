@@ -263,10 +263,14 @@ func browseAssets(cfg config.Config, root, addr, cacheFlag string, reindex bool,
 	cacheDir := config.ResolveCacheDir(cacheFlag)
 	cachePath := filepath.Join(cacheDir, "browse-index.json")
 
+	warn := func(m string) { fmt.Fprintln(os.Stderr, "warning:", m) }
 	fmt.Fprintf(os.Stderr, "indexing %s …\n", root)
-	ix, err := assetindex.LoadOrBuild(root, cacheDir, cachePath, reindex)
+	ix, err := assetindex.LoadOrBuild(root, cacheDir, cachePath, reindex, warn)
 	if err != nil {
 		return fmt.Errorf("build asset index: %w", err)
+	}
+	for _, s := range ix.Skipped {
+		warn(fmt.Sprintf("skipped %s: %s", s.RelPath, s.Reason))
 	}
 	if tagsPath == "" {
 		fmt.Fprintln(os.Stderr, "tags: disabled (no synty-sync.toml found; run from your project or pass --tags/--manifest)")

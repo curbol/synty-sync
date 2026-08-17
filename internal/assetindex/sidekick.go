@@ -74,6 +74,9 @@ func applySidekick(archivePath string, entries map[string]*unityEntry, order []s
 			byGuid[assets[i].Source.Guid] = i
 		}
 	}
+	// Only a character that actually assembled supersedes its byproducts; the trees
+	// rooted at those characters bound the suppression below.
+	var assembledTrees []string
 	for g := range skGuids {
 		data, ok := skBytes[g]
 		if !ok {
@@ -96,28 +99,37 @@ func applySidekick(archivePath string, entries map[string]*unityEntry, order []s
 		assets[i].Category = CategoryModel
 		assets[i].Thumb = ThumbSidekick
 		assets[i].Source.Parts = partIDs
+		assembledTrees = append(assembledTrees, path.Dir(assets[i].Source.Pathname)+"/")
 	}
 	kept := assets[:0]
 	for _, a := range assets {
-		if !sidekickByproduct(a) {
+		if !sidekickByproduct(a, assembledTrees) {
 			kept = append(kept, a)
 		}
 	}
 	return kept, nil
 }
 
-// sidekickByproduct reports a per-character byproduct under a Sidekick package's
-// Characters/ tree that the assembled .sk character supersedes: the magenta prefab,
-// its material, and the combined-mesh/avatar .asset data. The reusable part meshes
-// live under Resources/ (not Characters/) and the character's textures are kept, so
-// both stay browseable.
-func sidekickByproduct(a Asset) bool {
-	if a.Thumb == ThumbSidekick || !strings.Contains(a.Source.Pathname, "/Characters/") {
+// sidekickByproduct reports a per-character byproduct that its assembled .sk
+// character supersedes: the magenta prefab, its material, and the combined-mesh /
+// avatar .asset data, which sit in the character's own tree (directly beside the
+// .sk or under its Materials/ and Meshes/ subdirs). The reusable part meshes live
+// under Resources/ and the character's textures are a kept extension, so both stay
+// browseable. A character that failed to assemble contributes no tree, so its
+// byproducts survive — they are the only representation it has left.
+func sidekickByproduct(a Asset, assembledTrees []string) bool {
+	if a.Thumb == ThumbSidekick {
 		return false
 	}
 	switch a.Ext {
 	case "prefab", "mat", "asset":
-		return true
+	default:
+		return false
+	}
+	for _, tree := range assembledTrees {
+		if strings.HasPrefix(a.Source.Pathname, tree) {
+			return true
+		}
 	}
 	return false
 }

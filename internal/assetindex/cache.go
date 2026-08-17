@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,7 +13,15 @@ import (
 
 // indexVersion is bumped whenever the scan logic changes (what's indexed, how it's
 // classified), so a cached index from older logic is rebuilt rather than reused.
-const indexVersion = 12
+const indexVersion = 13
+
+// SkippedFile records a library file the scan could not read. A damaged archive
+// costs its own contents, not the rest of the library, so the failure is carried
+// here for the caller to report instead of aborting the build.
+type SkippedFile struct {
+	RelPath string `json:"relPath"`
+	Reason  string `json:"reason"`
+}
 
 // Index is the in-memory, on-disk-cacheable catalog of a library. Content requests
 // resolve through byID (never by reconstructing a path from client input), and the
@@ -24,6 +33,7 @@ type Index struct {
 	Assets       []Asset           `json:"assets"`
 	ArchivePrint map[string]string `json:"archivePrint"` // abs archive path -> stat fingerprint
 	LoosePrint   map[string]string `json:"loosePrint"`   // abs loose path -> stat fingerprint
+	Skipped      []SkippedFile     `json:"skipped,omitempty"`
 
 	cacheDir string
 	byID     map[string]*Asset
@@ -65,9 +75,10 @@ func Build(root, cacheDir string) (*Index, error) {
 			assets = append(assets, looseAssets(e)...)
 			continue
 		}
-		a, err := enumerateArchive(e)
-		if err != nil {
-			return nil, err
+		a, skip := archiveAssets(e)
+		if skip != nil {
+			ix.Skipped = append(ix.Skipped, *skip)
+			continue
 		}
 		if fp, err := fingerprint(e.path); err == nil {
 			ix.ArchivePrint[e.path] = fp
@@ -99,6 +110,7 @@ func (ix *Index) Refresh() error {
 	newPrint := map[string]string{}
 	newLoose := map[string]string{}
 	var assets []Asset
+	var skipped []SkippedFile
 	for _, e := range entries {
 		if e.kind == SourceLoose {
 			if fp, err := fingerprint(e.path); err == nil {
@@ -113,21 +125,25 @@ func (ix *Index) Refresh() error {
 		}
 		fp, err := fingerprint(e.path)
 		if err != nil {
-			return err
+			skipped = append(skipped, SkippedFile{RelPath: e.rel, Reason: err.Error()})
+			continue
 		}
 		newPrint[e.path] = fp
 		if old, ok := oldByArchive[e.path]; ok && ix.ArchivePrint[e.path] == fp {
 			assets = append(assets, old...)
 			continue
 		}
-		a, err := enumerateArchive(e)
-		if err != nil {
-			return err
+		a, skip := archiveAssets(e)
+		if skip != nil {
+			delete(newPrint, e.path)
+			skipped = append(skipped, *skip)
+			continue
 		}
 		assets = append(assets, a...)
 	}
 	ix.ArchivePrint = newPrint
 	ix.LoosePrint = newLoose
+	ix.Skipped = skipped
 	ix.setAssets(dedup(assets))
 	return nil
 }
@@ -153,22 +169,47 @@ func Load(cachePath, cacheDir string) (*Index, error) {
 	return &ix, nil
 }
 
-// Save writes the index JSON, creating parent dirs.
+// Save writes the index JSON, creating parent dirs. The write goes to a temp file
+// in the destination dir and is renamed into place: an interrupted in-place write
+// would leave a truncated cache, and rebuilding one costs a full library scan.
 func (ix *Index) Save(cachePath string) error {
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	dir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	b, err := json.Marshal(ix)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cachePath, b, 0o644)
+	tmp, err := os.CreateTemp(dir, ".browse-index-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, cachePath); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // LoadOrBuild returns a usable index: a fresh build when reindex is set or no valid
 // cache exists for this root, otherwise the cached index refreshed against the
 // current tree. The result is written back to cachePath.
-func LoadOrBuild(root, cacheDir, cachePath string, reindex bool) (*Index, error) {
+// warn reports a non-fatal condition; nil discards.
+func LoadOrBuild(root, cacheDir, cachePath string, reindex bool, warn func(string)) (*Index, error) {
+	if warn == nil {
+		warn = func(string) {}
+	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -178,7 +219,7 @@ func LoadOrBuild(root, cacheDir, cachePath string, reindex bool) (*Index, error)
 			if err := ix.Refresh(); err != nil {
 				return nil, err
 			}
-			_ = ix.Save(cachePath)
+			saveCache(ix, cachePath, warn)
 			return ix, nil
 		}
 	}
@@ -186,8 +227,17 @@ func LoadOrBuild(root, cacheDir, cachePath string, reindex bool) (*Index, error)
 	if err != nil {
 		return nil, err
 	}
-	_ = ix.Save(cachePath)
+	saveCache(ix, cachePath, warn)
 	return ix, nil
+}
+
+// saveCache persists the index. The cache is expendable and the index in hand is
+// usable without it, so a write failure is not fatal — but it is not swallowed
+// either: silently failing here re-pays a whole library scan on every run.
+func saveCache(ix *Index, cachePath string, warn func(string)) {
+	if err := ix.Save(cachePath); err != nil {
+		warn(fmt.Sprintf("could not write the index cache (%v); the library will be rescanned next run", err))
+	}
 }
 
 func (ix *Index) setAssets(assets []Asset) {

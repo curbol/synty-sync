@@ -113,6 +113,18 @@ func enumerateArchive(e libEntry) ([]Asset, error) {
 	return nil, nil
 }
 
+// archiveAssets enumerates one archive, turning a read failure into a skip note
+// instead of an error. A truncated or otherwise damaged file in a large library
+// must not make the whole index unbuildable — browse treats a build failure as
+// fatal, so one bad file would take the entire browser down with it.
+func archiveAssets(e libEntry) ([]Asset, *SkippedFile) {
+	a, err := enumerateArchive(e)
+	if err != nil {
+		return nil, &SkippedFile{RelPath: e.rel, Reason: err.Error()}
+	}
+	return a, nil
+}
+
 // looseAsset builds the single asset for a loose file entry, reading the file to
 // compute its content fingerprint and, for an image, its pixel dimensions.
 // Build/Refresh reuse a cached loose asset via LoosePrint so these reads only
@@ -204,10 +216,7 @@ func Scan(root string) ([]Asset, error) {
 			assets = append(assets, looseAssets(e)...)
 			continue
 		}
-		a, err := enumerateArchive(e)
-		if err != nil {
-			return nil, err
-		}
+		a, _ := archiveAssets(e)
 		assets = append(assets, a...)
 	}
 	return dedup(assets), nil
