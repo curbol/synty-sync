@@ -3,6 +3,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/model"
@@ -142,5 +143,37 @@ func TestTagsPath(t *testing.T) {
 		if got := TagsPath(in); got != want {
 			t.Errorf("TagsPath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A misspelled key decodes to nothing and is then deleted from the user's working
+// tree by the next Save, while the user sees a misleading "no variant_includes"
+// error rather than "unknown key".
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, FileName)
+	if err := os.WriteFile(p, []byte("variant_include = [\"Godot_*\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("a misspelled key must be reported, not silently dropped")
+	}
+	if !strings.Contains(err.Error(), "variant_include") {
+		t.Errorf("error should name the offending key, got %q", err)
+	}
+}
+
+// variant_includes is hand-authored, so it is the likeliest place for a glob typo.
+// A bad pattern matches nothing, which looks exactly like "the store has no files
+// for your engine".
+func TestValidateRejectsMalformedGlob(t *testing.T) {
+	if err := (Manifest{VariantIncludes: []string{"Godot_*", "Unity_[4"}}).Validate(); err == nil {
+		t.Error("a malformed glob must be reported")
+	} else if !strings.Contains(err.Error(), "Unity_[4") {
+		t.Errorf("error should name the offending pattern, got %q", err)
+	}
+	if err := (Manifest{VariantIncludes: []string{"Godot_*", "SourceFiles"}}).Validate(); err != nil {
+		t.Errorf("valid patterns rejected: %v", err)
 	}
 }

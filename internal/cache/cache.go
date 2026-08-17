@@ -42,6 +42,21 @@ func safeIdentity(fileToken, filename string) error {
 	return safeName("download filename", filename)
 }
 
+// resolve turns a cache-relative path into an absolute one, refusing anything that
+// would leave the library root. Unlike the components Store writes, these paths
+// arrive from the lockfile, which is committed and travels with the consuming
+// project, so they are validated rather than trusted.
+func resolve(libraryRoot, relPath string) (string, error) {
+	if relPath == "" || path.IsAbs(relPath) || filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("unsafe cache path %q", relPath)
+	}
+	clean := filepath.Clean(filepath.FromSlash(relPath))
+	if clean == ".." || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe cache path %q", relPath)
+	}
+	return filepath.Join(libraryRoot, clean), nil
+}
+
 // Store streams r into <libraryRoot>/<fileToken>/<filename> via a temp file in the
 // destination dir, hashing while writing and renaming atomically. It returns the
 // relative cache path, the sha256, and the byte count.
@@ -81,7 +96,11 @@ func Store(libraryRoot, fileToken, filename string, r io.Reader) (relPath, sha s
 // Verify reports whether the file at relPath exists and matches sha. A full hash
 // is used; callers may skip it (presence-only) for cheap status checks.
 func Verify(libraryRoot, relPath, sha string) bool {
-	f, err := os.Open(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(full)
 	if err != nil {
 		return false
 	}
@@ -95,14 +114,22 @@ func Verify(libraryRoot, relPath, sha string) bool {
 
 // Exists reports whether relPath is present (cheap presence check, no hashing).
 func Exists(libraryRoot, relPath string) bool {
-	_, err := os.Stat(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(full)
 	return err == nil
 }
 
 // Hash returns the sha256 and byte size of a cached file (used to adopt a file
 // migrated in from a pre-existing flat zip).
 func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {
-	f, err := os.Open(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return "", 0, err
+	}
+	f, err := os.Open(full)
 	if err != nil {
 		return "", 0, err
 	}
@@ -117,7 +144,11 @@ func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {
 
 // Remove deletes the file at relPath (used to prune a prior version).
 func Remove(libraryRoot, relPath string) error {
-	err := os.Remove(filepath.Join(libraryRoot, filepath.FromSlash(relPath)))
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(full)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -146,7 +177,7 @@ var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 // lowercases, so "INTERFACE_..._Source_Sprites_v3" and the item-page-derived
 // "INTERFACE_..._SourceSprites_v3" compare equal.
 func normalizeName(s string) string {
-	s = strings.TrimSuffix(s, ".zip")
+	s = strings.TrimSuffix(s, filepath.Ext(s))
 	s = collisionSuffix.ReplaceAllString(s, "")
 	return nonAlnum.ReplaceAllString(strings.ToLower(s), "")
 }
@@ -182,8 +213,15 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 		if err := os.MkdirAll(dest, 0o755); err != nil {
 			return results, err
 		}
+		target := filepath.Join(dest, e.Name())
+		if _, err := os.Stat(target); err == nil {
+			// The layout copy wins. os.Rename would replace it silently, and the caller
+			// hashes whatever lands here and records that sha, so a stale flat zip would
+			// be adopted as verified content.
+			continue
+		}
 		from := filepath.Join(libraryRoot, e.Name())
-		if err := os.Rename(from, filepath.Join(dest, e.Name())); err != nil {
+		if err := os.Rename(from, target); err != nil {
 			return results, fmt.Errorf("migrate %s: %w", e.Name(), err)
 		}
 		results = append(results, MigrateResult{FileID: w.FileID, From: e.Name(), RelPath: rel})

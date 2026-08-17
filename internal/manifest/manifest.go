@@ -7,6 +7,7 @@
 package manifest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,6 +64,18 @@ func TagsPath(manifestPath string) string {
 	return strings.TrimSuffix(manifestPath, ".toml") + ".tags.toml"
 }
 
+// Validate reports a manifest the user has to fix by hand. A malformed
+// variant_includes glob is the case that matters: filepath.Match reports it as "no
+// match", so a typo looks exactly like a library with nothing for your engine.
+func (m Manifest) Validate() error {
+	for _, pat := range m.VariantIncludes {
+		if _, err := filepath.Match(pat, ""); err != nil {
+			return fmt.Errorf("bad variant_includes pattern %q: %w", pat, err)
+		}
+	}
+	return nil
+}
+
 // Filter returns a predicate selecting variants whose token matches any of the
 // manifest's include globs.
 func (m Manifest) Filter() func(model.Variant) bool {
@@ -83,14 +96,27 @@ func Load(path string) (Manifest, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return m, nil
 	}
-	if _, err := toml.DecodeFile(path, &m); err != nil {
+	md, err := toml.DecodeFile(path, &m)
+	if err != nil {
 		return Manifest{}, err
+	}
+	// Save re-encodes from the struct, so a key that decodes to nothing here is also
+	// deleted from the user's file on the next write.
+	if un := md.Undecoded(); len(un) > 0 {
+		keys := make([]string, 0, len(un))
+		for _, k := range un {
+			keys = append(keys, k.String())
+		}
+		return Manifest{}, fmt.Errorf("%s: unknown key(s): %s", path, strings.Join(keys, ", "))
 	}
 	return m, nil
 }
 
 // Save writes the manifest at path atomically, packs sorted by slug.
 func Save(path string, m Manifest) error {
+	// Sort a copy: the value receiver shares the caller's backing array, so sorting
+	// in place would reorder their slice behind their back.
+	m.Packs = append([]Entry(nil), m.Packs...)
 	sort.Slice(m.Packs, func(i, j int) bool { return m.Packs[i].Slug < m.Packs[j].Slug })
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".synty-sync-*")
 	if err != nil {
