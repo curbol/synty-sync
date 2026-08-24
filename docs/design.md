@@ -73,6 +73,7 @@ Versionless rows (icons) are skipped. The `variant` token is the filter key
 synty-sync select   # pick which packs to mirror (opens a local web page)
 synty-sync status   # enumerate + diff, print what would change. No downloads.
 synty-sync sync     # status, then download the delta, verify, rewrite the lockfile.
+                    # Exits non-zero if a file it was asked for could not be fetched.
 synty-sync list     # print the current lockfile as a readable table.
 synty-sync update   # self-replace the running binary from the latest GitHub release.
 synty-sync version  # print the installed version.
@@ -89,16 +90,18 @@ than silently swallowing the flags after it.
 
 ```
 1. Load session            -> Cookie header for syntystore.com
-2. Enumerate library       -> walk line_items_page until empty; collect pack item URLs
-3. Read each item page     -> [{pack, variant, version, sizeBytes, fileId, orderId, orderItemId}]
-4. Apply variant filter    -> keep variants matching variant_includes (no default; set in the manifest)
-5. Diff vs lockfile        -> new | changed (version differs) | unchanged
-6. Download delta          -> 302 -> CloudFront -> temp file -> sha256 -> atomic rename
-7. Rewrite lockfile        -> current version/sha per (pack, variant); print summary
+2. Sweep abandoned temps   -> reclaim what an interrupted earlier run left behind
+3. Enumerate library       -> walk line_items_page until empty; collect pack item URLs
+4. Read each item page     -> [{pack, variant, version, sizeBytes, fileId, orderId, orderItemId}]
+5. Apply variant filter    -> keep variants matching variant_includes (no default; set in the manifest)
+6. Diff vs lockfile        -> new | changed (version differs) | unchanged
+7. Download delta          -> 302 -> CloudFront -> temp file -> checks -> sha256 -> commit
+8. Rewrite lockfile        -> current version/sha per file; print summary and failures
 ```
 
-Steps 2-3 run at small concurrency with polite backoff; this is the only per-run store load
-when nothing changed.
+Steps 3-4 run at small concurrency with polite backoff; this is the only per-run store load
+when nothing changed. Step 7 fails per file: the run continues, and the lockfile still
+records everything that succeeded.
 
 ## Session handoff
 
@@ -143,19 +146,19 @@ config). Schema:
       "files": {
         "POLYGON_Pirate|Godot_4_5_1": {
           "fileToken": "POLYGON_Pirate", "variant": "Godot_4_5_1", "version": "v1_0_1",
-          "fileId": 2282645, "sizeBytes": 41700000, "sha256": "…",
+          "fileId": 2282645, "advertisedSize": 41700000, "sizeBytes": 41712983, "sha256": "…",
           "cachePath": "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip",
           "downloadedAt": "2026-06-16T…"
         },
         "GENERIC_Particle_FX|Godot_4_5_1": {
           "fileToken": "GENERIC_Particle_FX", "variant": "Godot_4_5_1", "version": "v1_0_0",
-          "fileId": 2344711, "sizeBytes": 2731401, "sha256": "…",
+          "fileId": 2344711, "advertisedSize": 2700000, "sizeBytes": 2731401, "sha256": "…",
           "cachePath": "GENERIC_Particle_FX/GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip",
           "downloadedAt": "2026-06-16T…"
         },
         "POLYGON_Pirate|Unity_2022_3": {
           "fileToken": "POLYGON_Pirate", "variant": "Unity_2022_3", "version": "v1_6_1",
-          "fileId": 1164794, "sizeBytes": 141000000, "tracked": false
+          "fileId": 1164794, "advertisedSize": 141000000, "tracked": false
         }
       }
     }
@@ -165,6 +168,11 @@ config). Schema:
 
 `tracked: false` (absent `sha256`/`cachePath`) marks a file that is owned and version-tracked
 but not downloaded under the current filter. Git history of this file is the changelog.
+
+The two size fields are deliberately separate. `advertisedSize` is the portal's rounded label
+figure and refreshes on every run; `sizeBytes` is what actually landed on disk and is written
+only when a run resolves the file. One field holding both leaves no way to tell a display
+ballpark from the count the integrity check compares against.
 
 ## Cache
 
@@ -183,8 +191,9 @@ entry points at it. On update the tool writes the new version and removes the pr
 that file identity, so the cache always reflects the lockfile's current state. No backup and
 no version archive: current versions are re-downloadable from Synty, and the assets you depend
 on are made durable in the game repo at promotion (sub-project 2), not here. What makes the
-cache reconstructable in practice: `sync` reads the cache when diffing, so a tracked file that
-is missing or fails its sha check on disk re-downloads instead of being reported unchanged.
+cache reconstructable in practice: both commands read the cache when diffing, so a tracked
+file that is missing, truncated, or (on `sync`, which re-hashes) corrupt re-downloads instead
+of being reported unchanged.
 The existing flat zips in the library are migrated into this layout on first run
 (matched by a normalized filename key, since the real names render the variant unlike the
 item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` collision suffixes).
@@ -195,13 +204,34 @@ library root before use, since that file is committed and travels with the proje
 
 ## Download integrity
 
-Each download streams to a temp file in the destination directory, hashes sha256 while
-writing, then atomically renames into place and records `sha256` plus the actual byte count
-in the lockfile. The portal's label size is rounded (e.g. "2.6 MB" for 2,731,401 bytes), so
-it is a display ballpark only, not an exact integrity figure; integrity rests on the sha and
-the atomic write. The cache filename comes from the final signed-CloudFront URL path
-basename (the signed URL sets `Content-Disposition` to a bare "attachment"). A failed or
-interrupted download leaves only the temp file, so the next run re-fetches.
+Nothing unverified ever holds a real cache path. `cache.Store` streams the body into a
+`.synty-dl-*` temp file beside its eventual destination, hashing as it goes, and stops there:
+the caller inspects the bytes and then `Commit`s or `Discard`s them. Renaming inside `Store`
+would leave a window where an interrupt strands a rejected body exactly where the next run's
+adopt scan would take it for genuine.
+
+Three checks stand between a response and the lockfile:
+
+1. The client refuses a document `Content-Type` before streaming anything. An expired session
+   and a CDN refusal both answer the download href with a login page or an XML error, often at
+   200, which the status check alone waves through.
+2. The syncer sniffs the delivered bytes for the response that claims to be an archive and is
+   not. Only text is refused: an archive format this tool has not seen must not be turned
+   away, but no archive begins with prose, and a zero-byte body is not a pack.
+3. `sha256` and the exact byte count are recorded from the committed file, and later runs
+   compare against them.
+
+Both rejections are permanent: no number of retries turns a login page into a pack.
+
+The cache filename comes from the final signed-CloudFront URL path basename (the signed URL
+sets `Content-Disposition` to a bare "attachment"). The portal's label size is rounded (e.g.
+"2.6 MB" for 2,731,401 bytes), so it is a display ballpark only; it drives the progress line
+and nothing else.
+
+A run that dies mid-transfer leaves its temp behind. Every run sweeps temps older than a day
+before enumerating — old enough that a concurrent run's in-flight transfer survives — and the
+adopt scan skips the prefix outright, since a partial can carry enough of a name to normalize
+onto a wanted file.
 
 ## Failure handling
 
@@ -217,13 +247,25 @@ interrupted download leaves only the temp file, so the next run re-fetches.
   library and, through `select`, drop the user's enabled flags. The walk also stops if a
   page adds no packs it has not already seen, so a paginator that clamps an out-of-range
   page cannot loop forever.
+- **Empty library against a populated lockfile:** refused outright. A read that returns
+  nothing is far more often markup that moved than a library someone emptied, and the
+  lockfile is committed to someone's project.
 - **Changed markup:** parsing is defensive and asserts invariants (each tracked row yields a
   `fileId` and a version). A parse that yields zero files for a non-empty page is a loud
   error, not a silent skip — enforced at both layers: the item parser fails when a page has
   rows but none carry a version label (the file-heading class moving would otherwise make
   every row look like a versionless icon row), and the syncer refuses a pack that reaches it
   with no files at all, since rebuilding one from an empty list erases every entry it holds.
-- **Partial / corrupt downloads:** temp-file + atomic-rename + size/sha verification, as above.
+- **A failed download costs its file, not the run.** It is reported, left untracked so the
+  next run retries it, and the lockfile is still written — aborting would throw away the
+  record of everything the run *did* download. Only failures a later run could clear move the
+  exit status; a 404 means the store no longer serves the file, and failing every future sync
+  on it forever helps nobody.
+- **Partial / corrupt downloads:** two-phase write, body checks, and sha + exact byte count,
+  as above. `status` compares the recorded byte count (cheap, and enough to see a truncation);
+  `sync` also re-hashes, which is the only check that sees a mid-file corruption.
+- **De-owned packs:** a pack the library no longer lists is reported and its lockfile record
+  kept. One enumeration is not enough to erase a committed record.
 - **Politeness:** capped concurrency, honor obvious rate limits (429 and 408 back off and
   retry), and abandon the queue once a pack fails rather than fetching a whole library's
   item pages for a run that is going to abort.

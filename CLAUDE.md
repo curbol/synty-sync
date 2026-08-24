@@ -45,24 +45,33 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   (Firefox or Zen, the zero-paste default), a `cookies.txt`, or a pasted-curl file.
   Forwards every syntystore.com cookie rather than guessing the session one.
 - `portal` — the Sky Pilot Shopify portal client. `client.go` does HTTP (retry with
-  backoff on 5xx/transient; fail-fast on 4xx) and the `Enumerate` / `ItemFiles` /
-  `Resolve` calls; `parse.go` parses library-list and item pages with goquery. Parsing is
-  deliberately strict: a non-empty page yielding zero files is a loud error, not a silent
-  skip. `ErrExpiredSession` distinguishes an expired session from an empty library.
+  backoff on 5xx/transient; fail-fast on 4xx), the `Enumerate` / `ItemFiles` / `Resolve`
+  calls, and the response-level download guard; `parse.go` parses library-list and item
+  pages with goquery. Retry counts, the per-attempt deadline and the page-size bound live
+  on the client's `Limits` field, not in package vars. Parsing is deliberately strict: a
+  non-empty page yielding zero files is a loud error, not a silent skip.
+  `ErrExpiredSession` distinguishes an expired session from an empty library, and
+  `ErrNotAPackage` a download that answered with a document.
 - `model` — shared domain types (`Pack`, `FileEntry`, `Variant`) and the identity rules:
   the pack `Slug` (from display name, since file-label tokens aren't stable within a pack)
   and the per-file `Key()` = `fileToken|variant`.
-- `syncer` — orchestrates a run: enumerate → fetch item pages (bounded concurrency) →
-  filter variants → **dedup files by `fileId`** → `classify` each against the prior
-  lockfile + cache → download the delta (retry, resolving a fresh signed URL each attempt)
-  → build and save the new lockfile. `classify` is pure and unit-tested; the `Class` enum
-  (New/Changed/DownloadNow/CacheMissing/Adopted/Unchanged) is the core diff logic.
+- `syncer` — orchestrates a run: sweep abandoned temps → enumerate → fetch item pages
+  (bounded concurrency) → filter variants → **dedup files by `fileId`** → `classify` each
+  against the prior lockfile + cache → download the delta (retry, resolving a fresh signed
+  URL each attempt) → build and save the new lockfile. `classify` is pure and unit-tested;
+  the `Class` enum (New/Changed/DownloadNow/CacheMissing/Adopted/Unchanged) is the core
+  diff logic. It also owns the semantic download guards (the body sniff) and the failure
+  model: `Report.Failures` plus `Report.Failed()`, which drives the exit status.
 - `cache` — the local mirror, keyed by **file identity, not owning pack**, so a file
-  bundled across packs is stored once. Atomic temp-file + sha256 write (`Store`);
-  `Verify`/`Exists`/`Hash`/`Remove`; `Migrate` folds pre-existing flat zips into the layout.
+  bundled across packs is stored once. Two-phase writes: `Store` hashes into a
+  `.synty-dl-*` temp and returns a `*Pending`, which the caller `Commit`s or `Discard`s.
+  `Verify` (exact recorded size) / `VerifyDeep` (sha) / `Hash` / `Remove` / `SweepTemps`;
+  `Migrate` folds pre-existing flat zips into the layout.
 - `lockfile` — `synty-sync.lock.json` (beside the manifest, committed with the consuming
   project): the authoritative record of owned packs, versions, checksums, and which files
-  are downloaded. Stable formatting for minimal diffs.
+  are downloaded. `advertisedSize` (the portal's rounded label, refreshed every run) is
+  kept apart from `sizeBytes` (what landed on disk, written only when a run resolves the
+  file). Stable formatting for minimal diffs.
 - `manifest` — `synty-sync.toml`, the committed project manifest (discovered by walking up
   from cwd, lives with the consuming project, carries no account identity): the engine
   `variant_includes` filter (no default — the user must set it) plus the pack-selection
@@ -83,7 +92,15 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   `cache`.
 - **Selection is opt-in.** Newly-owned packs are disabled by default in `manifest`.
 - **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
-  `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly.
+  `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly,
+  and an enumeration that comes back empty while the lockfile holds packs is refused
+  (`syncer.ErrEmptyLibrary`).
+- **Nothing unverified reaches a real cache path.** `cache.Store` does not rename; the
+  syncer `Commit`s only after the body checks pass. A download that answers with a
+  document is refused twice — by Content-Type in `portal`, by a body sniff in `syncer` —
+  because otherwise a login page is hashed and recorded as the pack's content.
+- **A failed download fails its file, not the run.** The lockfile is still written; only
+  failures a later run could clear move the exit status.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
 - **No PII in the repo.** The customer id, emails, cookies, and session captures
