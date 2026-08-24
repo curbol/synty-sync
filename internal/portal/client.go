@@ -41,6 +41,35 @@ func StatusOf(err error) (int, bool) {
 	return 0, false
 }
 
+// ErrNotAPackage means the download endpoint answered with a document instead of
+// package bytes. An expired session and a CDN refusal both take that shape, and both
+// arrive with a 200 the status check alone would wave through — after which the body
+// is streamed into the cache, hashed, and recorded in the lockfile as the pack's
+// verified content, where it stays until someone opens the file by hand.
+var ErrNotAPackage = errors.New("the download response is a document, not package bytes")
+
+// documentMediaType reports whether a Content-Type is one no archive can have. It
+// judges only what it recognizes: an absent or unparseable header is not a verdict,
+// because the caller sniffs the delivered bytes as well.
+func documentMediaType(header string) (string, bool) {
+	if header == "" {
+		return "", false
+	}
+	mt, _, err := mime.ParseMediaType(header)
+	if err != nil {
+		return header, false
+	}
+	mt = strings.ToLower(mt)
+	if strings.HasPrefix(mt, "text/") || strings.HasSuffix(mt, "+xml") || strings.HasSuffix(mt, "+json") {
+		return mt, true
+	}
+	switch mt {
+	case "application/json", "application/xml":
+		return mt, true
+	}
+	return mt, false
+}
+
 const shopParam = "synty-store.myshopify.com"
 
 // Client talks to the Sky Pilot portal with an authenticated cookie. Build one with
@@ -52,6 +81,7 @@ type Client struct {
 	CustomerID string
 	Cookie     string
 	UserAgent  string
+	Limits     Limits
 }
 
 // New returns a Client for baseURL. A nil httpClient means http.DefaultClient.
@@ -87,41 +117,69 @@ func (c *Client) get(ctx context.Context, rawURL string) (*http.Response, error)
 	return c.HTTP.Do(req)
 }
 
-const httpAttempts = 4
+// Limits bounds a page fetch. Every field is optional: a zero one takes the default
+// below. They belong to the Client rather than the package so two clients in one
+// process — a test's and a real one — cannot reach into each other's policy.
+type Limits struct {
+	// Attempts is how many times a page fetch is tried before giving up.
+	Attempts int
+	// Backoff is the first wait between attempts; each later one doubles it.
+	Backoff time.Duration
+	// PageTimeout bounds one attempt end to end. The client sets no whole-request
+	// timeout (file downloads are large) and only a response-header timeout, which a
+	// server can satisfy and then stall the body forever.
+	PageTimeout time.Duration
+	// MaxPageBytes bounds the read: a library page is HTML, never megabytes.
+	MaxPageBytes int64
+}
 
-var httpBackoff = 500 * time.Millisecond // var so tests can shorten it
-
-// pageTimeout bounds one page-fetch attempt end to end. The client sets no
-// whole-request timeout (asset downloads are large) and only a response-header
-// timeout, which a server can satisfy and then stall the body forever.
-// maxPageBytes bounds the read: a library page is HTML, never megabytes.
-// Both are vars so tests can shrink them.
-var (
-	pageTimeout  = 60 * time.Second
-	maxPageBytes = int64(8 << 20)
+const (
+	defaultAttempts     = 4
+	defaultBackoff      = 500 * time.Millisecond
+	defaultPageTimeout  = 60 * time.Second
+	defaultMaxPageBytes = int64(8 << 20)
 )
+
+// limits fills in whatever the caller left zero.
+func (c *Client) limits() Limits {
+	l := c.Limits
+	if l.Attempts <= 0 {
+		l.Attempts = defaultAttempts
+	}
+	if l.Backoff <= 0 {
+		l.Backoff = defaultBackoff
+	}
+	if l.PageTimeout <= 0 {
+		l.PageTimeout = defaultPageTimeout
+	}
+	if l.MaxPageBytes <= 0 {
+		l.MaxPageBytes = defaultMaxPageBytes
+	}
+	return l
+}
 
 // getBody fetches a page, retrying transient failures (network errors, 5xx) with
 // bounded exponential backoff. A 4xx fails fast (retrying won't help). The store
 // occasionally returns a one-off 500, which would otherwise abort the whole run.
 func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
+	lim := c.limits()
 	var body []byte
-	err := retry.Do(ctx, httpAttempts, httpBackoff, func() error {
-		attemptCtx, cancel := context.WithTimeout(ctx, pageTimeout)
+	err := retry.Do(ctx, lim.Attempts, lim.Backoff, func() error {
+		attemptCtx, cancel := context.WithTimeout(ctx, lim.PageTimeout)
 		defer cancel()
 		resp, err := c.get(attemptCtx, rawURL)
 		if err != nil {
 			return c.redactErr(rawURL, err) // network error, retryable
 		}
 		defer drainClose(resp)
-		b, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, lim.MaxPageBytes+1))
 		if err != nil {
 			return c.redactErr(rawURL, err)
 		}
-		if int64(len(b)) > maxPageBytes {
+		if int64(len(b)) > lim.MaxPageBytes {
 			// Erroring beats truncating: a shortened library page still parses as a
 			// valid short page and would quietly end enumeration early.
-			return retry.Stop(fmt.Errorf("GET %s: page exceeds %d bytes", c.redact(rawURL), maxPageBytes))
+			return retry.Stop(fmt.Errorf("GET %s: page exceeds %d bytes", c.redact(rawURL), lim.MaxPageBytes))
 		}
 		if resp.StatusCode != http.StatusOK {
 			se := &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
@@ -258,8 +316,8 @@ func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) ([]model.FileEn
 	return ParseItemPage(body, pack.Slug)
 }
 
-// Resolve issues the download request, follows the 302 to the signed CDN URL, and
-// returns the open body plus the filename. The signed URL sets Content-Disposition
+// Resolve issues the download request, follows the 302 to the signed CDN URL, checks
+// the response is not a document, and returns the open body plus the filename. The signed URL sets Content-Disposition
 // to a bare "attachment", so the filename is taken from the final URL path
 // basename, with the Content-Disposition filename as a fallback. The caller must
 // close the returned body.
@@ -273,6 +331,10 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 	if resp.StatusCode != http.StatusOK {
 		drainClose(resp)
 		return nil, "", &StatusError{Status: resp.StatusCode, Op: "download " + file.Key()}
+	}
+	if mt, isDoc := documentMediaType(resp.Header.Get("Content-Type")); isDoc {
+		drainClose(resp)
+		return nil, "", fmt.Errorf("download %s: %w (Content-Type %s)", file.Key(), ErrNotAPackage, mt)
 	}
 	filename = filenameFromURL(resp.Request.URL)
 	if filename == "" {

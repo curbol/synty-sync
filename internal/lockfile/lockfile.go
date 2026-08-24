@@ -27,16 +27,23 @@ type Pack struct {
 // File records one owned file. A filtered-out (not downloaded) file has
 // Tracked=false and no SHA256/CachePath. A shared bundled file points multiple
 // packs' entries at the same CachePath.
+//
+// The two size fields are deliberately separate. AdvertisedSize is what the portal's
+// label said and refreshes on every run; SizeBytes is what actually landed on disk
+// and is written only when a run resolves the file. Folding them into one field
+// leaves no way to tell a rounded display figure from the count the integrity check
+// compares against.
 type File struct {
-	FileToken    string `json:"fileToken"`
-	Variant      string `json:"variant"`
-	Version      string `json:"version"`
-	FileID       int    `json:"fileId"`
-	Tracked      bool   `json:"tracked"`
-	SHA256       string `json:"sha256,omitempty"`
-	SizeBytes    int64  `json:"sizeBytes,omitempty"`
-	CachePath    string `json:"cachePath,omitempty"`
-	DownloadedAt string `json:"downloadedAt,omitempty"`
+	FileToken      string `json:"fileToken"`
+	Variant        string `json:"variant"`
+	Version        string `json:"version"`
+	FileID         int    `json:"fileId"`
+	Tracked        bool   `json:"tracked"`
+	SHA256         string `json:"sha256,omitempty"`
+	AdvertisedSize int64  `json:"advertisedSize,omitempty"`
+	SizeBytes      int64  `json:"sizeBytes,omitempty"`
+	CachePath      string `json:"cachePath,omitempty"`
+	DownloadedAt   string `json:"downloadedAt,omitempty"`
 }
 
 // New returns an empty lockfile ready to populate.

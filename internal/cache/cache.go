@@ -1,6 +1,11 @@
 // Package cache manages the local library mirror: file-identity-keyed layout,
-// atomic+hashed downloads, and folding pre-existing flat zips into the layout.
+// hashed downloads, and folding pre-existing flat zips into the layout.
 // The cache is expendable; durability of used assets lives in the game repo.
+//
+// Writes are two-phase: Store leaves the bytes in a temp file so the caller's checks
+// run before Commit renames anything into place. Nothing unverified ever occupies a
+// real cache path, even briefly, because an interrupt in that window would strand a
+// rejected body where the next run's adopt scan would take it for genuine.
 package cache
 
 import (
@@ -13,7 +18,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// tempPrefix marks an in-flight download. SweepTemps looks for it, and the adopt
+// scan deliberately does not consider it.
+const tempPrefix = ".synty-dl-"
 
 // RelPath is a file's cache path relative to the library root, keyed by file
 // identity (not owning pack) so a bundled file shared across packs is stored once.
@@ -57,45 +67,123 @@ func resolve(libraryRoot, relPath string) (string, error) {
 	return filepath.Join(libraryRoot, clean), nil
 }
 
-// Store streams r into <libraryRoot>/<fileToken>/<filename> via a temp file in the
-// destination dir, hashing while writing and renaming atomically. It returns the
-// relative cache path, the sha256, and the byte count.
-func Store(libraryRoot, fileToken, filename string, r io.Reader) (relPath, sha string, size int64, err error) {
+// Pending is a fully-written but uncommitted download.
+type Pending struct {
+	RelPath string
+	SHA256  string
+	Size    int64
+
+	tempPath string
+	final    string
+}
+
+// TempPath is where the bytes currently are, so the caller can inspect them before
+// deciding to commit.
+func (p *Pending) TempPath() string { return p.tempPath }
+
+// Commit renames the pending bytes to their real cache path.
+func (p *Pending) Commit() error {
+	if err := os.Rename(p.tempPath, p.final); err != nil {
+		os.Remove(p.tempPath)
+		return err
+	}
+	return nil
+}
+
+// Discard removes the pending bytes. Callers use it whenever a check fails, so a
+// rejected body never reaches a real cache path.
+func (p *Pending) Discard() error {
+	err := os.Remove(p.tempPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// Store streams r into a temp file in the directory its eventual destination
+// <libraryRoot>/<fileToken>/<filename> lives in, hashing while writing. It does not
+// rename: the caller commits or discards.
+func Store(libraryRoot, fileToken, filename string, r io.Reader) (*Pending, error) {
 	if err := safeIdentity(fileToken, filename); err != nil {
-		return "", "", 0, err
+		return nil, err
 	}
-	rel := RelPath(fileToken, filename)
 	destDir := filepath.Join(libraryRoot, filepath.FromSlash(fileToken))
-	if err = os.MkdirAll(destDir, 0o755); err != nil {
-		return "", "", 0, err
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return nil, err
 	}
-	tmp, err := os.CreateTemp(destDir, ".synty-dl-*")
+	tmp, err := os.CreateTemp(destDir, tempPrefix+"*")
 	if err != nil {
-		return "", "", 0, err
+		return nil, err
 	}
 	tmpName := tmp.Name()
 	h := sha256.New()
-	size, err = io.Copy(io.MultiWriter(tmp, h), r)
+	size, err := io.Copy(io.MultiWriter(tmp, h), r)
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return "", "", 0, err
+		return nil, err
 	}
-	if err = tmp.Close(); err != nil {
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
 		os.Remove(tmpName)
-		return "", "", 0, err
+		return nil, err
 	}
-	final := filepath.Join(destDir, filename)
-	if err = os.Rename(tmpName, final); err != nil {
+	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return "", "", 0, err
+		return nil, err
 	}
-	return rel, hex.EncodeToString(h.Sum(nil)), size, nil
+	return &Pending{
+		RelPath:  RelPath(fileToken, filename),
+		SHA256:   hex.EncodeToString(h.Sum(nil)),
+		Size:     size,
+		tempPath: tmpName,
+		final:    filepath.Join(destDir, filename),
+	}, nil
 }
 
-// Verify reports whether the file at relPath exists and matches sha. A full hash
-// is used; callers may skip it (presence-only) for cheap status checks.
-func Verify(libraryRoot, relPath, sha string) bool {
+// SweepTemps removes abandoned download temps anywhere in the tree, returning how
+// many and how many bytes. It walks rather than scanning the root, because temps live
+// beside their destinations, and it spares anything newer than the cutoff so a
+// concurrent run's in-flight transfer survives.
+//
+// Nothing here fails: a subtree that cannot be read, or a root that does not exist yet
+// on a first run, is skipped. One unreadable directory must not stop a mirror over a
+// housekeeping pass.
+func SweepTemps(libraryRoot string, olderThan time.Time) (int, int64) {
+	var count int
+	var bytes int64
+	filepath.WalkDir(libraryRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), tempPrefix) {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil || !fi.ModTime().Before(olderThan) {
+			return nil
+		}
+		if os.Remove(p) == nil {
+			count++
+			bytes += fi.Size()
+		}
+		return nil
+	})
+	return count, bytes
+}
+
+// Verify is the cheap check: the file exists and its size is exactly what was
+// recorded. Exact size is what makes a truncated or replaced-by-an-error-page body
+// detectable without reading tens of gigabytes back off the disk.
+func Verify(libraryRoot, relPath string, wantSize int64) bool {
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(full)
+	return err == nil && !fi.IsDir() && fi.Size() == wantSize
+}
+
+// VerifyDeep re-hashes the file. It is opt-in because a library runs to tens of
+// gigabytes, and it is the only check that sees a mid-file corruption.
+func VerifyDeep(libraryRoot, relPath, sha string) bool {
 	full, err := resolve(libraryRoot, relPath)
 	if err != nil {
 		return false
@@ -110,16 +198,6 @@ func Verify(libraryRoot, relPath, sha string) bool {
 		return false
 	}
 	return hex.EncodeToString(h.Sum(nil)) == sha
-}
-
-// Exists reports whether relPath is present (cheap presence check, no hashing).
-func Exists(libraryRoot, relPath string) bool {
-	full, err := resolve(libraryRoot, relPath)
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(full)
-	return err == nil
 }
 
 // Hash returns the sha256 and byte size of a cached file (used to adopt a file
@@ -245,7 +323,10 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 	}
 	want := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
 	for _, e := range entries {
-		if e.IsDir() {
+		// An abandoned download temp is skipped outright: a partial transfer can carry
+		// enough of the name to normalize onto a wanted file, and adopting it would
+		// record a truncated body's digest as that file's truth.
+		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
 			continue
 		}
 		base := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))

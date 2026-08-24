@@ -288,3 +288,51 @@ func TestSyncOnlyTouchesEnabledPacks(t *testing.T) {
 		t.Errorf("a disabled pack's item page was fetched %d times", itemPageFetches)
 	}
 }
+
+// A sync where the store answers downloads with a login page has to exit non-zero.
+// The files it could not fetch are the whole point of the command, and a silent
+// success is what turns a dead session into a mirror everyone believes is current.
+func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "synty-sync.toml")
+	if err := os.WriteFile(manifestPath, []byte(
+		"variant_includes = [\"Godot_*\"]\n\n[[pack]]\nslug = \"pirate\"\nname = \"Pirate\"\nenabled = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = `<input class='sky-pilot-search-input'>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Query().Get("line_items_page") == "1":
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
+				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate</a></div>`)
+		case r.URL.Query().Get("line_items_page") != "":
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
+		case strings.Contains(r.URL.Path, "/order_items/"):
+			fmt.Fprint(w, `<div class='sky-pilot-list-item'>
+			  <div class='sky-pilot-file-heading'>POLYGON_Pirate_Godot_4_5_1 | v1.0.0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+			  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/77?x=1'>Download</a></div>
+			</div>`)
+		default:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, `<!doctype html><title>Log in</title>`)
+		}
+	}))
+	defer srv.Close()
+
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	lib := t.TempDir()
+	cfg := config.Config{LibraryPath: lib, Concurrency: 2}
+
+	var out bytes.Buffer
+	restore := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = restore })
+
+	err := runSyncOrStatus(context.Background(), client, cfg, manifestPath, filepath.Join(dir, "synty-sync.lock.json"), "", false)
+	if err == nil {
+		t.Fatal("a sync that downloaded nothing it was asked for returned success")
+	}
+	if !strings.Contains(out.String(), "failed") {
+		t.Errorf("the report does not name the failures:\n%s", out.String())
+	}
+}

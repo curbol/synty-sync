@@ -16,13 +16,10 @@ import (
 	"github.com/curbol/synty-sync/internal/model"
 )
 
-// fastBackoff shortens the retry wait for the duration of one test.
-func fastBackoff(t *testing.T) {
-	t.Helper()
-	old := httpBackoff
-	httpBackoff = time.Millisecond
-	t.Cleanup(func() { httpBackoff = old })
-}
+// testLimits keeps the retry waits short so the suite does not sleep through its own
+// backoff. Everything else stays at the client's defaults; the two tests that bound a
+// page's size or an attempt's deadline set that field themselves.
+func testLimits() Limits { return Limits{Backoff: time.Millisecond} }
 
 // A download href carries the account email (?email=…) alongside the customer id,
 // so a transport failure must not put the request URL into the error text.
@@ -30,7 +27,7 @@ func TestResolveTransportErrorHidesURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // force a dial failure
 
-	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "9876543"}
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "9876543"}
 	_, _, err := c.Resolve(context.Background(), model.FileEntry{
 		FileToken:    "POLYGON_Pirate_Pack",
 		Variant:      "SourceFiles",
@@ -54,13 +51,11 @@ func TestResolveTransportErrorHidesURL(t *testing.T) {
 // That is the path every real network failure takes, and it is separate from the
 // status-code path a 4xx exercises.
 func TestGetBodyRedactsCustomerIDOnTransportError(t *testing.T) {
-	fastBackoff(t)
-
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // force a dial failure
 
 	const id = "9876543"
-	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: id}
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: id}
 	_, err := c.Enumerate(context.Background())
 	if err == nil {
 		t.Fatal("expected a transport error")
@@ -73,8 +68,6 @@ func TestGetBodyRedactsCustomerIDOnTransportError(t *testing.T) {
 // A rate limit is transient: it must back off and retry, not fail the run like a
 // permanent 4xx.
 func TestGetBodyRetriesRateLimit(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -85,7 +78,7 @@ func TestGetBodyRetriesRateLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, err := c.getBody(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("getBody: %v", err)
@@ -98,8 +91,6 @@ func TestGetBodyRetriesRateLimit(t *testing.T) {
 // Retrying a 5xx must reuse the pooled connection, which requires the discarded
 // response body to be drained before it is closed.
 func TestGetBodyReusesConnectionAcrossRetries(t *testing.T) {
-	fastBackoff(t)
-
 	var calls, conns int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) <= 2 {
@@ -117,7 +108,7 @@ func TestGetBodyReusesConnectionAcrossRetries(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL}
 	if _, err := c.getBody(context.Background(), srv.URL); err != nil {
 		t.Fatalf("getBody: %v", err)
 	}
@@ -203,7 +194,7 @@ func TestEnumerateExpiredSessionMidWalk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
 	packs, err := c.Enumerate(context.Background())
 	if !errors.Is(err, ErrExpiredSession) {
 		t.Errorf("mid-walk logout: err = %v, want ErrExpiredSession (got %d packs)", err, len(packs))
@@ -221,7 +212,7 @@ func TestEnumerateStopsWhenPaginationRepeats(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
 	_, err := c.Enumerate(context.Background())
 	if err == nil {
 		t.Fatal("a paginator that never advances must error, not loop forever")
@@ -234,8 +225,6 @@ func TestEnumerateStopsWhenPaginationRepeats(t *testing.T) {
 // A 408 is the server saying the request did not complete in time, which is
 // retryable. Failing fast on it aborts the whole run over one blip.
 func TestGetBodyRetriesRequestTimeout(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -246,7 +235,7 @@ func TestGetBodyRetriesRequestTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, err := c.getBody(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("getBody: %v", err)
@@ -259,17 +248,12 @@ func TestGetBodyRetriesRequestTimeout(t *testing.T) {
 // An oversized page must error rather than truncate: a silently shortened library
 // page parses as a valid short page and quietly ends enumeration early.
 func TestGetBodyRejectsOversizedPage(t *testing.T) {
-	fastBackoff(t)
-	old := maxPageBytes
-	maxPageBytes = 1024
-	t.Cleanup(func() { maxPageBytes = old })
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, strings.Repeat("x", 4096))
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: Limits{Backoff: time.Millisecond, MaxPageBytes: 1024}, HTTP: http.DefaultClient, BaseURL: srv.URL}
 	if _, err := c.getBody(context.Background(), srv.URL); err == nil {
 		t.Error("a page past the size bound must error, not truncate")
 	}
@@ -278,11 +262,6 @@ func TestGetBodyRejectsOversizedPage(t *testing.T) {
 // Headers arrive and then the body stalls. Without a per-attempt read deadline the
 // run blocks forever: ResponseHeaderTimeout has already been satisfied.
 func TestGetBodyTimesOutOnStalledBody(t *testing.T) {
-	fastBackoff(t)
-	old := pageTimeout
-	pageTimeout = 150 * time.Millisecond
-	t.Cleanup(func() { pageTimeout = old })
-
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -291,7 +270,7 @@ func TestGetBodyTimesOutOnStalledBody(t *testing.T) {
 	}))
 	defer func() { close(release); srv.Close() }()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: Limits{Backoff: time.Millisecond, PageTimeout: 150 * time.Millisecond}, HTTP: http.DefaultClient, BaseURL: srv.URL}
 	done := make(chan error, 1)
 	go func() { _, err := c.getBody(context.Background(), srv.URL); done <- err }()
 	select {
@@ -312,7 +291,7 @@ func TestEnumerateEmptyLibrary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
 	packs, err := c.Enumerate(context.Background())
 	if err != nil {
 		t.Fatalf("empty library should not error: %v", err)
@@ -384,8 +363,6 @@ func TestEnumerateRealLogoutShell(t *testing.T) {
 // so the code has to survive the retry.Stop wrapper. Nothing covered that path: the
 // only StatusOf test goes through Resolve, which never touches retry.
 func TestFailFastErrorKeepsItsStatusAndBound(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
@@ -393,7 +370,7 @@ func TestFailFastErrorKeepsItsStatusAndBound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	_, err := c.getBody(context.Background(), srv.URL)
 	if code, ok := StatusOf(err); !ok || code != http.StatusNotFound {
 		t.Errorf("StatusOf = (%d, %v), want (404, true) through the retry wrapper", code, ok)
@@ -405,8 +382,6 @@ func TestFailFastErrorKeepsItsStatusAndBound(t *testing.T) {
 
 // Exhausting the retries must stop at the bound and still surface the status.
 func TestRetriesAreBounded(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
@@ -414,12 +389,79 @@ func TestRetriesAreBounded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	_, err := c.getBody(context.Background(), srv.URL)
 	if code, ok := StatusOf(err); !ok || code != http.StatusInternalServerError {
 		t.Errorf("StatusOf = (%d, %v), want (500, true)", code, ok)
 	}
-	if int(calls) != httpAttempts {
-		t.Errorf("made %d attempts, want exactly httpAttempts (%d)", calls, httpAttempts)
+	if int(calls) != defaultAttempts {
+		t.Errorf("made %d attempts, want exactly the default (%d)", calls, defaultAttempts)
+	}
+}
+
+// zipBytes is a minimal body that sniffs as an archive rather than as a document,
+// standing in for the package bytes a real download returns.
+var zipBytes = append([]byte("PK\x03\x04"), make([]byte, 64)...)
+
+// An expired session or a CDN error answers the download href with a document, and
+// often with a 200. Without this guard those bytes are streamed to the cache, hashed,
+// and recorded in the lockfile as the pack's verified content.
+func TestResolveRefusesADocumentBody(t *testing.T) {
+	for _, tc := range []struct{ what, contentType, body string }{
+		{"a login page", "text/html; charset=utf-8", "<!doctype html><title>Log in</title>"},
+		{"a CDN error document", "application/xml", "<Error><Code>AccessDenied</Code></Error>"},
+		{"a JSON error", "application/json", `{"error":"forbidden"}`},
+		{"a plain-text notice", "text/plain", "Access denied"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
+			body, _, err := c.Resolve(context.Background(), model.FileEntry{
+				FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl/pack.zip"})
+			if err == nil {
+				body.Close()
+				t.Fatalf("Resolve accepted %s as package bytes", tc.what)
+			}
+			if !errors.Is(err, ErrNotAPackage) {
+				t.Errorf("error = %v; want ErrNotAPackage so the caller stops retrying it", err)
+			}
+			if body != nil {
+				t.Error("Resolve returned a body alongside its error; the caller will not close it")
+			}
+		})
+	}
+}
+
+func TestResolveAcceptsPackageContentTypes(t *testing.T) {
+	for _, ct := range []string{"application/zip", "application/octet-stream", "binary/octet-stream", ""} {
+		t.Run("content-type "+ct, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if ct == "" {
+					// Suppress the server's own sniffing, so the absent-header case is
+					// really absent rather than an inferred application/zip.
+					w.Header()["Content-Type"] = nil
+				} else {
+					w.Header().Set("Content-Type", ct)
+				}
+				w.Write(zipBytes)
+			}))
+			defer srv.Close()
+
+			c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
+			body, name, err := c.Resolve(context.Background(), model.FileEntry{
+				FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl/pack.zip"})
+			if err != nil {
+				t.Fatalf("Resolve rejected %q: %v", ct, err)
+			}
+			defer body.Close()
+			if name != "pack.zip" {
+				t.Errorf("filename = %q, want pack.zip", name)
+			}
+		})
 	}
 }

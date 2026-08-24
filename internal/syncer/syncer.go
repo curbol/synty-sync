@@ -5,10 +5,14 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,7 +54,7 @@ func (c Class) String() string {
 
 // classify decides the outcome for a file given its prior lockfile record (looked
 // up by fileId) and a cache check. Pure and unit-tested.
-func classify(av model.FileEntry, prior lockfile.File, hasPrior bool, cacheOK func(relPath, sha string) bool) Class {
+func classify(av model.FileEntry, prior lockfile.File, hasPrior bool, cacheOK func(lockfile.File) bool) Class {
 	switch {
 	case !hasPrior:
 		return New
@@ -58,7 +62,7 @@ func classify(av model.FileEntry, prior lockfile.File, hasPrior bool, cacheOK fu
 		return DownloadNow
 	case prior.Version != av.Version:
 		return Changed
-	case prior.CachePath == "" || !cacheOK(prior.CachePath, prior.SHA256):
+	case prior.CachePath == "" || !cacheOK(prior):
 		return CacheMissing
 	default:
 		return Unchanged
@@ -73,14 +77,51 @@ type FileDiff struct {
 	Class    Class
 }
 
+// Failure is one selected file the run could not resolve. Gone marks the single
+// cause no later run can clear — the store no longer serves the file — so it is
+// reported without moving the exit status.
+type Failure struct {
+	PackSlug string
+	Key      string
+	FileID   int
+	Err      string
+	Gone     bool
+}
+
 // Report summarizes a run.
 type Report struct {
 	Diffs       []FileDiff
 	Downloaded  []FileDiff
 	Adopted     []FileDiff // matched pre-existing flat zips, no download
+	Failures    []Failure
+	Removed     []string // lockfile packs the library no longer lists
+	Swept       int      // abandoned download temps removed
+	SweptBytes  int64
 	Warnings    []string
 	NewLockfile lockfile.Lockfile
 }
+
+// Failed reports whether the run should exit non-zero: any failure that a later run,
+// a fresh session, or a fix on this side could clear.
+func (r Report) Failed() bool {
+	for _, f := range r.Failures {
+		if !f.Gone {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrEmptyLibrary guards the committed record against a well-formed but wrong
+// enumeration. The lockfile travels with someone's project, and a read that returns
+// nothing is far more often markup that moved than a library someone emptied.
+var ErrEmptyLibrary = errors.New("the library listed no packs while the lockfile holds entries; " +
+	"refusing to treat that as the truth")
+
+// abandonedTempAge is how old an in-flight download temp must be before a run treats
+// it as abandoned. It has to clear any transfer a concurrent run could still be
+// writing, and the files here take a long time.
+const abandonedTempAge = 24 * time.Hour
 
 // Options configures a run.
 type Options struct {
@@ -97,6 +138,15 @@ type Options struct {
 	// a run states which packs it may touch rather than defaulting to all of them.
 	PackSelected func(slug string) bool
 	Progress     func(string) // optional per-step progress sink; nil = silent
+}
+
+// progressSink returns the run's progress function, or a no-op when the caller did
+// not supply one, so every path can call it unconditionally.
+func (o Options) progressSink() func(string) {
+	if o.Progress == nil {
+		return func(string) {}
+	}
+	return o.Progress
 }
 
 type resolved struct {
@@ -121,9 +171,18 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			return Report{}, fmt.Errorf("bad --only pattern %q: %w", opts.OnlyGlob, err)
 		}
 	}
+	opts.Progress = opts.progressSink()
 	progress := opts.Progress
-	if progress == nil {
-		progress = func(string) {}
+
+	report := Report{NewLockfile: lockfile.Lockfile{GeneratedAt: opts.Now, Packs: map[string]lockfile.Pack{}}}
+
+	// Housekeeping first, so an interrupted earlier run does not keep its bytes for
+	// the life of the library. A dry run touches nothing.
+	if !opts.DryRun {
+		report.Swept, report.SweptBytes = cache.SweepTemps(opts.LibraryRoot, time.Now().Add(-abandonedTempAge))
+		if report.Swept > 0 {
+			progress(fmt.Sprintf("swept %d abandoned download temp(s)", report.Swept))
+		}
 	}
 
 	progress("enumerating library…")
@@ -131,6 +190,22 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	if err != nil {
 		return Report{}, err
 	}
+	if len(packs) == 0 && len(lf.Packs) > 0 {
+		return Report{}, ErrEmptyLibrary
+	}
+	// Computed before the manifest and --only narrow the list, so a pack that is
+	// merely disabled is not mistaken for one that left the library.
+	owned := make(map[string]bool, len(packs))
+	for _, p := range packs {
+		owned[p.Slug] = true
+	}
+	for slug := range lf.Packs {
+		if !owned[slug] {
+			report.Removed = append(report.Removed, slug)
+		}
+	}
+	sort.Strings(report.Removed)
+
 	packs = filterPacks(packs, opts.OnlyGlob, opts.PackSelected)
 
 	progress(fmt.Sprintf("%d packs selected; reading item pages…", len(packs)))
@@ -168,7 +243,6 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		opts.Backoff = 500 * time.Millisecond
 	}
 
-	report := Report{NewLockfile: lockfile.Lockfile{GeneratedAt: opts.Now, Packs: map[string]lockfile.Pack{}}}
 	resolvedByID := map[int]resolved{}
 
 	// Adopt pre-existing flat zips into the layout so they are not re-downloaded.
@@ -250,9 +324,20 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			// classify only; nothing resolved
 		default:
 			progress(fmt.Sprintf("download %s", rep.Key()))
-			r, err := downloadWithRetry(ctx, c, opts.LibraryRoot, rep, opts.Attempts, opts.Backoff)
+			r, err := downloadWithRetry(ctx, c, opts, rep)
 			if err != nil {
-				return Report{}, fmt.Errorf("download %s: %w", rep.Key(), err)
+				// An interrupt is not a per-file verdict: every file left would be
+				// recorded as failed for a reason that has nothing to do with it.
+				if ctx.Err() != nil {
+					return Report{}, ctx.Err()
+				}
+				// One bad file costs that file. Aborting here would also throw away the
+				// lockfile, leaving everything this run did download unrecorded.
+				report.Failures = append(report.Failures, Failure{
+					PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id,
+					Err: err.Error(), Gone: goneFromTheStore(err),
+				})
+				continue
 			}
 			if fd.Class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
 				// Best-effort, but not silent: a prune that fails leaves the prior
@@ -339,27 +424,115 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 	return out, nil
 }
 
-func download(ctx context.Context, c *portal.Client, libraryRoot string, f model.FileEntry) (resolved, error) {
+// download fetches one file and checks the delivered bytes before letting them take a
+// cache path. The client has already refused a document Content-Type; this catches the
+// response that claims to be an archive and is not.
+func download(ctx context.Context, c *portal.Client, opts Options, f model.FileEntry) (resolved, error) {
 	body, filename, err := c.Resolve(ctx, f)
 	if err != nil {
 		return resolved{}, err
 	}
 	defer body.Close()
-	rel, sha, size, err := cache.Store(libraryRoot, f.FileToken, filename, body)
+
+	// A multi-gigabyte transfer otherwise reports nothing between "download" and
+	// "done", which is indistinguishable from a hang, so progress is counted off the
+	// body as it streams rather than announced up front.
+	sink := opts.progressSink()
+	counted := &progressReader{r: body, total: f.SizeBytes, report: func(read, total int64) {
+		sink(fmt.Sprintf("  %s: %s", f.Key(), progressLine(read, total)))
+	}}
+	pending, err := cache.Store(opts.LibraryRoot, f.FileToken, filename, counted)
 	if err != nil {
 		return resolved{}, err
 	}
-	return resolved{cachePath: rel, sha: sha, size: size, now: true}, nil
+	if err := looksLikePackage(pending.TempPath()); err != nil {
+		pending.Discard()
+		return resolved{}, fmt.Errorf("%s: %w", f.Key(), err)
+	}
+	if err := pending.Commit(); err != nil {
+		pending.Discard()
+		return resolved{}, err
+	}
+	return resolved{cachePath: pending.RelPath, sha: pending.SHA256, size: pending.Size, now: true}, nil
+}
+
+// ErrNotAPackageBody rejects a stored body that reads as prose. Only text is refused:
+// an archive format this tool has not seen must not be turned away, but no archive
+// begins with a document, and a zero-byte body is not a pack either.
+var ErrNotAPackageBody = errors.New("the downloaded body is a document, not package bytes")
+
+func looksLikePackage(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, err := f.Read(head)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	if mt := http.DetectContentType(head[:n]); strings.HasPrefix(mt, "text/") {
+		return fmt.Errorf("%w (%d bytes sniffing as %s)", ErrNotAPackageBody, n, mt)
+	}
+	return nil
+}
+
+// progressStep is how much has to transfer before another line is printed. Small
+// enough to show a large file moving, large enough not to flood a log.
+const progressStep = 8 << 20
+
+// progressReader reports how much of a body has arrived, on a byte threshold and once
+// more at the end so a file smaller than the threshold still reports something.
+type progressReader struct {
+	r        io.Reader
+	total    int64
+	read     int64
+	reported int64
+	report   func(read, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.read += int64(n)
+	if p.read-p.reported >= progressStep || (err != nil && p.read != p.reported) {
+		p.reported = p.read
+		p.report(p.read, p.total)
+	}
+	return n, err
+}
+
+// progressLine renders bytes against the portal's label size. That figure is rounded,
+// so it is shown only while it is still plausible; past it, the count stands alone
+// rather than claiming 103%.
+func progressLine(read, total int64) string {
+	if total > 0 && read <= total {
+		return fmt.Sprintf("%s / %s (%d%%)", humanBytes(read), humanBytes(total), read*100/total)
+	}
+	return humanBytes(read)
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
 
 // downloadWithRetry retries a download with bounded exponential backoff, resolving
 // a fresh signed URL on each attempt (the CloudFront signature expires). A
-// permanently-failing 4xx aborts immediately instead of burning every attempt.
-func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string, f model.FileEntry, attempts int, base time.Duration) (resolved, error) {
+// permanently-failing attempt aborts immediately instead of burning every attempt.
+func downloadWithRetry(ctx context.Context, c *portal.Client, opts Options, f model.FileEntry) (resolved, error) {
 	var r resolved
-	err := retry.Do(ctx, attempts, base, func() error {
+	err := retry.Do(ctx, opts.Attempts, opts.Backoff, func() error {
 		var err error
-		r, err = download(ctx, c, libraryRoot, f)
+		r, err = download(ctx, c, opts, f)
 		if err != nil && permanentDownloadFailure(err) {
 			return retry.Stop(err)
 		}
@@ -368,15 +541,26 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, libraryRoot string
 	return r, err
 }
 
-// permanentDownloadFailure reports a download error a retry cannot fix: a 4xx,
-// except 403 — an expired CloudFront signature that a fresh Resolve re-signs — and
-// 429, a rate limit that backing off clears.
+// permanentDownloadFailure reports a download error a retry cannot fix: a body that
+// is not a package however many times it is fetched, or a 4xx — except 403, an
+// expired CloudFront signature that a fresh Resolve re-signs, and 429, a rate limit
+// that backing off clears.
 func permanentDownloadFailure(err error) bool {
+	if errors.Is(err, portal.ErrNotAPackage) || errors.Is(err, ErrNotAPackageBody) {
+		return true
+	}
 	code, ok := portal.StatusOf(err)
 	if !ok || code < 400 || code >= 500 {
 		return false
 	}
 	return code != http.StatusForbidden && code != http.StatusTooManyRequests
+}
+
+// goneFromTheStore reports the one failure no future run can clear, so it is worth
+// reporting without failing the run: the store no longer serves the file.
+func goneFromTheStore(err error) bool {
+	code, ok := portal.StatusOf(err)
+	return ok && (code == http.StatusNotFound || code == http.StatusGone)
 }
 
 func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {
@@ -426,11 +610,11 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 		for _, f := range pf.files {
 			selected := opts.Filter(f.Variant) && !f.Archived
 			entry := lockfile.File{
-				FileToken: f.FileToken,
-				Variant:   string(f.Variant),
-				Version:   f.Version,
-				FileID:    f.FileID,
-				SizeBytes: f.SizeBytes, // approximate label size; replaced below if downloaded
+				FileToken:      f.FileToken,
+				Variant:        string(f.Variant),
+				Version:        f.Version,
+				FileID:         f.FileID,
+				AdvertisedSize: f.SizeBytes,
 			}
 			if selected {
 				if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
@@ -485,11 +669,19 @@ func indexByFileID(lf lockfile.Lockfile) map[int]lockfile.File {
 	return m
 }
 
-func cacheChecker(opts Options) func(relPath, sha string) bool {
+// cacheChecker builds the cache-side half of classify. The cheap check compares the
+// recorded byte count, which is what separates a file that is present from one that
+// is intact: an interrupted transfer and a stored error page both leave something at
+// the path. Re-hashing is reserved for sync, where the cost of reading the library
+// back buys the only check that sees a mid-file corruption.
+func cacheChecker(opts Options) func(lockfile.File) bool {
 	if opts.FullVerify {
-		return func(relPath, sha string) bool { return cache.Verify(opts.LibraryRoot, relPath, sha) }
+		return func(f lockfile.File) bool {
+			return cache.Verify(opts.LibraryRoot, f.CachePath, f.SizeBytes) &&
+				cache.VerifyDeep(opts.LibraryRoot, f.CachePath, f.SHA256)
+		}
 	}
-	return func(relPath, _ string) bool { return cache.Exists(opts.LibraryRoot, relPath) }
+	return func(f lockfile.File) bool { return cache.Verify(opts.LibraryRoot, f.CachePath, f.SizeBytes) }
 }
 
 func filterPacks(packs []model.Pack, glob string, selected func(string) bool) []model.Pack {

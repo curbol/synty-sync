@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/model"
@@ -412,5 +413,253 @@ func TestFailedPruneIsReported(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("a failed prune of %s was not reported; warnings = %v", prior.CachePath, rep.Warnings)
+	}
+}
+
+// cachedFiles lists every non-temp file under the library root, so a test can assert
+// that a rejected body left nothing at all behind.
+func cachedFiles(t *testing.T, libraryRoot string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(libraryRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(libraryRoot, p)
+		out = append(out, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// An expired session and a CDN refusal both answer a download href with a document,
+// often at 200. Those bytes must never occupy a cache path, and a login page's digest
+// must never be recorded as a pack's verified content.
+func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
+	srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
+		return []byte("<!doctype html><title>Log in</title>"), "text/html; charset=utf-8", true
+	}})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("a rejected body must fail its file, not the run: %v", err)
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("reported %d downloads for a run that only ever received login pages", len(rep.Downloaded))
+	}
+	if len(rep.Failures) == 0 {
+		t.Fatal("no failures reported for a run where every body was a document")
+	}
+	if !rep.Failed() {
+		t.Error("Failed() is false, so the command would exit 0 on a session that is not working")
+	}
+	if left := cachedFiles(t, lib); len(left) != 0 {
+		t.Errorf("a rejected body left files in the cache: %v", left)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for slug, p := range lf.Packs {
+		for key, f := range p.Files {
+			if f.Tracked || f.SHA256 != "" || f.CachePath != "" {
+				t.Errorf("%s/%s recorded a login page as content: %+v", slug, key, f)
+			}
+		}
+	}
+}
+
+// One pulled file must not cost the mirror. It is reported and left untracked; every
+// other file still downloads and the lockfile is still written.
+func TestAPulledFileCostsItsFileNotTheRun(t *testing.T) {
+	const pulled = "2344711" // the bundled GENERIC_Particle_FX
+	srv := newServer(t, serverOpts{downloadStatus: func(fileID string) (int, bool) {
+		if fileID == pulled {
+			return http.StatusNotFound, true
+		}
+		return 0, false
+	}})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("one pulled file aborted the whole run: %v", err)
+	}
+	if len(rep.Downloaded) == 0 {
+		t.Error("nothing downloaded; the pulled file took the rest of the run with it")
+	}
+	if len(rep.Failures) != 1 || rep.Failures[0].FileID != 2344711 {
+		t.Fatalf("failures = %+v, want exactly the pulled file", rep.Failures)
+	}
+	if !rep.Failures[0].Gone {
+		t.Error("a 404 is not marked Gone, so the run exits non-zero on a file no re-run can fetch")
+	}
+	if rep.Failed() {
+		t.Error("Failed() is true for a file the store no longer serves")
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lf.Packs) == 0 {
+		t.Fatal("the lockfile was not written, so every file downloaded this run is unrecorded")
+	}
+	f := lf.Packs["polygon-pirate-pack"].Files["GENERIC_Particle_FX|Godot_4_5_1"]
+	if f.Tracked {
+		t.Errorf("the pulled file is recorded as tracked: %+v", f)
+	}
+}
+
+// A retryable failure is the user's to act on, so it must move the exit status.
+func TestARetryableFailureMakesTheRunFail(t *testing.T) {
+	srv := newServer(t, serverOpts{downloadStatus: func(fileID string) (int, bool) {
+		if fileID == "2344711" {
+			return http.StatusInternalServerError, true
+		}
+		return 0, false
+	}})
+	lib := t.TempDir()
+	opts := runOpts(lib, false)
+	opts.Attempts, opts.Backoff = 2, time.Millisecond
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(rep.Failures) != 1 || rep.Failures[0].Gone {
+		t.Fatalf("failures = %+v, want one failure that is not Gone", rep.Failures)
+	}
+	if !rep.Failed() {
+		t.Error("Failed() is false for a server error the next run might clear")
+	}
+}
+
+// Presence alone is not integrity: a body that ended early leaves a file that exists
+// at the recorded path and is not the pack.
+func TestATruncatedCachedFileIsNotUnchanged(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := lf.Packs["polygon-pirate-pack"].Files["GENERIC_Particle_FX|Godot_4_5_1"]
+	if !victim.Tracked || victim.CachePath == "" {
+		t.Fatalf("no tracked file to truncate: %+v", victim)
+	}
+	full := filepath.Join(lib, filepath.FromSlash(victim.CachePath))
+	if err := os.WriteFile(full, []byte("PK"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// status is the cheap path: it must still notice, without hashing the library.
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, runOpts(lib, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range rep.Diffs {
+		if d.FileID == victim.FileID {
+			if d.Class != CacheMissing {
+				t.Errorf("truncated file classified %v, want CacheMissing", d.Class)
+			}
+			return
+		}
+	}
+	t.Error("the truncated file was not in the diff at all")
+}
+
+// An interrupted transfer leaves a temp beside its destination. Nothing else ever
+// removes it, so a run that dies mid-download leaks its bytes for good.
+func TestRunSweepsAbandonedTemps(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "POLYGON_Pirate_Pack")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".synty-dl-abandoned")
+	if err := os.WriteFile(stale, []byte("half a pack"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Swept != 1 {
+		t.Errorf("Swept = %d, want 1", rep.Swept)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("the abandoned temp survived the run")
+	}
+}
+
+// A multi-gigabyte transfer that reports nothing between "download" and "done" looks
+// like a hang. Progress has to come off the body as it streams.
+func TestProgressReportsTransferredBytes(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	var lines []string
+	opts := runOpts(lib, false)
+	opts.Progress = func(m string) { lines = append(lines, m) }
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, " B") || strings.Contains(l, "%") {
+			return
+		}
+	}
+	t.Errorf("no progress line reported bytes off the stream: %v", lines)
+}
+
+// A pack that leaves the library (refunded, delisted) is otherwise carried forward
+// forever with nobody told.
+func TestDeOwnedPackIsReported(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	prior := lockfile.New()
+	prior.Packs["a-pack-i-no-longer-own"] = lockfile.Pack{
+		DisplayName: "A Pack I No Longer Own",
+		Files:       map[string]lockfile.File{"T|Godot_4_5_1": {FileToken: "T", Variant: "Godot_4_5_1", Version: "v1", FileID: 999}},
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Removed) != 1 || rep.Removed[0] != "a-pack-i-no-longer-own" {
+		t.Errorf("Removed = %v, want the de-owned pack", rep.Removed)
+	}
+	if _, ok := rep.NewLockfile.Packs["a-pack-i-no-longer-own"]; !ok {
+		t.Error("the de-owned pack was dropped from the lockfile; one enumeration is not enough to erase a record")
+	}
+}
+
+// An enumeration that comes back empty while the lockfile holds packs is a broken
+// read, not a library someone emptied. Acting on it rewrites the committed record.
+func TestEmptyEnumerationWithAPopulatedLockfileIsAnError(t *testing.T) {
+	srv := newServer(t, serverOpts{page1: emptyAuthPage})
+	prior := lockfile.New()
+	prior.Packs["polygon-pirate-pack"] = lockfile.Pack{DisplayName: "POLYGON - Pirate Pack"}
+
+	_, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(t.TempDir(), false))
+	if err == nil {
+		t.Fatal("an empty library against a populated lockfile was accepted as the truth")
 	}
 }

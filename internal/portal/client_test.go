@@ -14,8 +14,6 @@ import (
 )
 
 func TestGetBodyRetriesTransient(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) <= 2 {
@@ -26,7 +24,7 @@ func TestGetBodyRetriesTransient(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, err := c.getBody(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("getBody: %v", err)
@@ -40,8 +38,6 @@ func TestGetBodyRetriesTransient(t *testing.T) {
 }
 
 func TestGetBodyFailsFastOn4xx(t *testing.T) {
-	fastBackoff(t)
-
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
@@ -49,7 +45,7 @@ func TestGetBodyFailsFastOn4xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	if _, err := c.getBody(context.Background(), srv.URL); err == nil {
 		t.Fatal("expected error on 404")
 	}
@@ -59,15 +55,13 @@ func TestGetBodyFailsFastOn4xx(t *testing.T) {
 }
 
 func TestGetBodyRedactsCustomerID(t *testing.T) {
-	fastBackoff(t)
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
 
 	const id = "9876543"
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: id}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: id}
 	_, err := c.getBody(context.Background(), srv.URL+"/apps/downloads/orders/"+id+"?line_items_page=1")
 	if err == nil {
 		t.Fatal("expected an error")
@@ -83,7 +77,7 @@ func TestEnumerateExpiredSession(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
 	if _, err := c.Enumerate(context.Background()); !errors.Is(err, ErrExpiredSession) {
 		t.Errorf("err = %v, want ErrExpiredSession", err)
 	}
@@ -101,7 +95,7 @@ func TestEnumerateWalksToTerminator(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
 	packs, err := c.Enumerate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +111,7 @@ func TestResolveReturnsClassifiableStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	_, _, err := c.Resolve(context.Background(), model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"})
 	if err == nil {
 		t.Fatal("expected an error on 403")
@@ -134,11 +128,11 @@ func TestResolveFilenameFromURL(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Disposition", "attachment")
-		fmt.Fprint(w, "BYTES")
+		w.Write(zipBytes)
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, name, err := c.Resolve(context.Background(), model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"})
 	if err != nil {
 		t.Fatal(err)
@@ -154,11 +148,11 @@ func TestResolveSanitizesDispositionFilename(t *testing.T) {
 		// No basename in the final URL path forces the Content-Disposition fallback,
 		// which here carries a traversal attempt.
 		w.Header().Set("Content-Disposition", `attachment; filename="../../evil.zip"`)
-		fmt.Fprint(w, "BYTES")
+		w.Write(zipBytes)
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: http.DefaultClient, BaseURL: srv.URL}
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, name, err := c.Resolve(context.Background(), model.FileEntry{FileToken: "T", Variant: "Godot", DownloadHref: "/"})
 	if err != nil {
 		t.Fatal(err)

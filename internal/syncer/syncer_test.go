@@ -23,14 +23,14 @@ import (
 
 func TestClassify(t *testing.T) {
 	av := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", Version: "v2", FileID: 9}
-	cacheHit := func(string, string) bool { return true }
-	cacheMiss := func(string, string) bool { return false }
+	cacheHit := func(lockfile.File) bool { return true }
+	cacheMiss := func(lockfile.File) bool { return false }
 	tracked := func(version string) lockfile.File {
-		return lockfile.File{Tracked: true, Version: version, CachePath: "p", SHA256: "s"}
+		return lockfile.File{Tracked: true, Version: version, CachePath: "p", SHA256: "s", SizeBytes: 1}
 	}
 	// A cache check that fails the test if consulted, for the branches that must
 	// decide before ever touching the disk.
-	neverCalled := func(string, string) bool {
+	neverCalled := func(lockfile.File) bool {
 		t.Error("cacheOK consulted on a branch that should decide without it")
 		return false
 	}
@@ -39,7 +39,7 @@ func TestClassify(t *testing.T) {
 		name     string
 		prior    lockfile.File
 		hasPrior bool
-		cacheOK  func(string, string) bool
+		cacheOK  func(lockfile.File) bool
 		want     Class
 	}{
 		{"no prior at all", lockfile.File{}, false, neverCalled, New},
@@ -99,6 +99,18 @@ type serverOpts struct {
 	page1        string
 	itemHTML     func(orderItem string) (string, bool)
 	downloadName func(fileID string) (string, bool)
+	// fileBody replaces the archive bytes served for a filename, so a test can put a
+	// login page or a truncated body where package bytes belong.
+	fileBody func(filename string) (body []byte, contentType string, ok bool)
+	// downloadStatus replaces the redirect for one fileId with a bare status, so a
+	// test can pull a single file out from under the run.
+	downloadStatus func(fileID string) (int, bool)
+}
+
+// packageBytes is a body that sniffs as an archive rather than a document, the way
+// real package bytes do.
+func packageBytes(name string) []byte {
+	return append([]byte("PK\x03\x04"), []byte(name)...)
 }
 
 func newServer(t *testing.T, opts serverOpts) *httptest.Server {
@@ -145,6 +157,12 @@ func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 			return
 		}
 		name := m[1] + ".zip"
+		if opts.downloadStatus != nil {
+			if code, ok := opts.downloadStatus(m[1]); ok {
+				w.WriteHeader(code)
+				return
+			}
+		}
 		if opts.downloadName != nil {
 			if n, ok := opts.downloadName(m[1]); ok {
 				name = n
@@ -153,8 +171,17 @@ func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 		http.Redirect(w, r, "/files/"+name, http.StatusFound)
 	})
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		name := filepath.Base(r.URL.Path)
 		w.Header().Set("Content-Disposition", "attachment")
-		fmt.Fprintf(w, "ZIP-%s", filepath.Base(r.URL.Path))
+		if opts.fileBody != nil {
+			if body, ct, ok := opts.fileBody(name); ok {
+				w.Header().Set("Content-Type", ct)
+				w.Write(body)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(packageBytes(name))
 	})
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
@@ -460,7 +487,8 @@ func TestDownloadFailsFastOnPermanent4xx(t *testing.T) {
 	defer srv.Close()
 
 	f := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"}
-	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), t.TempDir(), f, 3, time.Millisecond); err == nil {
+	opts := Options{LibraryRoot: t.TempDir(), Attempts: 3, Backoff: time.Millisecond}
+	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), opts, f); err == nil {
 		t.Fatal("expected an error")
 	}
 	if n := atomic.LoadInt32(&calls); n != 1 {
@@ -477,7 +505,8 @@ func TestDownloadRetriesForbidden(t *testing.T) {
 	defer srv.Close()
 
 	f := model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"}
-	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), t.TempDir(), f, 3, time.Millisecond); err == nil {
+	opts := Options{LibraryRoot: t.TempDir(), Attempts: 3, Backoff: time.Millisecond}
+	if _, err := downloadWithRetry(context.Background(), newClient(srv.URL), opts, f); err == nil {
 		t.Fatal("expected an error after retries")
 	}
 	if n := atomic.LoadInt32(&calls); n != 3 {

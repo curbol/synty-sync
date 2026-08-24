@@ -12,7 +12,7 @@ import (
 // A download that dies mid-stream must not leave its partial temp file behind.
 func TestStoreCleansUpAfterFailedCopy(t *testing.T) {
 	root := t.TempDir()
-	_, _, _, err := Store(root, "TOKEN", "pack.zip", io.MultiReader(
+	_, err := Store(root, "TOKEN", "pack.zip", io.MultiReader(
 		strings.NewReader("partial"), errReader{errors.New("connection reset")}))
 	if err == nil {
 		t.Fatal("expected the copy failure to surface")
@@ -47,11 +47,11 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 
 	for _, rel := range []string{"../outside.key", "a/../../outside.key", "/etc/passwd", "..", ""} {
 		t.Run(rel, func(t *testing.T) {
-			if Exists(root, rel) {
-				t.Errorf("Exists reported on %q outside the root", rel)
-			}
-			if Verify(root, rel, "whatever") {
+			if Verify(root, rel, 5) {
 				t.Errorf("Verify accepted %q outside the root", rel)
+			}
+			if VerifyDeep(root, rel, "whatever") {
+				t.Errorf("VerifyDeep accepted %q outside the root", rel)
 			}
 			if _, _, err := Hash(root, rel); err == nil {
 				t.Errorf("Hash accepted %q outside the root", rel)
@@ -70,12 +70,16 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 // ordinary case.
 func TestCachePathsAcceptOrdinaryRelativePaths(t *testing.T) {
 	root := t.TempDir()
-	rel, sha, _, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("bytes"))
+	p, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("bytes"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !Exists(root, rel) || !Verify(root, rel, sha) {
-		t.Errorf("a stored file at %q is not visible to Exists/Verify", rel)
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rel := p.RelPath
+	if !Verify(root, rel, p.Size) || !VerifyDeep(root, rel, p.SHA256) {
+		t.Errorf("a stored file at %q is not visible to Verify/VerifyDeep", rel)
 	}
 	if _, _, err := Hash(root, rel); err != nil {
 		t.Errorf("Hash(%q): %v", rel, err)
@@ -137,7 +141,7 @@ func TestMigrateMatchesUppercaseExtension(t *testing.T) {
 	if len(res) != 1 {
 		t.Fatalf("a .ZIP was not migrated: %+v", res)
 	}
-	if !Exists(lib, res[0].RelPath) {
+	if _, err := os.Stat(filepath.Join(lib, filepath.FromSlash(res[0].RelPath))); err != nil {
 		t.Errorf("migrated file missing at %s", res[0].RelPath)
 	}
 }

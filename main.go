@@ -213,7 +213,23 @@ func runSyncOrStatus(ctx context.Context, client *portal.Client, cfg config.Conf
 		return err
 	}
 	printReport(stdout, dry, cfg, rep)
+	// The files the run could not fetch are the point of the command, so they move the
+	// exit status. A file the store no longer serves does not: no re-run clears it, and
+	// it would fail every future sync forever.
+	if n := actionableFailures(rep); n > 0 {
+		return fmt.Errorf("%d of %d selected files could not be downloaded; the cache and lockfile hold everything that did", n, len(rep.Diffs))
+	}
 	return nil
+}
+
+func actionableFailures(rep syncer.Report) int {
+	n := 0
+	for _, f := range rep.Failures {
+		if !f.Gone {
+			n++
+		}
+	}
+	return n
 }
 
 // isDryRun reports whether a run should classify only, with no downloads and no
@@ -309,7 +325,21 @@ func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 		pending := counts[syncer.New] + counts[syncer.Changed] + counts[syncer.DownloadNow] + counts[syncer.CacheMissing]
 		fmt.Fprintf(w, "would download: %d files\n", pending)
 	} else {
-		fmt.Fprintf(w, "downloaded: %d files  adopted: %d existing\n", len(rep.Downloaded), len(rep.Adopted))
+		fmt.Fprintf(w, "downloaded: %d files  adopted: %d existing  failed: %d\n",
+			len(rep.Downloaded), len(rep.Adopted), len(rep.Failures))
+	}
+	if rep.Swept > 0 {
+		fmt.Fprintf(w, "swept %d abandoned download temp(s), %d bytes reclaimed\n", rep.Swept, rep.SweptBytes)
+	}
+	for _, f := range rep.Failures {
+		what := "failed"
+		if f.Gone {
+			what = "gone from the store"
+		}
+		fmt.Fprintf(w, "  %s: %s %s: %s\n", what, f.PackSlug, f.Key, f.Err)
+	}
+	for _, slug := range rep.Removed {
+		fmt.Fprintf(w, "  no longer in your library: %s (its lockfile record is kept)\n", slug)
 	}
 	for _, warning := range rep.Warnings {
 		fmt.Fprintf(w, "  warning: %s\n", warning)
