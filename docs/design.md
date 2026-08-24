@@ -221,7 +221,10 @@ Three checks stand between a response and the lockfile:
 3. `sha256` and the exact byte count are recorded from the committed file, and later runs
    compare against them.
 
-Both rejections are permanent: no number of retries turns a login page into a pack.
+Both rejections are permanent: no number of retries turns a login page into a pack. The
+same sniff runs on adoption, which is the one path into the lockfile that never consults
+`classify` — a cache written before these guards existed can hold error pages under exactly
+the right names.
 
 The cache filename comes from the final signed-CloudFront URL path basename (the signed URL
 sets `Content-Disposition` to a bare "attachment"). The portal's label size is rounded (e.g.

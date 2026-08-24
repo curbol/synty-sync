@@ -200,6 +200,26 @@ func VerifyDeep(libraryRoot, relPath, sha string) bool {
 	return hex.EncodeToString(h.Sum(nil)) == sha
 }
 
+// Head returns up to n leading bytes of a cached file, for a caller that has to look
+// at what a file is before trusting it.
+func Head(libraryRoot, relPath string, n int) ([]byte, error) {
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	read, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf[:read], nil
+}
+
 // Hash returns the sha256 and byte size of a cached file (used to adopt a file
 // migrated in from a pre-existing flat zip).
 func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {

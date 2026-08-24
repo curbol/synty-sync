@@ -98,7 +98,9 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - **Nothing unverified reaches a real cache path.** `cache.Store` does not rename; the
   syncer `Commit`s only after the body checks pass. A download that answers with a
   document is refused twice — by Content-Type in `portal`, by a body sniff in `syncer` —
-  because otherwise a login page is hashed and recorded as the pack's content.
+  because otherwise a login page is hashed and recorded as the pack's content. Adoption
+  runs the same sniff: it is the one path into the lockfile that skips `classify`, and a
+  cache written before these guards existed can hold error pages under the right names.
 - **A failed download fails its file, not the run.** The lockfile is still written; only
   failures a later run could clear move the exit status.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked

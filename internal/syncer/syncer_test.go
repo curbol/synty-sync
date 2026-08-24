@@ -310,7 +310,7 @@ func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "lock.json")
 	// Pre-place a Synty-named flat zip matching POLYGON_Pirate Godot_4_5_1 v1_0_1.
 	flat := filepath.Join(lib, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	if err := os.WriteFile(flat, []byte("EXISTING-CONTENT"), 0o644); err != nil {
+	if err := os.WriteFile(flat, packageBytes("EXISTING-CONTENT"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
@@ -337,7 +337,7 @@ func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
 		t.Fatalf("adopted entry not tracked: %+v", f)
 	}
 	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
-	if string(got) != "EXISTING-CONTENT" {
+	if string(got) != string(packageBytes("EXISTING-CONTENT")) {
 		t.Errorf("adopted content changed: %q (re-downloaded instead of adopted?)", got)
 	}
 	if _, err := os.Stat(flat); err == nil {
@@ -356,7 +356,7 @@ func TestAdoptsExistingLayoutFileWithoutLockfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	layoutZip := filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	if err := os.WriteFile(layoutZip, []byte("LAYOUT-CONTENT"), 0o644); err != nil {
+	if err := os.WriteFile(layoutZip, packageBytes("LAYOUT-CONTENT"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -387,7 +387,7 @@ func TestAdoptsExistingLayoutFileWithoutLockfile(t *testing.T) {
 		t.Fatalf("adopted layout file not tracked: %+v", f)
 	}
 	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
-	if string(got) != "LAYOUT-CONTENT" {
+	if string(got) != string(packageBytes("LAYOUT-CONTENT")) {
 		t.Errorf("adopted content changed to %q (re-downloaded instead of adopted?)", got)
 	}
 }

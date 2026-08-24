@@ -250,6 +250,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// alone, so adopting one would move unverified content over a verified copy and
 	// repoint the lockfile at it without ever consulting classify.
 	adoptedByID := map[int]resolved{}
+	var adoptWarnings []string
 	if !opts.DryRun {
 		var wanted []cache.Wanted
 		for _, id := range selOrder {
@@ -264,6 +265,10 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			return Report{}, fmt.Errorf("migrate flat zips: %w", err)
 		}
 		for _, m := range migrated {
+			if err := adoptable(opts.LibraryRoot, m.RelPath); err != nil {
+				adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", m.RelPath, err))
+				continue
+			}
 			sha, size, err := cache.Hash(opts.LibraryRoot, m.RelPath)
 			if err != nil {
 				return Report{}, fmt.Errorf("hash migrated %s: %w", m.From, err)
@@ -285,6 +290,10 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		f := selectedByID[id][0].file
 		rel, ok := cache.Locate(opts.LibraryRoot, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
 		if !ok {
+			continue
+		}
+		if err := adoptable(opts.LibraryRoot, rel); err != nil {
+			adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
 			continue
 		}
 		if opts.DryRun {
@@ -353,7 +362,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	}
 
 	buildLockfile(&report, packFiles, opts, resolvedByID, lf)
-	report.Warnings = append(warnings(packFiles, opts.Filter), pruneWarnings...)
+	report.Warnings = append(warnings(packFiles, opts.Filter), append(adoptWarnings, pruneWarnings...)...)
 
 	if !opts.DryRun {
 		if err := lockfile.Save(lockPath, report.NewLockfile); err != nil {
@@ -456,10 +465,20 @@ func download(ctx context.Context, c *portal.Client, opts Options, f model.FileE
 	return resolved{cachePath: pending.RelPath, sha: pending.SHA256, size: pending.Size, now: true}, nil
 }
 
-// ErrNotAPackageBody rejects a stored body that reads as prose. Only text is refused:
-// an archive format this tool has not seen must not be turned away, but no archive
-// begins with a document, and a zero-byte body is not a pack either.
-var ErrNotAPackageBody = errors.New("the downloaded body is a document, not package bytes")
+// ErrNotAPackageBody rejects a body that reads as prose. Only text is refused: an
+// archive format this tool has not seen must not be turned away, but no archive begins
+// with a document, and a zero-byte body is not a pack either.
+var ErrNotAPackageBody = errors.New("the body is a document, not package bytes")
+
+// sniffLen is how much of a file http.DetectContentType needs.
+const sniffLen = 512
+
+func sniffPackage(head []byte) error {
+	if mt := http.DetectContentType(head); strings.HasPrefix(mt, "text/") {
+		return fmt.Errorf("%w (%d bytes sniffing as %s)", ErrNotAPackageBody, len(head), mt)
+	}
+	return nil
+}
 
 func looksLikePackage(path string) error {
 	f, err := os.Open(path)
@@ -467,15 +486,24 @@ func looksLikePackage(path string) error {
 		return err
 	}
 	defer f.Close()
-	head := make([]byte, 512)
+	head := make([]byte, sniffLen)
 	n, err := f.Read(head)
 	if err != nil && err != io.EOF {
 		return err
 	}
-	if mt := http.DetectContentType(head[:n]); strings.HasPrefix(mt, "text/") {
-		return fmt.Errorf("%w (%d bytes sniffing as %s)", ErrNotAPackageBody, n, mt)
+	return sniffPackage(head[:n])
+}
+
+// adoptable reports whether a file already on disk can be taken as a pack's content.
+// Adoption is the one path into the lockfile that never consults classify, and a cache
+// written before these guards existed can hold error pages under exactly the right
+// names, so the bytes are checked here too.
+func adoptable(libraryRoot, relPath string) error {
+	head, err := cache.Head(libraryRoot, relPath, sniffLen)
+	if err != nil {
+		return err
 	}
-	return nil
+	return sniffPackage(head)
 }
 
 // progressStep is how much has to transfer before another line is printed. Small

@@ -65,7 +65,7 @@ func TestStrayFlatZipLeavesTrackedFileAlone(t *testing.T) {
 	}
 
 	flat := fmt.Sprintf("%s_%s_%s.zip", before.FileToken, before.Variant, before.Version)
-	if err := os.WriteFile(filepath.Join(lib, flat), []byte("STRAY"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(lib, flat), packageBytes("STRAY"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -661,5 +661,52 @@ func TestEmptyEnumerationWithAPopulatedLockfileIsAnError(t *testing.T) {
 	_, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(t.TempDir(), false))
 	if err == nil {
 		t.Fatal("an empty library against a populated lockfile was accepted as the truth")
+	}
+}
+
+// Anyone who ran a build without the download guards has login pages sitting in their
+// cache under the right filenames. Adoption is the one path into the lockfile that
+// skips classify, so it has to check the bytes too.
+func TestADocumentAlreadyInTheLayoutIsNotAdopted(t *testing.T) {
+	srv := newServer(t, serverOpts{downloadName: func(fileID string) (string, bool) {
+		if fileID == "2344711" {
+			return "GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip", true
+		}
+		return "", false
+	}})
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "GENERIC_Particle_FX")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(dir, "GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip")
+	if err := os.WriteFile(planted, []byte("<!doctype html><title>Log in</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range rep.Adopted {
+		if a.FileID == 2344711 {
+			t.Fatal("a login page sitting at a cache path was adopted as the pack's content")
+		}
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := lf.Packs["polygon-pirate-pack"].Files["GENERIC_Particle_FX|Godot_4_5_1"]
+	if !f.Tracked {
+		t.Fatalf("the file was neither adopted nor downloaded: %+v", f)
+	}
+	got, err := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "Log in") {
+		t.Error("the lockfile points at the planted login page")
 	}
 }
