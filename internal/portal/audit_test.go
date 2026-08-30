@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -463,5 +464,87 @@ func TestResolveAcceptsPackageContentTypes(t *testing.T) {
 				t.Errorf("filename = %q, want pack.zip", name)
 			}
 		})
+	}
+}
+
+// Headers arrive and the body then stalls mid-transfer. A download carries no
+// whole-request deadline on purpose (a pack runs to gigabytes), so without a bound
+// on silence the read blocks forever, the attempt never returns, and the retry that
+// would resolve a fresh signed URL never runs.
+func TestResolveTimesOutOnStalledBody(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/files/") {
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write([]byte("PK\x03\x04partial"))
+			w.(http.Flusher).Flush()
+			<-release
+			return
+		}
+		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
+	}))
+	defer func() { close(release); srv.Close() }()
+
+	c := &Client{
+		HTTP:    srv.Client(),
+		BaseURL: srv.URL,
+		Limits:  Limits{StallTimeout: 150 * time.Millisecond},
+	}
+	body, _, err := c.Resolve(context.Background(), model.FileEntry{
+		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	defer body.Close()
+
+	done := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, body); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrStalled) {
+			t.Errorf("err = %v, want ErrStalled so the caller reports a stall, not an interrupt", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read hung on a stalled body: no bound on silence")
+	}
+}
+
+// A body that keeps delivering must not be cut off by the stall bound, however long
+// the whole transfer takes: the window is silence, not total time.
+func TestResolveDoesNotCutOffASlowButLiveBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/files/") {
+			w.Header().Set("Content-Type", "application/zip")
+			for i := 0; i < 8; i++ {
+				w.Write([]byte("PK\x03\x04"))
+				w.(http.Flusher).Flush()
+				time.Sleep(20 * time.Millisecond)
+			}
+			return
+		}
+		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		HTTP:    srv.Client(),
+		BaseURL: srv.URL,
+		Limits:  Limits{StallTimeout: 100 * time.Millisecond},
+	}
+	body, _, err := c.Resolve(context.Background(), model.FileEntry{
+		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	defer body.Close()
+
+	n, err := io.Copy(io.Discard, body)
+	if err != nil {
+		t.Fatalf("a live transfer slower than the stall window was cut off: %v", err)
+	}
+	if n != 32 {
+		t.Errorf("read %d bytes, want the whole 32-byte body", n)
 	}
 }

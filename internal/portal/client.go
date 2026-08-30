@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
@@ -131,6 +132,10 @@ type Limits struct {
 	PageTimeout time.Duration
 	// MaxPageBytes bounds the read: a library page is HTML, never megabytes.
 	MaxPageBytes int64
+	// StallTimeout bounds the silence inside a download body. A pack runs to
+	// gigabytes, so a deadline on the whole transfer would kill a legitimately slow
+	// one; this bounds how long the server may deliver nothing at all.
+	StallTimeout time.Duration
 }
 
 const (
@@ -138,6 +143,7 @@ const (
 	defaultBackoff      = 500 * time.Millisecond
 	defaultPageTimeout  = 60 * time.Second
 	defaultMaxPageBytes = int64(8 << 20)
+	defaultStallTimeout = 2 * time.Minute
 )
 
 // limits fills in whatever the caller left zero.
@@ -154,6 +160,9 @@ func (c *Client) limits() Limits {
 	}
 	if l.MaxPageBytes <= 0 {
 		l.MaxPageBytes = defaultMaxPageBytes
+	}
+	if l.StallTimeout <= 0 {
+		l.StallTimeout = defaultStallTimeout
 	}
 	return l
 }
@@ -322,7 +331,15 @@ func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) ([]model.FileEn
 // basename, with the Content-Disposition filename as a fallback. The caller must
 // close the returned body.
 func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.ReadCloser, filename string, err error) {
-	resp, err := c.get(ctx, withShop(c.BaseURL+file.DownloadHref))
+	// Only a body handed back to the caller keeps the request alive, so every path
+	// that returns without one releases it here instead.
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			cancel()
+		}
+	}()
+	resp, err := c.get(reqCtx, withShop(c.BaseURL+file.DownloadHref))
 	if err != nil {
 		// The href carries the account email and customer id, so the URL never
 		// reaches the message; the file key identifies the request instead.
@@ -344,7 +361,52 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 		drainClose(resp)
 		return nil, "", fmt.Errorf("download %s: could not determine filename", file.Key())
 	}
-	return resp.Body, filename, nil
+	return newStallGuard(resp.Body, c.limits().StallTimeout, cancel), filename, nil
+}
+
+// ErrStalled marks a transfer that stopped delivering bytes.
+var ErrStalled = errors.New("the transfer stalled")
+
+// stallGuard fails a body that goes quiet. By the time it is installed the response
+// headers have already satisfied ResponseHeaderTimeout, and a download deliberately
+// carries no whole-request deadline, so without it a server that stops mid-body
+// blocks the read forever: the attempt never returns, and the retry that would
+// resolve a fresh signed URL never runs.
+type stallGuard struct {
+	body    io.ReadCloser
+	window  time.Duration
+	timer   *time.Timer
+	cancel  context.CancelFunc
+	stalled atomic.Bool
+}
+
+func newStallGuard(body io.ReadCloser, window time.Duration, cancel context.CancelFunc) *stallGuard {
+	g := &stallGuard{body: body, window: window, cancel: cancel}
+	g.timer = time.AfterFunc(window, func() {
+		g.stalled.Store(true)
+		cancel()
+	})
+	return g
+}
+
+func (g *stallGuard) Read(p []byte) (int, error) {
+	n, err := g.body.Read(p)
+	if n > 0 {
+		g.timer.Reset(g.window)
+	}
+	// Cancelling the request is how the read is broken out of, but "context
+	// canceled" reads as an interrupt the user caused. Name the real cause instead.
+	if err != nil && err != io.EOF && g.stalled.Load() {
+		return n, fmt.Errorf("%w: no bytes for %s", ErrStalled, g.window)
+	}
+	return n, err
+}
+
+func (g *stallGuard) Close() error {
+	g.timer.Stop()
+	err := g.body.Close()
+	g.cancel()
+	return err
 }
 
 func filenameFromURL(u *url.URL) string {
