@@ -263,7 +263,16 @@ onto a wanted file.
   next run retries it, and the lockfile is still written — aborting would throw away the
   record of everything the run *did* download. Only failures a later run could clear move the
   exit status; a 404 means the store no longer serves the file, and failing every future sync
-  on it forever helps nobody.
+  on it forever helps nobody. A file that already had a verified copy is the exception to
+  "left untracked": when an *update* fails, the entry keeps pointing at the copy on disk, at
+  the version that copy actually is. Rebuilding it from the live page would drop the path and
+  sha while the bytes stayed in the cache with nothing recording them, and would leave an
+  out-of-scope pack bundling the same `fileId` carrying a record its owner no longer had.
+- **A stalled transfer.** A download carries no whole-request deadline, because a pack
+  legitimately runs to gigabytes. The bound is on silence instead: the response headers
+  satisfy `ResponseHeaderTimeout` and a server can then stop sending, which would block the
+  read forever — the attempt never returns, so the retry whose whole purpose is re-signing an
+  expired CloudFront URL never runs. Every byte that arrives resets the window.
 - **Partial / corrupt downloads:** two-phase write, body checks, and sha + exact byte count,
   as above. `status` compares the recorded byte count (cheap, and enough to see a truncation);
   `sync` also re-hashes, which is the only check that sees a mid-file corruption.
@@ -272,6 +281,20 @@ onto a wanted file.
 - **Politeness:** capped concurrency, honor obvious rate limits (429 and 408 back off and
   retry), and abandon the queue once a pack fails rather than fetching a whole library's
   item pages for a run that is going to abort.
+
+## The selection page
+
+`select` serves the checkbox grid on loopback and takes back the whole pack selection,
+which it writes to a committed file, so the endpoint that receives it is treated as one
+worth protecting. A cross-origin form POST is a CORS "simple request" — no preflight, and
+nothing in the browser stops it — so being POST-only is not enough on its own: any page open
+in another tab while `select` is running could otherwise submit a set of slugs (they are
+derived from public display names, so they are guessable) and both discard the real
+selection and enable packs nobody chose. The rendered form carries a per-invocation token
+that `/save` requires, read from the body so a link cannot stand in for the page. Both
+handlers also refuse a request whose `Host` is not a way a browser on this machine addresses
+them, since a page that points its own name at a loopback address is otherwise same-origin
+with the selection page and free to read the whole pack list, which is a purchase history.
 
 ## Configuration
 

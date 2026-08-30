@@ -50,8 +50,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   pages with goquery. Retry counts, the per-attempt deadline and the page-size bound live
   on the client's `Limits` field, not in package vars. Parsing is deliberately strict: a
   non-empty page yielding zero files is a loud error, not a silent skip.
-  `ErrExpiredSession` distinguishes an expired session from an empty library, and
-  `ErrNotAPackage` a download that answered with a document.
+  `ErrExpiredSession` distinguishes an expired session from an empty library,
+  `ErrNotAPackage` a download that answered with a document, and `ErrStalled` a body that
+  stopped arriving. Downloads carry no whole-request deadline (a pack is gigabytes); the
+  bound is `StallTimeout`, on silence, reset by every byte.
 - `model` — shared domain types (`Pack`, `FileEntry`, `Variant`) and the identity rules:
   the pack `Slug` (from display name, since file-label tokens aren't stable within a pack)
   and the per-file `Key()` = `fileToken|variant`.
@@ -78,7 +80,9 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   allowlist. New packs land **disabled** (opt-in), so buying a pack never silently downloads
   it. `sync`/`status` act only on enabled packs.
 - `web` — serves the local pack-selection page for `select` (checkbox grid, returns the
-  chosen set).
+  chosen set). Takes a bound listener, not an address. `/save` rewrites a committed file,
+  so it requires the per-invocation token the rendered form carries, and both handlers
+  refuse a `Host` that is not how a browser here addresses them.
 - `selfupdate` — the `update` subcommand: fetches a GitHub release, downloads the
   current-platform binary, and atomically replaces the running executable. The repo is
   private, so it resolves a token from `GITHUB_TOKEN` / `GH_TOKEN` / the `gh` CLI.
@@ -102,7 +106,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   runs the same sniff: it is the one path into the lockfile that skips `classify`, and a
   cache written before these guards existed can hold error pages under the right names.
 - **A failed download fails its file, not the run.** The lockfile is still written; only
-  failures a later run could clear move the exit status.
+  failures a later run could clear move the exit status (`Report.ActionableFailures`). A
+  file that already had a verified copy keeps its record when the *update* fails, at the
+  version those bytes actually are — otherwise the cache holds them with nothing recording
+  them, and an out-of-scope owner of the same `fileId` diverges from an in-scope one.
 - **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
   file must yield a `fileId` and a version.
 - **No PII in the repo.** The customer id, emails, cookies, and session captures
