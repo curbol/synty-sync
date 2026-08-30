@@ -710,3 +710,121 @@ func TestADocumentAlreadyInTheLayoutIsNotAdopted(t *testing.T) {
 		t.Error("the lockfile points at the planted login page")
 	}
 }
+
+// A file the last run verified must survive a failed update. Rebuilding the entry
+// from scratch drops its path and sha while the bytes stay on disk, so nothing
+// records them: the layout adopt scan looks for the new version's name and never
+// matches, and the next run classifies DownloadNow rather than Changed, so the
+// Changed-only prune never fires either.
+func TestFailedUpdateKeepsTheVerifiedCopyRecorded(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	broken := false
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem == "1" {
+				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+			}
+			return "", false
+		},
+		downloadStatus: func(fileID string) (int, bool) {
+			if broken && fileID == "999" {
+				return http.StatusInternalServerError, true
+			}
+			return 0, false
+		},
+	})
+
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	before := lf.Packs["polygon-pirate-pack"].Files[key]
+	if !before.Tracked {
+		t.Fatal("seed produced no tracked bundled file")
+	}
+
+	version, broken = "v2_0_0", true
+	opts.Attempts, opts.Backoff = 1, 0
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatalf("a failed update aborted the run: %v", err)
+	}
+	if len(rep.Failures) != 1 {
+		t.Fatalf("failures = %+v, want the one file whose update failed", rep.Failures)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := after.Packs["polygon-pirate-pack"].Files[key]
+	if !got.Tracked || got.CachePath != before.CachePath || got.SHA256 != before.SHA256 {
+		t.Errorf("the verified copy at %s is no longer recorded: %+v", before.CachePath, got)
+	}
+	if got.Version != before.Version {
+		t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
+	}
+	if !cacheFileExists(lib, before.CachePath) {
+		t.Fatalf("the prior copy at %s is gone", before.CachePath)
+	}
+}
+
+// The same failed update, with the file bundled under a pack this run left out of
+// scope. The carried entry keeps its record, so dropping the in-scope one leaves two
+// owning packs disagreeing about the same fileId.
+func TestFailedUpdateKeepsOwningPacksInAgreement(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	broken := false
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1", "4": // Pirate and Dungeon both bundle fileId 999
+				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+			}
+			return "", false
+		},
+		downloadStatus: func(fileID string) (int, bool) {
+			if broken && fileID == "999" {
+				return http.StatusInternalServerError, true
+			}
+			return 0, false
+		},
+	})
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	version, broken = "v2_0_0", true
+	only := runOpts(lib, false)
+	only.Attempts, only.Backoff = 1, 0
+	only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	in := after.Packs["polygon-pirate-pack"].Files[key]
+	out := after.Packs["polygon-dungeon-pack"].Files[key]
+	if in.Tracked != out.Tracked || in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
+		t.Errorf("owning packs diverged after a failed update:\n  in-scope %+v\n  carried  %+v", in, out)
+	}
+}

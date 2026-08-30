@@ -346,6 +346,18 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 					PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id,
 					Err: err.Error(), Gone: goneFromTheStore(err),
 				})
+				// A failed update must not erase the copy the last run verified.
+				// Rebuilding the entry from scratch drops its path and sha while the bytes
+				// stay on disk, orphaning them with nothing recording it, and leaves an
+				// out-of-scope owner of the same fileId carrying a record this one lost.
+				// Only Changed qualifies: every other class reaches here with no good
+				// prior copy to hold on to.
+				if fd.Class == Changed && prior.CachePath != "" && cacheOK(prior) {
+					resolvedByID[id] = resolved{
+						cachePath: prior.CachePath, sha: prior.SHA256,
+						size: prior.SizeBytes, version: prior.Version,
+					}
+				}
 				continue
 			}
 			if fd.Class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
@@ -646,6 +658,13 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			}
 			if selected {
 				if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
+					// The resolved version travels with the bytes, the same way it does for
+					// a carried pack: the sha below belongs to whichever version was
+					// actually resolved, so recording this page's label against it would
+					// name one version over another version's content.
+					if r.version != "" {
+						entry.Version = r.version
+					}
 					entry.Tracked = true
 					entry.CachePath = r.cachePath
 					entry.SHA256 = r.sha
