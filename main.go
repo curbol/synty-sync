@@ -93,11 +93,16 @@ func run(args []string) error {
 	// flag.Parse stops at the first non-flag argument, so an unchecked positional
 	// silently swallows every flag after it — `sync <pack> --dry-run` would download
 	// the delta and rewrite the lockfile.
+	// Cancellation is set up before the first subcommand that reaches the network, so
+	// update honors Ctrl-C the way sync and select do.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if cmd == "update" {
 		if fs.NArg() > 1 {
 			return fmt.Errorf("update takes at most one version argument, got %d", fs.NArg())
 		}
-		return selfupdate.Run(version, fs.Arg(0))
+		return selfupdate.Run(ctx, version, fs.Arg(0))
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("%s takes no positional arguments (got %q); to limit packs use --only %s", cmd, fs.Arg(0), fs.Arg(0))
@@ -137,8 +142,6 @@ func run(args []string) error {
 		return err
 	}
 	client := newPortalClient(cfg.CustomerID, cookie)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if cmd == "select" {
 		return explainSession(selectPacks(ctx, client, manifestPath, *addr), src)

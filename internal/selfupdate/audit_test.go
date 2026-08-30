@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,7 +78,7 @@ func TestInstallReplacesBinaryInPlace(t *testing.T) {
 	}
 	srv, hdr := assetServer(t, http.StatusOK, zipWith(t, installedBinaryName(), fakeBinary("NEW")))
 
-	if err := installTo("tok", srv.URL, exe); err != nil {
+	if err := installTo(context.Background(), "tok", srv.URL, exe); err != nil {
 		t.Fatalf("installTo: %v", err)
 	}
 	got, err := os.ReadFile(exe)
@@ -123,7 +124,7 @@ func TestInstallRejectsNonExecutableAsset(t *testing.T) {
 	}
 	srv, _ := assetServer(t, http.StatusOK, zipWith(t, installedBinaryName(), []byte("<html>not found</html>")))
 
-	if err := installTo("tok", srv.URL, exe); err == nil {
+	if err := installTo(context.Background(), "tok", srv.URL, exe); err == nil {
 		t.Fatal("expected the non-executable asset to be refused")
 	}
 	got, _ := os.ReadFile(exe)
@@ -140,7 +141,7 @@ func TestInstallLeavesBinaryOnFailedDownload(t *testing.T) {
 	}
 	srv, _ := assetServer(t, http.StatusForbidden, nil)
 
-	if err := installTo("tok", srv.URL, exe); err == nil {
+	if err := installTo(context.Background(), "tok", srv.URL, exe); err == nil {
 		t.Fatal("expected the failed download to surface")
 	}
 	got, _ := os.ReadFile(exe)
@@ -168,11 +169,11 @@ func TestExtractBinaryRequiresTheNamedBinary(t *testing.T) {
 func TestResolveTokenPrefersGithubToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "primary")
 	t.Setenv("GH_TOKEN", "secondary")
-	if got := resolveToken(); got != "primary" {
+	if got := resolveToken(context.Background()); got != "primary" {
 		t.Errorf("resolveToken = %q, want GITHUB_TOKEN to win", got)
 	}
 	t.Setenv("GITHUB_TOKEN", "")
-	if got := resolveToken(); got != "secondary" {
+	if got := resolveToken(context.Background()); got != "secondary" {
 		t.Errorf("resolveToken = %q, want the GH_TOKEN fallback", got)
 	}
 }
@@ -189,7 +190,7 @@ func TestFetchReleaseErrorOmitsToken(t *testing.T) {
 	releasesAPIURL = srv.URL
 	defer func() { releasesAPIURL = old }()
 
-	_, err := fetchRelease("s3cr3t-token", "")
+	_, err := fetchRelease(context.Background(), "s3cr3t-token", "")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -278,20 +279,20 @@ func TestResolveTokenFallsBackToGhCLI(t *testing.T) {
 	t.Setenv("PATH", stubDir)
 
 	writeGh("#!/bin/sh\necho gh-cli-token\n")
-	if got := resolveToken(); got != "gh-cli-token" {
+	if got := resolveToken(context.Background()); got != "gh-cli-token" {
 		t.Errorf("token = %q, want the gh CLI's", got)
 	}
 
 	// Not logged in: gh exits non-zero, and the caller must get "" rather than gh's
 	// error text masquerading as a token.
 	writeGh("#!/bin/sh\necho 'not logged in' >&2\nexit 1\n")
-	if got := resolveToken(); got != "" {
+	if got := resolveToken(context.Background()); got != "" {
 		t.Errorf("token = %q, want empty when gh fails", got)
 	}
 
 	// No gh at all.
 	t.Setenv("PATH", t.TempDir())
-	if got := resolveToken(); got != "" {
+	if got := resolveToken(context.Background()); got != "" {
 		t.Errorf("token = %q, want empty with no gh on PATH", got)
 	}
 }
@@ -308,11 +309,102 @@ func TestResolveTokenPrefersEnvOverGhCLI(t *testing.T) {
 	t.Setenv("PATH", stubDir)
 	t.Setenv("GH_TOKEN", "from-gh-token")
 	t.Setenv("GITHUB_TOKEN", "")
-	if got := resolveToken(); got != "from-gh-token" {
+	if got := resolveToken(context.Background()); got != "from-gh-token" {
 		t.Errorf("token = %q, want GH_TOKEN to beat the CLI", got)
 	}
 	t.Setenv("GITHUB_TOKEN", "from-github-token")
-	if got := resolveToken(); got != "from-github-token" {
+	if got := resolveToken(context.Background()); got != "from-github-token" {
 		t.Errorf("token = %q, want GITHUB_TOKEN to win outright", got)
+	}
+}
+
+// The rename fallback exists for a cross-device or otherwise exotic mount, and
+// nothing reached it before: installTo always stages beside the target, so the first
+// rename always succeeds and the copy path was never exercised.
+func TestReplaceBinaryFallsBackToCopyingAcrossDevices(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(otherDevice(t, dir), "new")
+	if err := os.WriteFile(newPath, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(newPath) })
+
+	if err := replaceBinary(newPath, exe); err != nil {
+		t.Fatalf("replaceBinary across devices: %v", err)
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("exe = %q (%v), want the new binary", got, err)
+	}
+	info, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want the copy to keep 0755", info.Mode().Perm())
+	}
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Error("the aside copy was left behind")
+	}
+}
+
+// otherDevice returns a writable directory a rename into dir actually fails from,
+// which is the only way to reach os.Rename's fallback. It probes rather than
+// comparing device numbers so it stays portable and tests the property directly.
+func otherDevice(t *testing.T, dir string) string {
+	t.Helper()
+	for _, candidate := range []string{"/dev/shm", os.TempDir()} {
+		f, err := os.CreateTemp(candidate, "synty-xdev-")
+		if err != nil {
+			continue
+		}
+		probe := f.Name()
+		f.Close()
+		landing := filepath.Join(dir, "probe")
+		if err := os.Rename(probe, landing); err != nil {
+			os.Remove(probe)
+			return candidate
+		}
+		os.Remove(landing)
+	}
+	t.Skip("no writable directory on a second filesystem to force a cross-device rename")
+	return ""
+}
+
+// When the install fails and the original cannot be put back either, exe no longer
+// exists: it was renamed aside and nothing returned it. The error has to say where
+// it went, or the user is left with no binary and no idea there is one to recover.
+func TestReplaceBinaryNamesTheAsideCopyWhenRestoreFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A source that does not exist fails both the rename and the copy; a read-only
+	// directory then fails the restore too.
+	missing := filepath.Join(dir, "not-there")
+
+	aside := exe + ".old"
+	if err := os.Rename(exe, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	err := replaceBinary(missing, exe)
+	if err == nil {
+		t.Fatal("replaceBinary reported success with nothing to install")
+	}
+	if !strings.Contains(err.Error(), aside) {
+		t.Errorf("err = %v, want it to name %s, the only copy left", err, aside)
 	}
 }

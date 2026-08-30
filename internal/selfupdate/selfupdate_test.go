@@ -6,7 +6,10 @@ import (
 	"testing"
 )
 
-func TestPlatformAssetSelectsCurrentOS(t *testing.T) {
+// Every platform's suffix has to match a label in release.yml. Asserting only the
+// one the test host happens to run on means CI (linux/amd64) never checks the
+// others, and a typo there ships as "no asset for your platform".
+func TestPlatformAssetSelectsThePlatformsTheReleaseBuilds(t *testing.T) {
 	rel := &release{Assets: []struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
@@ -18,23 +21,28 @@ func TestPlatformAssetSelectsCurrentOS(t *testing.T) {
 		{Name: "synty-sync-1.0.0-win.zip", URL: "u/win"},
 	}}
 
-	url, err := platformAsset(rel)
-	if err != nil {
-		t.Fatalf("platformAsset: %v", err)
+	for _, tc := range []struct {
+		goos, goarch, want string
+	}{
+		{"darwin", "amd64", "u/mac-intel"},
+		{"darwin", "arm64", "u/mac-apple"},
+		{"linux", "amd64", "u/linux-intel"},
+		{"linux", "arm64", "u/linux-arm64"},
+		{"windows", "amd64", "u/win"},
+	} {
+		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
+			url, err := platformAsset(rel, tc.goos, tc.goarch)
+			if err != nil {
+				t.Fatalf("platformAsset: %v", err)
+			}
+			if url != tc.want {
+				t.Errorf("platformAsset = %q, want %q", url, tc.want)
+			}
+		})
 	}
 
-	want := map[string]string{
-		"darwin":  map[string]string{"amd64": "u/mac-intel", "arm64": "u/mac-apple"}[runtime.GOARCH],
-		"linux":   map[string]string{"amd64": "u/linux-intel", "arm64": "u/linux-arm64"}[runtime.GOARCH],
-		"windows": "u/win",
-	}[runtime.GOOS]
-	// Skip rather than pass silently: an unmapped GOOS/GOARCH means this test asserts
-	// nothing, and a quiet no-op is worse than a visible gap.
-	if want == "" {
-		t.Skipf("no expected asset mapped for %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	if url != want {
-		t.Errorf("platformAsset = %q, want %q for %s/%s", url, want, runtime.GOOS, runtime.GOARCH)
+	if _, err := platformAsset(rel, "plan9", "amd64"); err == nil {
+		t.Error("an unsupported platform resolved to an asset")
 	}
 }
 
@@ -45,7 +53,7 @@ func TestPlatformAssetMissing(t *testing.T) {
 	}{
 		{Name: "synty-sync-1.0.0-solaris-sparc.zip", URL: "u/nope"},
 	}}
-	if _, err := platformAsset(rel); err == nil || !strings.Contains(err.Error(), "no asset matching") {
+	if _, err := platformAsset(rel, runtime.GOOS, runtime.GOARCH); err == nil || !strings.Contains(err.Error(), "no asset matching") {
 		t.Errorf("expected no-asset error, got %v", err)
 	}
 }

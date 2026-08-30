@@ -36,14 +36,14 @@ type release struct {
 
 // Run updates the binary to target (a version like "0.2.0"), or to the latest
 // release when target is empty. current is the running binary's version.
-func Run(current, target string) error {
+func Run(ctx context.Context, current, target string) error {
 	current = strings.TrimSpace(current)
 	if current == "" || current == "dev" {
 		return fmt.Errorf("this is a dev build (version %q); `update` only works on release builds — install one with install.sh", current)
 	}
-	token := resolveToken()
+	token := resolveToken(ctx)
 
-	rel, err := fetchRelease(token, target)
+	rel, err := fetchRelease(ctx, token, target)
 	if err != nil {
 		return err
 	}
@@ -57,11 +57,11 @@ func Run(current, target string) error {
 		return nil
 	}
 
-	assetURL, err := platformAsset(rel)
+	assetURL, err := platformAsset(rel, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
-	if err := downloadAndReplace(token, assetURL); err != nil {
+	if err := downloadAndReplace(ctx, token, assetURL); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "updated %s to version %s\n", binaryName, relVer)
@@ -70,7 +70,7 @@ func Run(current, target string) error {
 
 // resolveToken finds a GitHub token: env first, then the gh CLI. Empty is allowed
 // (public assets), but this repo is private so a token is normally required.
-func resolveToken() string {
+func resolveToken(ctx context.Context) string {
 	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
 		return t
 	}
@@ -81,17 +81,17 @@ func resolveToken() string {
 	if err != nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	lookup, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, gh, "auth", "token").Output()
+	out, err := exec.CommandContext(lookup, gh, "auth", "token").Output()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
 }
 
-func newRequest(token, method, url string) (*http.Request, error) {
-	req, err := http.NewRequest(method, url, nil)
+func newRequest(ctx context.Context, token, method, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func newRequest(token, method, url string) (*http.Request, error) {
 	return req, nil
 }
 
-func fetchRelease(token, target string) (*release, error) {
+func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 	url := releasesAPIURL + "/latest"
 	if target != "" {
 		tag := target
@@ -110,7 +110,7 @@ func fetchRelease(token, target string) (*release, error) {
 		}
 		url = releasesAPIURL + "/tags/" + tag
 	}
-	req, err := newRequest(token, http.MethodGet, url)
+	req, err := newRequest(ctx, token, http.MethodGet, url)
 	if err != nil {
 		return nil, err
 	}
@@ -141,25 +141,28 @@ func fetchRelease(token, target string) (*release, error) {
 	return &r, nil
 }
 
-// platformAsset returns the asset API URL for the current OS/arch, matching the
-// label suffix the release workflow uses.
-func platformAsset(rel *release) (string, error) {
+// platformAsset returns the asset API URL for goos/goarch, matching the label
+// suffix the release workflow uses. The platform is a parameter rather than read
+// from runtime so every branch can be asserted on one machine: the suffixes have to
+// stay in lockstep with release.yml, and a typo in a platform CI does not run on
+// would otherwise ship as "no asset for your platform".
+func platformAsset(rel *release, goos, goarch string) (string, error) {
 	var suffix string
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		suffix = "mac-intel.zip"
-		if runtime.GOARCH == "arm64" {
+		if goarch == "arm64" {
 			suffix = "mac-apple.zip"
 		}
 	case "linux":
 		suffix = "linux-intel.zip"
-		if runtime.GOARCH == "arm64" {
+		if goarch == "arm64" {
 			suffix = "linux-arm64.zip"
 		}
 	case "windows":
 		suffix = "win.zip"
 	default:
-		return "", fmt.Errorf("unsupported platform %s/%s", runtime.GOOS, runtime.GOARCH)
+		return "", fmt.Errorf("unsupported platform %s/%s", goos, goarch)
 	}
 	for _, a := range rel.Assets {
 		if strings.HasSuffix(a.Name, suffix) {
@@ -173,7 +176,7 @@ func platformAsset(rel *release) (string, error) {
 	return "", fmt.Errorf("no asset matching %s; available: %v", suffix, names)
 }
 
-func downloadAndReplace(token, assetURL string) error {
+func downloadAndReplace(ctx context.Context, token, assetURL string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locating current binary: %w", err)
@@ -182,13 +185,13 @@ func downloadAndReplace(token, assetURL string) error {
 		return fmt.Errorf("resolving binary path: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "downloading update…")
-	return installTo(token, assetURL, exe)
+	return installTo(ctx, token, assetURL, exe)
 }
 
 // installTo downloads the release asset and swaps its binary over exe. Every step
 // happens beside exe and the target is only ever replaced by a rename, so a failure
 // at any point leaves the working binary exactly as it was.
-func installTo(token, assetURL, exe string) error {
+func installTo(ctx context.Context, token, assetURL, exe string) error {
 	// Stage next to the target binary so the final rename stays on one filesystem
 	// (a temp dir under /tmp is often a separate device, and rename can't cross it).
 	tmp, err := os.MkdirTemp(filepath.Dir(exe), ".synty-sync-update-*")
@@ -198,7 +201,7 @@ func installTo(token, assetURL, exe string) error {
 	defer os.RemoveAll(tmp)
 
 	zipPath := filepath.Join(tmp, "download.zip")
-	if err := download(token, assetURL, zipPath); err != nil {
+	if err := download(ctx, token, assetURL, zipPath); err != nil {
 		return err
 	}
 	binPath, err := extractBinary(zipPath, tmp)
@@ -262,7 +265,13 @@ func replaceBinary(newPath, exe string) error {
 		// Cross-device or an exotic mount: copy instead, and put the original back if
 		// even that fails, so the user is never left without a binary.
 		if copyErr := copyFile(newPath, exe); copyErr != nil {
-			os.Rename(aside, exe)
+			if restoreErr := os.Rename(aside, exe); restoreErr != nil {
+				// exe was renamed aside and nothing put it back, so there is no binary
+				// at the path any more. Saying where it went is the difference between
+				// a recoverable state and a missing tool.
+				return fmt.Errorf("installing the new binary failed (%v) and restoring the previous one also failed (%v); it is at %s",
+					copyErr, restoreErr, aside)
+			}
 			return fmt.Errorf("installing the new binary: %w", copyErr)
 		}
 	}
@@ -271,8 +280,8 @@ func replaceBinary(newPath, exe string) error {
 	return nil
 }
 
-func download(token, url, dst string) error {
-	req, err := newRequest(token, http.MethodGet, url)
+func download(ctx context.Context, token, url, dst string) error {
+	req, err := newRequest(ctx, token, http.MethodGet, url)
 	if err != nil {
 		return err
 	}
