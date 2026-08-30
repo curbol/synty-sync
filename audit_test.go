@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,36 @@ func TestListWritesTheLockfileToItsWriter(t *testing.T) {
 	}
 }
 
+// select reaches the store before it touches the manifest, and it must stay that
+// way: an expired session that got as far as Reconcile would rewrite the committed
+// allowlist from an enumeration that returned nothing.
+func TestSelectAbortsOnExpiredSessionWithoutTouchingTheManifest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<!doctype html><html><body><h1>Login</h1></body></html>`)
+	}))
+	defer srv.Close()
+
+	manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
+	const seeded = "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n"
+	if err := os.WriteFile(manifestPath, []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "stale"}
+	err := selectPacks(context.Background(), client, manifestPath, "localhost:18814")
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		t.Fatalf("err = %v, want ErrExpiredSession", err)
+	}
+
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != seeded {
+		t.Errorf("the manifest was rewritten on an expired session:\n%s", after)
+	}
+}
+
 // selectPacks rewrites the committed allowlist from whatever the page hands back,
 // so each of these is a way the user's selection can be lost: a save that drops the
 // packs they kept, an empty submission that disables everything, and a tab left open
@@ -205,8 +236,8 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- selectPacks(context.Background(), client, manifestPath, tc.addr) }()
 
-			waitForSelectPage(t, tc.addr)
-			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post})
+			token := waitForSelectPage(t, tc.addr)
+			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post, "csrf": {token}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,16 +272,27 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 	}
 }
 
-func waitForSelectPage(t *testing.T, addr string) {
+// waitForSelectPage blocks until the page is being served and returns the token its
+// form carries, which is what separates a submission from the rendered page from one
+// any other tab could forge.
+func waitForSelectPage(t *testing.T, addr string) string {
 	t.Helper()
 	for i := 0; i < 100; i++ {
-		if c, err := net.Dial("tcp", addr); err == nil {
-			c.Close()
-			return
+		resp, err := http.Get("http://" + addr + "/")
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
-		time.Sleep(10 * time.Millisecond)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		m := regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`).FindSubmatch(body)
+		if m == nil {
+			t.Fatal("the select page carries no form token")
+		}
+		return string(m[1])
 	}
 	t.Fatalf("select page never came up on %s", addr)
+	return ""
 }
 
 // A sync must not act on packs the manifest has not enabled.

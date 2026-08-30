@@ -5,6 +5,9 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"html/template"
 	"net"
@@ -27,6 +30,7 @@ type row struct {
 type pageData struct {
 	Rows  []row
 	Count int
+	Token string
 }
 
 var page = template.Must(template.New("select").Parse(`<!doctype html>
@@ -47,6 +51,7 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 </style></head>
 <body>
 <form method="post" action="/save">
+ <input type="hidden" name="csrf" value="{{.Token}}">
  <header>
   <h1>synty-sync</h1>
   <input id="filter" placeholder="filter packs…" oninput="flt(this.value)">
@@ -72,9 +77,11 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 </script>
 </body></html>`))
 
-// Serve runs the selection page at addr until the user clicks Save (or ctx is
-// cancelled), returning the chosen set of enabled slugs.
-func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
+// Serve runs the selection page on ln until the user clicks Save (or ctx is
+// cancelled), returning the chosen set of enabled slugs. It takes a bound listener
+// rather than an address so the caller decides where the page lives and a test can
+// hand it an ephemeral port. Serve closes ln before it returns.
+func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
 	rows := make([]row, 0, len(packs))
 	known := make(map[string]bool, len(packs))
 	for _, p := range packs {
@@ -83,35 +90,57 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
-	ln, err := net.Listen("tcp", addr)
+	// A submission is the user's whole pack selection, written to a committed file.
+	// A cross-origin form POST is a CORS "simple request" — no preflight, no
+	// same-origin block — so the method guard below is not enough on its own: a page
+	// in another tab could post a set of guessed slugs (they are derived from public
+	// display names) and both discard the real selection and enable packs the user
+	// never chose. Only a form this server rendered carries the token.
+	token, err := newToken()
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", addr, err)
+		ln.Close()
+		return nil, err
 	}
+
 	result := make(chan map[string]bool, 1)
 	mux := http.NewServeMux()
 	// The root pattern is anchored with {$} so it matches only "/" and does not
 	// swallow a non-POST /save, which must fail rather than render the page.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		if !localRequest(r, ln.Addr()) {
+			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
+			return
+		}
 		count := 0
 		for _, e := range enabled {
 			if e {
 				count++
 			}
 		}
-		_ = page.Execute(w, pageData{Rows: rows, Count: count})
+		_ = page.Execute(w, pageData{Rows: rows, Count: count, Token: token})
 	})
 	// POST only: this endpoint persists the whole pack selection, and any page the
 	// user visits while select is open can reach localhost with a GET.
 	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
+		if !localRequest(r, ln.Addr()) {
+			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// PostForm, not Form: a token supplied in the query string would let a link
+		// stand in for the rendered page.
+		if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(token)) != 1 {
+			http.Error(w, "this form did not come from the page synty-sync is serving", http.StatusForbidden)
 			return
 		}
 		// A slug this page never offered comes from a stale tab. The returned set is
 		// the user's whole selection, so passing one through would make an empty
 		// submission read as a deliberate choice of packs that no longer exist.
 		chosen := map[string]bool{}
-		for _, slug := range r.Form["pack"] {
+		for _, slug := range r.PostForm["pack"] {
 			if known[slug] {
 				chosen[slug] = true
 			}
@@ -134,6 +163,44 @@ func Serve(ctx context.Context, addr string, packs []model.Pack, enabled map[str
 		shutdown(srv)
 		return nil, ctx.Err()
 	}
+}
+
+// newToken returns the per-invocation secret the rendered form carries back.
+func newToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating a form token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// localRequest reports whether a request addressed this server the way a browser on
+// this machine would. A page that reached us by pointing its own name at a loopback
+// address arrives with that name in Host; without this it would be same-origin with
+// the selection page and free to read the whole pack list, which is the user's
+// purchase history.
+func localRequest(r *http.Request, bound net.Addr) bool {
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		return false
+	}
+	boundHost, boundPort, err := net.SplitHostPort(bound.String())
+	if err != nil || port != boundPort {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	// A wildcard bind has no single address to match, so only loopback is accepted.
+	if ip.IsLoopback() {
+		return true
+	}
+	boundIP := net.ParseIP(boundHost)
+	return boundIP != nil && !boundIP.IsUnspecified() && boundIP.Equal(ip)
 }
 
 func shutdown(srv *http.Server) {

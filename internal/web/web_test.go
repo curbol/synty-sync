@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,30 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// listen binds an ephemeral loopback port, so the tests carry no fixed port numbers
+// to collide over and can run alongside each other.
+func listen(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+var tokenRe = regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`)
+
+// formToken fetches the page and returns the token its form carries, the way a
+// browser submitting that form would.
+func formToken(t *testing.T, base string) string {
+	t.Helper()
+	m := tokenRe.FindStringSubmatch(get(t, base+"/"))
+	if m == nil {
+		t.Fatal("the rendered page carries no form token")
+	}
+	return m[1]
+}
+
 func TestServeRendersAndSaves(t *testing.T) {
 	packs := []model.Pack{
 		{Slug: "polygon-pirate-pack", DisplayName: "POLYGON - Pirate Pack", IconURL: "https://x/pirate.png"},
@@ -32,13 +57,13 @@ func TestServeRendersAndSaves(t *testing.T) {
 		set map[string]bool
 		err error
 	}
+	ln := listen(t)
+	base := "http://" + ln.Addr().String()
 	done := make(chan res, 1)
 	go func() {
-		set, err := Serve(context.Background(), "localhost:8799", packs, enabled)
+		set, err := Serve(context.Background(), ln, packs, enabled)
 		done <- res{set, err}
 	}()
-
-	base := "http://localhost:8799"
 	waitUp(t, base)
 
 	// The page lists both packs, with the enabled one pre-checked.
@@ -51,7 +76,10 @@ func TestServeRendersAndSaves(t *testing.T) {
 	}
 
 	// Save a new selection (only city-zombies).
-	resp, err := http.PostForm(base+"/save", url.Values{"pack": {"polygon-city-zombies"}})
+	resp, err := http.PostForm(base+"/save", url.Values{
+		"pack": {"polygon-city-zombies"},
+		"csrf": {formToken(t, base)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,14 +128,16 @@ func TestSaveRejectsNonPost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	ln := listen(t)
+	base := "http://" + ln.Addr().String()
 	done := make(chan map[string]bool, 1)
 	go func() {
-		chosen, _ := Serve(ctx, "localhost:18789", []model.Pack{{Slug: "a", DisplayName: "A"}}, map[string]bool{"a": true})
+		chosen, _ := Serve(ctx, ln, []model.Pack{{Slug: "a", DisplayName: "A"}}, map[string]bool{"a": true})
 		done <- chosen
 	}()
-	waitForListener(t, "localhost:18789")
+	waitUp(t, base)
 
-	resp, err := http.Get("http://localhost:18789/save")
+	resp, err := http.Get(base + "/save")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,25 +163,29 @@ func TestSaveIgnoresUnknownSlugs(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		addr string
 		post []string
 		want map[string]bool
 	}{
-		{"every slug is stale", "localhost:18791", []string{"long-gone", "also-gone"}, map[string]bool{}},
-		{"a stale slug alongside a real one", "localhost:18792", []string{"current", "long-gone"}, map[string]bool{"current": true}},
+		{"every slug is stale", []string{"long-gone", "also-gone"}, map[string]bool{}},
+		{"a stale slug alongside a real one", []string{"current", "long-gone"}, map[string]bool{"current": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
+			ln := listen(t)
+			base := "http://" + ln.Addr().String()
 			done := make(chan map[string]bool, 1)
 			go func() {
-				chosen, _ := Serve(ctx, tc.addr, packs, map[string]bool{"current": true})
+				chosen, _ := Serve(ctx, ln, packs, map[string]bool{"current": true})
 				done <- chosen
 			}()
-			waitForListener(t, tc.addr)
+			waitUp(t, base)
 
-			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post})
+			resp, err := http.PostForm(base+"/save", url.Values{
+				"pack": tc.post,
+				"csrf": {formToken(t, base)},
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,16 +206,4 @@ func TestSaveIgnoresUnknownSlugs(t *testing.T) {
 			}
 		})
 	}
-}
-
-func waitForListener(t *testing.T, addr string) {
-	t.Helper()
-	for i := 0; i < 100; i++ {
-		if c, err := net.Dial("tcp", addr); err == nil {
-			c.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("server never came up on %s", addr)
 }

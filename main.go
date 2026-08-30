@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -277,7 +278,11 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr 
 	}
 	prev := man.EnabledSet()
 	man.Reconcile(packs)
-	chosen, err := web.Serve(ctx, addr, packs, man.EnabledSet())
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	chosen, err := web.Serve(ctx, ln, packs, man.EnabledSet())
 	if err != nil {
 		return err
 	}
