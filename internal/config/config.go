@@ -5,6 +5,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,8 +78,18 @@ func Load(dir string) (Config, error) {
 	p := filepath.Join(dir, "config.toml")
 	if _, err := os.Stat(p); err == nil {
 		var fc fileConfig
-		if _, err := toml.DecodeFile(p, &fc); err != nil {
+		md, err := toml.DecodeFile(p, &fc)
+		if err != nil {
 			return Config{}, err
+		}
+		// A key that decodes to nothing is a typo, and silently dropping it leaves the
+		// user reading an error that names the setting their file already contains.
+		if un := md.Undecoded(); len(un) > 0 {
+			keys := make([]string, 0, len(un))
+			for _, k := range un {
+				keys = append(keys, k.String())
+			}
+			return Config{}, fmt.Errorf("%s: unknown key(s): %s", p, strings.Join(keys, ", "))
 		}
 		overlay(&c, fc)
 	}
@@ -88,7 +99,7 @@ func Load(dir string) (Config, error) {
 	if v := os.Getenv("SYNTY_LIBRARY"); v != "" {
 		c.LibraryPath = v
 	}
-	c.LibraryPath = expandHome(c.LibraryPath)
+	c.LibraryPath = ExpandHome(c.LibraryPath)
 	return c, nil
 }
 
@@ -107,7 +118,10 @@ func overlay(c *Config, fc fileConfig) {
 	}
 }
 
-func expandHome(p string) string {
+// ExpandHome resolves a leading ~ to the user's home directory. It is exported
+// because the --library flag is applied after Load returns and needs the same
+// treatment as the config-file and environment paths.
+func ExpandHome(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, strings.TrimPrefix(p, "~"))

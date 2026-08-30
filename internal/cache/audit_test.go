@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A download that dies mid-stream must not leave its partial temp file behind.
@@ -143,5 +144,47 @@ func TestMigrateMatchesUppercaseExtension(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(lib, filepath.FromSlash(res[0].RelPath))); err != nil {
 		t.Errorf("migrated file missing at %s", res[0].RelPath)
+	}
+}
+
+// An abandoned download temp can carry enough of a wanted file's name to normalize
+// onto it. Adopting one records a truncated body's digest as that file's truth, so
+// Locate has to pass it over even when nothing else matches.
+func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := Wanted{FileID: 1, FileToken: "POLYGON_Pirate", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	name := "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip"
+
+	if err := os.WriteFile(filepath.Join(dir, tempPrefix+name), []byte("half a pack"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rel, ok := Locate(lib, want); ok {
+		t.Fatalf("Locate adopted an in-flight download at %s", rel)
+	}
+
+	// The genuine file alongside it still wins.
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("the whole pack"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, ok := Locate(lib, want)
+	if !ok {
+		t.Fatal("Locate missed the real file sitting beside a temp")
+	}
+	if rel != "POLYGON_Pirate/"+name {
+		t.Errorf("Locate = %q, want the completed download", rel)
+	}
+}
+
+// SweepTemps is the first thing a run does, so on a fresh install it walks a root
+// that does not exist yet. WalkDir hands the callback a nil DirEntry there, and only
+// the short-circuit on err keeps d.IsDir() from being reached.
+func TestSweepTempsOnAMissingRoot(t *testing.T) {
+	count, bytes := SweepTemps(filepath.Join(t.TempDir(), "not-created-yet"), time.Now())
+	if count != 0 || bytes != 0 {
+		t.Errorf("SweepTemps = %d files, %d bytes on a missing root; want nothing", count, bytes)
 	}
 }

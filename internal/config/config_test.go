@@ -84,3 +84,21 @@ func TestResolveDir(t *testing.T) {
 		t.Errorf("home fallback: got %q", got)
 	}
 }
+
+// A key that decodes to nothing is a typo. Dropping it silently leaves the user
+// reading "no customer id: ... or put customer_id in config.toml" while looking at a
+// config.toml that appears to contain exactly that.
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"),
+		[]byte("customer-id = \"1234567890123\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("a misspelled key was accepted and dropped")
+	}
+	if !strings.Contains(err.Error(), "customer-id") {
+		t.Errorf("err = %v, want it to name the key that went unread", err)
+	}
+}

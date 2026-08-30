@@ -101,16 +101,21 @@ type Report struct {
 	NewLockfile lockfile.Lockfile
 }
 
-// Failed reports whether the run should exit non-zero: any failure that a later run,
-// a fresh session, or a fix on this side could clear.
-func (r Report) Failed() bool {
+// ActionableFailures counts the failures a later run, a fresh session, or a fix on
+// this side could clear. It is what the exit status is built from, so the rule lives
+// here rather than being restated by whoever needs the count.
+func (r Report) ActionableFailures() int {
+	n := 0
 	for _, f := range r.Failures {
 		if !f.Gone {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
+
+// Failed reports whether the run should exit non-zero.
+func (r Report) Failed() bool { return r.ActionableFailures() > 0 }
 
 // ErrEmptyLibrary guards the committed record against a well-formed but wrong
 // enumeration. The lockfile travels with someone's project, and a read that returns

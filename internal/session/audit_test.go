@@ -240,8 +240,10 @@ func TestUnreadableCookieDBIsAnError(t *testing.T) {
 func TestCookieDBWithNoStoreCookies(t *testing.T) {
 	db := newCookieDB(t, false, [3]string{".other.com", "junk", "XX"})
 	got, err := geckoCookieHeader(db)
-	if err == nil && got == "" {
-		t.Log("no store cookies yields an empty header; the portal reports the expired session")
+	if err == nil {
+		// An empty header travels downstream and comes back as "expired session",
+		// pointing the user at a login they have already done.
+		t.Errorf("a profile with no store cookies returned header %q and no error", got)
 	}
 	if strings.Contains(got, "junk") {
 		t.Errorf("a non-syntystore cookie was forwarded: %q", got)

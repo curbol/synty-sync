@@ -378,3 +378,27 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 		t.Errorf("the report does not name the failures:\n%s", out.String())
 	}
 }
+
+// Flags are the last layer over config.toml and the environment, and the shell
+// leaves a quoted ~ alone. Without the same expansion the other layers get, a quoted
+// --library "~/assets" puts a multi-gigabyte mirror in a directory named "~".
+func TestApplyFlagsIsTheLastLayer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	base := config.Config{LibraryPath: "/from/env", Concurrency: 4, CustomerID: "from-env"}
+
+	got := applyFlags(base, "~/assets", "from-flag", 8)
+	if got.LibraryPath != filepath.Join(home, "assets") {
+		t.Errorf("LibraryPath = %q, want the expanded %q", got.LibraryPath, filepath.Join(home, "assets"))
+	}
+	if got.CustomerID != "from-flag" || got.Concurrency != 8 {
+		t.Errorf("flags did not win: %+v", got)
+	}
+
+	// An unset flag leaves the layer beneath it alone.
+	unchanged := applyFlags(base, "", "", 0)
+	if unchanged != base {
+		t.Errorf("empty flags changed the config: %+v, want %+v", unchanged, base)
+	}
+}
