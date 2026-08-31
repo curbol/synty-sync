@@ -174,3 +174,7 @@ in this cache.
 - Generated/test data: `cmd/scrubfixtures` regenerates the PII-free `testdata/` from
   the git-excluded raw captures; a guard test fails the build on any leaked PII.
 - The tool is polite: bounded-concurrency page fetches and sequential downloads.
+
+## Support
+
+<a href="https://ko-fi.com/curbol"><img height="42" alt="Buy Me a Coffee at ko-fi.com" src="https://storage.ko-fi.com/cdn/kofi1.png?v=6"></a>
