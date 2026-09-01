@@ -194,11 +194,12 @@ on are made durable in the game repo at promotion (sub-project 2), not here. Wha
 cache reconstructable in practice: both commands read the cache when diffing, so a tracked
 file that is missing, truncated, or (on `sync`, which re-hashes) corrupt re-downloads instead
 of being reported unchanged.
-The existing flat zips in the library are migrated into this layout on first run
+The existing flat files in the library are migrated into this layout on first run
 (matched by a normalized filename key, since the real names render the variant unlike the
 item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` collision suffixes).
-Migration never replaces a copy already in the layout: the match is on name alone, and the
-adopted file's hash is what gets recorded, so overwriting would let a stale flat zip be
+The key drops the extension, so a Unity pack's `.unitypackage` folds in the same way a `.zip`
+does. Migration never replaces a copy already in the layout: the match is on name alone, and
+the adopted file's hash is what gets recorded, so overwriting would let a stale flat file be
 adopted as verified content. Cache paths read back from the lockfile are confined to the
 library root before use, since that file is committed and travels with the project.
 
@@ -310,13 +311,19 @@ via env (`SYNTY_LIBRARY`).
 
 ## Testing
 
-- The two real portal pages already captured are checked in as parser fixtures (with the
-  email/customer-id scrubbed): one library-list page, one item page. Unit tests assert the
-  parser extracts the expected packs, variants, versions, sizes, and file ids.
+The suite is offline and hermetic: no network, no session, no customer id. `go test ./...`
+is the whole gate, and it is the gate CI and the release workflow run.
+
+- Real portal pages are checked in as parser fixtures, scrubbed of the email and customer id
+  by `go run ./cmd/scrubfixtures` (never hand-edited). `internal/fixtures` fails the build if
+  either leaks back in. Unit tests assert the parser extracts the expected packs, variants,
+  versions, sizes, and file ids, and the pagination walk runs against the real captures.
 - Diff logic is unit-tested against synthetic lockfile + enumeration pairs (new / changed /
-  unchanged / variant-filtered).
-- A network-touching integration test is gated behind a flag/env and is not part of the
-  default suite.
+  unchanged / variant-filtered). Whole runs go through `httptest` stores that can withhold a
+  file, serve a login page where a pack belongs, or stop advancing their paginator.
+- Each package keeps its guard tests in `audit_test.go`, one per invariant, each carrying a
+  comment naming the failure it prevents. A guard test that fails is a regression, not a test
+  to update.
 
 ## Open questions
 
