@@ -42,7 +42,8 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   (`ResolveDir`); library cache dir defaults to `$XDG_DATA_HOME/synty-sync`. No
   machine-specific path is baked in.
 - `session` — builds the syntystore.com `Cookie` header from a Gecko browser cookie DB
-  (Firefox or Zen, the zero-paste default), a `cookies.txt`, or a pasted-curl file.
+  (Firefox or Zen, the zero-paste default; profile bases are per-platform), a
+  `cookies.txt`, or a pasted-curl file.
   Forwards every syntystore.com cookie rather than guessing the session one.
 - `portal` — the Sky Pilot Shopify portal client. `client.go` does HTTP (retry with
   backoff on 5xx/transient; fail-fast on 4xx), the `Enumerate` / `ItemFiles` / `Resolve`
@@ -67,7 +68,8 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `cache` — the local mirror, keyed by **file identity, not owning pack**, so a file
   bundled across packs is stored once. Two-phase writes: `Store` hashes into a
   `.synty-dl-*` temp and returns a `*Pending`, which the caller `Commit`s or `Discard`s.
-  `Verify` (exact recorded size) / `VerifyDeep` (sha) / `Hash` / `Remove` / `SweepTemps`;
+  `Verify` (exact recorded size) / `VerifyDeep` (sha) / `Hash` / `Head` / `Tail` /
+  `Remove` / `SweepTemps` — every one confines its `relPath` through `resolve`;
   `Migrate` folds pre-existing flat files into the layout, matching on a name key that
   drops the extension.
 - `lockfile` — `synty-sync.lock.json` (beside the manifest, committed with the consuming
@@ -95,7 +97,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - **Files dedupe by `fileId`.** A file bundled under several packs downloads once and every
   owning pack's lockfile entry shares the same `cachePath`. Preserve this in `syncer` and
   `cache`.
-- **Selection is opt-in.** Newly-owned packs are disabled by default in `manifest`.
+- **Selection is opt-in, and never silently wiped.** Newly-owned packs are disabled by
+  default in `manifest`. An enumeration that returns no packs while a committed file
+  holds some is refused rather than written — `syncer.ErrEmptyLibrary` for the lockfile,
+  the same check in `main.selectPacks` for the manifest.
 - **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
   `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly,
   and an enumeration that comes back empty while the lockfile holds packs is refused
@@ -104,8 +109,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   syncer `Commit`s only after the body checks pass. A download that answers with a
   document is refused twice — by Content-Type in `portal`, by a body sniff in `syncer` —
   because otherwise a login page is hashed and recorded as the pack's content. Adoption
-  runs the same sniff: it is the one path into the lockfile that skips `classify`, and a
-  cache written before these guards existed can hold error pages under the right names.
+  runs the same sniff plus a zip end-of-central-directory check: it is the one path into
+  the lockfile that skips `classify`, a cache written before these guards existed can
+  hold error pages under the right names, and a copy that stopped part way still begins
+  with an archive's magic.
 - **A failed download fails its file, not the run.** The lockfile is still written; only
   failures a later run could clear move the exit status (`Report.ActionableFailures`). A
   file that already had a verified copy keeps its record when the *update* fails, at the

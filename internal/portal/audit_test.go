@@ -716,3 +716,30 @@ func TestGetBodyHonorsRetryAfter(t *testing.T) {
 		t.Errorf("retried after %v; the Retry-After of 1s was not honored", elapsed)
 	}
 }
+
+// New trims a trailing slash and fills in the HTTP client, but the tests and any
+// future caller build the struct directly, where a doc comment is not a guarantee: a
+// trailing slash silently produces "//apps/downloads/..." and a nil client panics on
+// first use. Every request normalizes both, so a struct literal works too.
+func TestAStructLiteralClientWorksLikeOneFromNew(t *testing.T) {
+	var hits int32
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
+	}))
+	defer srv.Close()
+
+	// Trailing slash, and no HTTP client at all.
+	c := &Client{BaseURL: srv.URL + "/", CustomerID: "1", Limits: testLimits()}
+	if _, err := c.Enumerate(context.Background()); err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if atomic.LoadInt32(&hits) == 0 {
+		t.Fatal("no request reached the server")
+	}
+	if strings.HasPrefix(gotPath, "//") {
+		t.Errorf("request path %q doubled the separator; the trailing slash was not trimmed", gotPath)
+	}
+}

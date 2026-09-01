@@ -392,7 +392,8 @@ func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 		counts[d.Class]++
 	}
 	fmt.Fprintf(w, "library: %s\n", cfg.LibraryPath)
-	fmt.Fprintf(w, "packs: %d  files selected: %d\n", len(rep.NewLockfile.Packs), len(rep.Diffs))
+	fmt.Fprintf(w, "packs: %d of %d in the lockfile  files selected: %d\n",
+		rep.PacksInScope, len(rep.NewLockfile.Packs), len(rep.Diffs))
 	fmt.Fprintf(w, "  new=%d changed=%d download-now=%d cache-missing=%d adopted=%d unchanged=%d\n",
 		counts[syncer.New], counts[syncer.Changed], counts[syncer.DownloadNow],
 		counts[syncer.CacheMissing], counts[syncer.Adopted], counts[syncer.Unchanged])

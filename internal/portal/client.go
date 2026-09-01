@@ -74,9 +74,9 @@ func documentMediaType(header string) (string, bool) {
 
 const shopParam = "synty-store.myshopify.com"
 
-// Client talks to the Sky Pilot portal with an authenticated cookie. Build one with
-// New: it supplies the two things a zero value gets wrong, a non-nil HTTP client and
-// a BaseURL without a trailing slash (the request URLs are built by concatenation).
+// Client talks to the Sky Pilot portal with an authenticated cookie. New fills in the
+// two fields a zero value gets wrong; a struct literal is fine too, since every
+// request normalizes them anyway.
 type Client struct {
 	HTTP       *http.Client
 	BaseURL    string // e.g. https://syntystore.com (no trailing slash)
@@ -99,6 +99,23 @@ func New(httpClient *http.Client, baseURL, customerID, cookie string) *Client {
 	}
 }
 
+// base is the BaseURL every request builds on. Request URLs are assembled by
+// concatenation, so a trailing slash would produce "//apps/downloads/..." — normalized
+// here rather than only in New, because the tests and any future caller build the
+// struct directly and a doc comment is not a guarantee.
+func (c *Client) base() string {
+	return strings.TrimRight(c.BaseURL, "/")
+}
+
+// httpClient is the client requests go through, so a zero-value Client is usable
+// rather than a nil-pointer panic on its first use.
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return http.DefaultClient
+}
+
 func (c *Client) ua() string {
 	if c.UserAgent != "" {
 		return c.UserAgent
@@ -116,7 +133,7 @@ func (c *Client) get(ctx context.Context, rawURL string) (*http.Response, error)
 	if c.Cookie != "" {
 		req.Header.Set("Cookie", c.Cookie)
 	}
-	return c.HTTP.Do(req)
+	return c.httpClient().Do(req)
 }
 
 // Limits bounds a page fetch. Every field is optional: a zero one takes the default
@@ -305,7 +322,7 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 	var all []model.Pack
 	seen := map[int]bool{}
 	for page := 1; page <= maxLibraryPages; page++ {
-		u := withShop(fmt.Sprintf("%s/apps/downloads/orders/%s?line_items_page=%d", c.BaseURL, c.CustomerID, page))
+		u := withShop(fmt.Sprintf("%s/apps/downloads/orders/%s?line_items_page=%d", c.base(), c.CustomerID, page))
 		body, err := c.getBody(ctx, u)
 		if err != nil {
 			return nil, err
@@ -344,8 +361,13 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 
 // ItemFiles fetches and parses one pack's item page, returning its files and the
 // labels of any rows whose variant this build does not recognize (see ParseItemPage).
+//
+// It can return no files and no error, when every versioned row on the page carries a
+// variant keyword this build does not know. A caller that rebuilds a pack's record
+// from the result has to treat that as a failure of its own — an empty file list
+// rewrites the pack's lockfile entry as empty and discards everything it recorded.
 func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) (files []model.FileEntry, unknown []string, err error) {
-	body, err := c.getBody(ctx, withShop(c.BaseURL+pack.ItemURL))
+	body, err := c.getBody(ctx, withShop(c.base()+pack.ItemURL))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -366,7 +388,7 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 			cancel()
 		}
 	}()
-	resp, err := c.get(reqCtx, withShop(c.BaseURL+file.DownloadHref))
+	resp, err := c.get(reqCtx, withShop(c.base()+file.DownloadHref))
 	if err != nil {
 		// The href carries the account email and customer id, so the URL never
 		// reaches the message; the file key identifies the request instead.

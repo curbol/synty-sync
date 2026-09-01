@@ -70,7 +70,9 @@ Your customer id is the number in your library URL:
 The store gates downloads behind your logged-in browser session. The tool reads cookies
 straight from a Gecko browser — `session_source = "firefox"` (default) or `"zen"` (a
 Firefox fork, same cookie store) — so a logged-in browser means `synty-sync sync` needs
-no pasting. Override the source with `--cookies`:
+no pasting. Profile locations are known for Linux, macOS and Windows; point at one
+directly with `SYNTY_BROWSER_PROFILE` if yours lives somewhere else. Override the
+source with `--cookies`:
 
 ```bash
 # Read from the browser you set in config: just run it

@@ -549,11 +549,12 @@ func TestPrintReportNamesEveryOutcome(t *testing.T) {
 			{PackSlug: "pirate", Key: "T|V", Err: "boom"},
 			{PackSlug: "dungeon", Key: "U|V", Err: "404", Gone: true},
 		},
-		Removed:     []string{"old-pack"},
-		Swept:       2,
-		SweptBytes:  4096,
-		Warnings:    []string{"nothing matches the filter"},
-		NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{"a": {}, "b": {}}},
+		Removed:      []string{"old-pack"},
+		PacksInScope: 1, // one of the two in the lockfile; the other was carried forward
+		Swept:        2,
+		SweptBytes:   4096,
+		Warnings:     []string{"nothing matches the filter"},
+		NewLockfile:  lockfile.Lockfile{Packs: map[string]lockfile.Pack{"a": {}, "b": {}}},
 	}
 	cfg := config.Config{LibraryPath: lib}
 
@@ -563,7 +564,7 @@ func TestPrintReportNamesEveryOutcome(t *testing.T) {
 
 	for _, want := range []string{
 		"library: " + lib,
-		"packs: 2  files selected: 6",
+		"packs: 1 of 2 in the lockfile  files selected: 6",
 		"new=1 changed=1 download-now=1 cache-missing=1 adopted=1 unchanged=1",
 		"swept 2 abandoned download temp(s), 4096 bytes reclaimed",
 		"failed: pirate T|V: boom",

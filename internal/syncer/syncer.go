@@ -92,15 +92,19 @@ type Failure struct {
 
 // Report summarizes a run.
 type Report struct {
-	Diffs       []FileDiff
-	Downloaded  []FileDiff
-	Adopted     []FileDiff // matched files already on disk, no download
-	Failures    []Failure
-	Removed     []string // lockfile packs the library no longer lists
-	Swept       int      // abandoned download temps removed
-	SweptBytes  int64
-	Warnings    []string
-	NewLockfile lockfile.Lockfile
+	Diffs      []FileDiff
+	Downloaded []FileDiff
+	Adopted    []FileDiff // matched files already on disk, no download
+	Failures   []Failure
+	Removed    []string // lockfile packs the library no longer lists
+	// PacksInScope is how many packs the run actually read item pages for. NewLockfile
+	// carries every pack the record holds, including those carried forward untouched,
+	// so it is the wrong number to report as what a run acted on.
+	PacksInScope int
+	Swept        int // abandoned download temps removed
+	SweptBytes   int64
+	Warnings     []string
+	NewLockfile  lockfile.Lockfile
 }
 
 // ActionableFailures counts the failures a later run, a fresh session, or a fix on
@@ -218,6 +222,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	packs = filterPacks(packs, opts.OnlyGlob, opts.PackSelected)
 
+	report.PacksInScope = len(packs)
 	progress(fmt.Sprintf("%d packs selected; reading item pages…", len(packs)))
 	packFiles, err := fetchAll(ctx, c, packs, opts.Concurrency)
 	if err != nil {
