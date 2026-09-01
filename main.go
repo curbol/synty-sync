@@ -136,7 +136,15 @@ func run(args []string) error {
 	client := newPortalClient(cfg.CustomerID, cookie)
 
 	if cmd == "select" {
-		return explainSession(selectPacks(ctx, client, manifestPath, *addr), src)
+		bind := *addr
+		if bind == "" {
+			bind = selectAddr
+		}
+		ln, err := net.Listen("tcp", bind)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", bind, err)
+		}
+		return explainSession(selectPacks(ctx, client, manifestPath, ln), src)
 	}
 	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, *only, isDryRun(cmd, *dryRun)), src)
 }
@@ -161,6 +169,12 @@ func sessionSource(cfg config.Config, override string) string {
 	return "firefox"
 }
 
+// storeBaseURL is the store every subcommand talks to. It is a package variable for
+// the same reason stdout is: run's config -> session -> client wiring is otherwise
+// unreachable from a test without going to the real store, so the one place that
+// decides which id and which cookie reach the client would ship untested.
+var storeBaseURL = "https://syntystore.com"
+
 // newPortalClient builds the store client. There is no whole-request timeout (asset
 // downloads are large), but a response-header timeout so a stalled connection fails
 // instead of hanging forever. The transport is cloned from the default so proxy
@@ -168,7 +182,7 @@ func sessionSource(cfg config.Config, override string) string {
 func newPortalClient(customerID, cookie string) *portal.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = 60 * time.Second
-	return portal.New(&http.Client{Transport: tr}, "https://syntystore.com", customerID, cookie)
+	return portal.New(&http.Client{Transport: tr}, storeBaseURL, customerID, cookie)
 }
 
 // runSyncOrStatus loads the manifest and lockfile, runs the diff (downloading unless
@@ -266,10 +280,14 @@ func resolveManifestPath(flag, cmd string) (string, error) {
 // selectAddr is where `select` serves its page when --addr is not given.
 const selectAddr = "localhost:8787"
 
-func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr string) error {
-	if addr == "" {
-		addr = selectAddr
-	}
+// selectPacks serves the selection page on ln and writes the result to the manifest.
+// It takes a bound listener for the same reason web.Serve one layer down does: the
+// caller decides where the page lives, and a test gets an ephemeral port instead of
+// a fixed one that another process may hold. The listener is closed here whichever
+// way this returns; web.Serve closing it earlier, the moment the user saves, is not
+// something this level has to know.
+func selectPacks(ctx context.Context, client *portal.Client, manifestPath string, ln net.Listener) error {
+	defer func() { _ = ln.Close() }()
 	packs, err := client.Enumerate(ctx)
 	if err != nil {
 		return err
@@ -280,10 +298,6 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath, addr 
 	}
 	prev := man.EnabledSet()
 	man.Reconcile(packs)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
-	}
 	chosen, err := web.Serve(ctx, ln, packs, man.EnabledSet())
 	if err != nil {
 		return err

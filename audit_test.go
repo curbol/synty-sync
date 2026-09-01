@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,8 +18,10 @@ import (
 	"time"
 
 	"github.com/curbol/synty-sync/internal/config"
+	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/manifest"
 	"github.com/curbol/synty-sync/internal/portal"
+	"github.com/curbol/synty-sync/internal/syncer"
 	"github.com/curbol/synty-sync/internal/web"
 )
 
@@ -154,7 +157,11 @@ func TestSelectAbortsOnExpiredSessionWithoutTouchingTheManifest(t *testing.T) {
 	}
 
 	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "stale"}
-	err := selectPacks(context.Background(), client, manifestPath, "localhost:18814")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = selectPacks(context.Background(), client, manifestPath, ln)
 	if !errors.Is(err, portal.ErrExpiredSession) {
 		t.Fatalf("err = %v, want ErrExpiredSession", err)
 	}
@@ -180,7 +187,6 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 	const seeded = "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n"
 	for _, tc := range []struct {
 		name        string
-		addr        string
 		seed        string
 		post        []string
 		wantErr     bool
@@ -188,14 +194,12 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 	}{
 		{
 			name:        "the chosen pack is enabled and the rest stay off",
-			addr:        "localhost:18811",
 			seed:        "variant_includes = [\"Godot_*\"]\n",
 			post:        []string{"pirate-pack"},
 			wantEnabled: []string{"pirate-pack"},
 		},
 		{
 			name:        "an empty submission will not wipe a live selection",
-			addr:        "localhost:18812",
 			seed:        seeded,
 			post:        nil,
 			wantErr:     true,
@@ -203,7 +207,6 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 		},
 		{
 			name:        "a stale tab's slugs will not wipe a live selection",
-			addr:        "localhost:18813",
 			seed:        seeded,
 			post:        []string{"long-gone"},
 			wantErr:     true,
@@ -233,11 +236,16 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 			defer func() { stdout = stdoutWas }()
 
 			client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := ln.Addr().String()
 			done := make(chan error, 1)
-			go func() { done <- selectPacks(context.Background(), client, manifestPath, tc.addr) }()
+			go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
 
-			token := waitForSelectPage(t, tc.addr)
-			resp, err := http.PostForm("http://"+tc.addr+"/save", url.Values{"pack": tc.post, "csrf": {token}})
+			token := waitForSelectPage(t, addr)
+			resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": tc.post, "csrf": {token}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -400,5 +408,185 @@ func TestApplyFlagsIsTheLastLayer(t *testing.T) {
 	unchanged := applyFlags(base, "", "", 0)
 	if unchanged != base {
 		t.Errorf("empty flags changed the config: %+v, want %+v", unchanged, base)
+	}
+}
+
+// runEnv is a throwaway config dir, manifest, lockfile, library and cookie file, so a
+// test can drive run() the way a user does instead of entering below the wiring.
+type runEnv struct {
+	configDir, manifestPath, lockPath, libraryDir, cookiesPath string
+}
+
+func newRunEnv(t *testing.T, manifestBody string) runEnv {
+	t.Helper()
+	dir := t.TempDir()
+	e := runEnv{
+		configDir:    t.TempDir(),
+		manifestPath: filepath.Join(dir, "synty-sync.toml"),
+		lockPath:     filepath.Join(dir, "synty-sync.lock.json"),
+		libraryDir:   t.TempDir(),
+		cookiesPath:  filepath.Join(dir, "cookies.txt"),
+	}
+	if err := os.WriteFile(e.manifestPath, []byte(manifestBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A Netscape cookies.txt so the session resolves off disk: the default source is
+	// the user's real browser profile, which a test must never read.
+	if err := os.WriteFile(e.cookiesPath, []byte("syntystore.com\tTRUE\t/\tTRUE\t0\tsession\tabc123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func (e runEnv) args(cmd string, extra ...string) []string {
+	return append([]string{cmd,
+		"-config", e.configDir, "-manifest", e.manifestPath,
+		"-library", e.libraryDir, "-cookies", e.cookiesPath,
+		"-customer", "1234567890",
+	}, extra...)
+}
+
+// serveStore points every subcommand at srv for the duration of a test. run builds
+// its own client, so this is the only way in.
+func serveStore(t *testing.T, h http.Handler) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	prev := storeBaseURL
+	storeBaseURL = srv.URL
+	t.Cleanup(func() { storeBaseURL = prev; srv.Close() })
+}
+
+// Everything between parsing a flag and issuing a request happens in run and nowhere
+// else: which id and which cookie reach the client, and which layer wins. Entering at
+// runSyncOrStatus skips all of it, so a transposed argument to portal.New — the
+// customer id sent as the Cookie header, three strings of the same type — would ship
+// with the suite green.
+func TestRunCarriesTheCustomerIDAndCookieToTheStore(t *testing.T) {
+	var gotCookie, gotPath string
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie, gotPath = r.Header.Get("Cookie"), r.URL.Path
+		// An authenticated page with no packs: the walk ends, nothing downloads.
+		fmt.Fprint(w, `<html><body><input class="sky-pilot-search-input"></body></html>`)
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	var out bytes.Buffer
+	prev := stdout
+	stdout = &out
+	defer func() { stdout = prev }()
+
+	if err := run(e.args("status")); err != nil {
+		t.Fatalf("status against a stub store: %v", err)
+	}
+	if !strings.Contains(gotCookie, "session=abc123") {
+		t.Errorf("Cookie header = %q, want the cookie file's pair", gotCookie)
+	}
+	if strings.Contains(gotCookie, "1234567890") {
+		t.Errorf("the customer id was sent as the cookie: %q", gotCookie)
+	}
+	if !strings.Contains(gotPath, "/1234567890") {
+		t.Errorf("request path = %q, want the customer id from --customer", gotPath)
+	}
+	if !strings.Contains(out.String(), "library: "+e.libraryDir) {
+		t.Errorf("the report names a library other than --library:\n%s", out.String())
+	}
+}
+
+// The customer id has no default and every store URL is built from it, so run has to
+// stop before the network rather than request a path with an empty segment.
+func TestRunWithoutACustomerIDStopsBeforeTheStore(t *testing.T) {
+	reached := false
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	args := []string{"status", "-config", e.configDir, "-manifest", e.manifestPath,
+		"-library", e.libraryDir, "-cookies", e.cookiesPath}
+	t.Setenv("SYNTY_CUSTOMER_ID", "")
+	err := run(args)
+	if err == nil || !strings.Contains(err.Error(), "no customer id") {
+		t.Fatalf("err = %v, want the missing-customer-id error", err)
+	}
+	if reached {
+		t.Error("the store was contacted without a customer id")
+	}
+}
+
+// An expired session has to keep its sentinel all the way out of run, where the exit
+// status and the "log in again" hint are decided.
+func TestRunSurfacesTheExpiredSessionSentinel(t *testing.T) {
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body><h1>Login</h1></body></html>`) // no logged-in sentinel
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	err := run(e.args("sync"))
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		t.Fatalf("err = %v, want ErrExpiredSession to survive run", err)
+	}
+	if !strings.Contains(err.Error(), e.cookiesPath) {
+		t.Errorf("the error does not name the cookie source that failed: %v", err)
+	}
+	if _, statErr := os.Stat(e.lockPath); !os.IsNotExist(statErr) {
+		t.Errorf("a lockfile was written on an expired session")
+	}
+}
+
+// The run summary is the command's actual output, and every line of it was reachable
+// only through a Contains("failed") check on one sync test. A swapped counts key or a
+// mislabelled failure would read as a correct report.
+func TestPrintReportNamesEveryOutcome(t *testing.T) {
+	lib := t.TempDir()
+	rep := syncer.Report{
+		Diffs: []syncer.FileDiff{
+			{Class: syncer.New}, {Class: syncer.Changed}, {Class: syncer.DownloadNow},
+			{Class: syncer.CacheMissing}, {Class: syncer.Adopted}, {Class: syncer.Unchanged},
+		},
+		Downloaded: []syncer.FileDiff{{Class: syncer.New}},
+		Adopted:    []syncer.FileDiff{{Class: syncer.Adopted}},
+		Failures: []syncer.Failure{
+			{PackSlug: "pirate", Key: "T|V", Err: "boom"},
+			{PackSlug: "dungeon", Key: "U|V", Err: "404", Gone: true},
+		},
+		Removed:     []string{"old-pack"},
+		Swept:       2,
+		SweptBytes:  4096,
+		Warnings:    []string{"nothing matches the filter"},
+		NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{"a": {}, "b": {}}},
+	}
+	cfg := config.Config{LibraryPath: lib}
+
+	var dry, wet bytes.Buffer
+	printReport(&dry, true, cfg, rep)
+	printReport(&wet, false, cfg, rep)
+
+	for _, want := range []string{
+		"library: " + lib,
+		"packs: 2  files selected: 6",
+		"new=1 changed=1 download-now=1 cache-missing=1 adopted=1 unchanged=1",
+		"swept 2 abandoned download temp(s), 4096 bytes reclaimed",
+		"failed: pirate T|V: boom",
+		"gone from the store: dungeon U|V: 404",
+		"no longer in your library: old-pack",
+		"warning: nothing matches the filter",
+	} {
+		for name, got := range map[string]string{"dry": dry.String(), "sync": wet.String()} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s report is missing %q:\n%s", name, want, got)
+			}
+		}
+	}
+	// New + Changed + DownloadNow + CacheMissing; an adopted or unchanged file counted
+	// here would promise a download that never happens.
+	if !strings.Contains(dry.String(), "would download: 4 files") {
+		t.Errorf("dry report does not say what it would download:\n%s", dry.String())
+	}
+	if strings.Contains(dry.String(), "downloaded:") {
+		t.Errorf("dry report claims work it did not do:\n%s", dry.String())
+	}
+	if !strings.Contains(wet.String(), "downloaded: 1 files  adopted: 1 existing  failed: 2") {
+		t.Errorf("sync report does not tally what it did:\n%s", wet.String())
+	}
+	if strings.Contains(wet.String(), "would download") {
+		t.Errorf("sync report hedges about work it already did:\n%s", wet.String())
 	}
 }
