@@ -680,3 +680,31 @@ func TestSelectRefusesToRewriteTheManifestFromAnEmptyLibrary(t *testing.T) {
 		t.Errorf("the committed manifest was rewritten:\n%s", got)
 	}
 }
+
+// select is the documented first run in a project with no manifest yet, so it defaults
+// to creating one in the working directory rather than erroring the way the commands
+// that only read a manifest do.
+func TestResolveManifestPathLetsSelectStartAProject(t *testing.T) {
+	dir := t.TempDir()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(restore) })
+
+	got, err := resolveManifestPath("", "select")
+	if err != nil {
+		t.Fatalf("select with no manifest anywhere: %v", err)
+	}
+	// t.TempDir can sit behind a symlink (/tmp -> /private/tmp), so compare basenames
+	// and that it landed in the working directory rather than the literal path.
+	if filepath.Base(got) != manifest.FileName {
+		t.Errorf("resolveManifestPath = %q, want a %s in the working directory", got, manifest.FileName)
+	}
+	if _, err := resolveManifestPath("", "sync"); err == nil {
+		t.Error("sync with no manifest anywhere reported success")
+	}
+}

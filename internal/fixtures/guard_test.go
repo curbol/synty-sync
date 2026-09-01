@@ -20,6 +20,10 @@ const testdataDir = "../../testdata"
 // git history. Checks are context-targeted (not blanket digit-length scans, which
 // would trip on Shopify's own ids/timestamps). Order ids are retained by design as
 // the lockfile identity anchor, so they are deliberately not checked.
+// sep matches a URL path separator in any of the spellings a captured page carries:
+// plain, percent-encoded in a query string, or backslash-escaped inside inline JSON.
+const sep = `(?:/|%2[Ff]|\\/)`
+
 var (
 	emailRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+(@|%40)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 	// Key names are matched case-insensitively and allow either quote style, so a
@@ -28,10 +32,13 @@ var (
 	nameJSONRe = regexp.MustCompile(`(?i)["'](?:first_?name|last_?name)["']\s*:\s*["']([^"']*)["']`)
 	// Customer id appears in these contexts only; an order id never does. The
 	// storefront also emits it as a bare JSON number, which no URL pattern covers.
+	// A captured page carries these URLs percent-encoded inside query strings and
+	// backslash-escaped inside inline JSON as well as plain, so the separator is a
+	// class: anchoring on a literal "/" would leave those two spellings unchecked.
 	custIDRes = []*regexp.Regexp{
 		regexp.MustCompile(`logged_in_customer_id(?:=|%3D)(\d+)`),
-		regexp.MustCompile(`/apps/downloads/customers/(\d+)`),
-		regexp.MustCompile(`/apps/downloads/orders/(\d+)`),
+		regexp.MustCompile(sep + `apps` + sep + `downloads` + sep + `customers` + sep + `(\d+)`),
+		regexp.MustCompile(sep + `apps` + sep + `downloads` + sep + `orders` + sep + `(\d+)`),
 		regexp.MustCompile(`"id":"(\d+)","email"`),
 		regexp.MustCompile(`(?i)["']customer_?id["']\s*:\s*["']?(\d+)`),
 	}
@@ -80,8 +87,12 @@ func TestGuardCatchesASyntheticLeak(t *testing.T) {
 		"url-encoded email": `?email=real.person%40leaked.net&order_id=1`,
 		"phone":             `{"phone":"+15551234567"}`,
 		"customer id":       `/apps/downloads/customers/9988776655443/orders/1`,
-		"customer id json":  `"customer_id": "9988776655443"`,
-		"name":              `{"first_name":"Realperson"}`,
+		// A captured page carries these URLs in all three spellings, so a leak that
+		// appears only in an encoded one still has to be caught.
+		"customer id percent-encoded": `%2Fapps%2Fdownloads%2Forders%2F9988776655443`,
+		"customer id json-escaped":    `\/apps\/downloads\/orders\/9988776655443`,
+		"customer id json":            `"customer_id": "9988776655443"`,
+		"name":                        `{"first_name":"Realperson"}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -127,8 +138,12 @@ var longDigitRun = regexp.MustCompile(`\d{7,}`)
 // filename does not have.
 func TestFixtureNamesCarryNoPII(t *testing.T) {
 	for name := range readFixtures(t) {
-		if m := longDigitRun.FindString(name); m != "" && m != okCustomer {
-			t.Errorf("fixture name %q carries a long digit run %q; scrub the filename too", name, m)
+		// Every run, not the first: a name carrying the scrubbed id followed by a real
+		// one would otherwise pass on the first match.
+		for _, m := range longDigitRun.FindAllString(name, -1) {
+			if m != okCustomer {
+				t.Errorf("fixture name %q carries a long digit run %q; scrub the filename too", name, m)
+			}
 		}
 		for _, m := range emailRe.FindAllString(name, -1) {
 			if !strings.Contains(m, okEmailDom) {

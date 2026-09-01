@@ -136,7 +136,7 @@ type Options struct {
 	DryRun      bool   // status: classify only, no downloads, no save
 	FullVerify  bool   // sha-verify cache (sync) vs presence-only (status)
 	Concurrency int
-	Now         string        // timestamp for generatedAt/downloadedAt
+	Now         string        // timestamp for generatedAt/downloadedAt (default: now, UTC)
 	Attempts    int           // download attempts (default 3)
 	Backoff     time.Duration // base backoff between attempts (default 500ms)
 	// PackSelected is the manifest allowlist and is required: selection is opt-in, so
@@ -175,6 +175,11 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		if _, err := filepath.Match(opts.OnlyGlob, ""); err != nil {
 			return Report{}, fmt.Errorf("bad --only pattern %q: %w", opts.OnlyGlob, err)
 		}
+	}
+	if opts.Now == "" {
+		// Now stamps generatedAt and every downloadedAt in a committed file, so an
+		// unset one would write empty timestamps rather than fail visibly.
+		opts.Now = time.Now().UTC().Format(time.RFC3339)
 	}
 	opts.Progress = opts.progressSink()
 	progress := opts.Progress
@@ -223,11 +228,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	cacheOK := cacheChecker(opts)
 
 	// Group selected files by fileId for dedup.
-	type sel struct {
-		pack model.Pack
-		file model.FileEntry
-	}
-	selectedByID := map[int][]sel{}
+	selectedByID := map[int][]selection{}
 	var selOrder []int
 	for _, pf := range packFiles {
 		for _, f := range pf.files {
@@ -237,7 +238,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			if _, seen := selectedByID[f.FileID]; !seen {
 				selOrder = append(selOrder, f.FileID)
 			}
-			selectedByID[f.FileID] = append(selectedByID[f.FileID], sel{pf.pack, f})
+			selectedByID[f.FileID] = append(selectedByID[f.FileID], selection{pf.pack, f})
 		}
 	}
 
@@ -256,72 +257,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// while another says the file was never downloaded — at a different version.
 	unresolvedByID := map[int]string{}
 
-	// Adopt pre-existing flat files into the layout so they are not re-downloaded.
-	// Files the lockfile already tracks are excluded: cache.Migrate matches on name
-	// alone, so adopting one would move unverified content over a verified copy and
-	// repoint the lockfile at it without ever consulting classify.
-	adoptedByID := map[int]resolved{}
-	var adoptWarnings []string
-	if !opts.DryRun {
-		var wanted []cache.Wanted
-		for _, id := range selOrder {
-			if prior, hasPrior := priorByID[id]; hasPrior && prior.Tracked {
-				continue
-			}
-			f := selectedByID[id][0].file
-			wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
-		}
-		// Migrate is best-effort and returns whatever it moved alongside any error, so
-		// a failure costs the files it could not fold in, not the run: adoption only
-		// ever saves a download, and the layout scan below picks up anything already
-		// moved.
-		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
-		if err != nil {
-			adoptWarnings = append(adoptWarnings, fmt.Sprintf("could not fold pre-existing flat files into the layout: %v", err))
-		}
-		for _, m := range migrated {
-			r, err := adopt(opts.LibraryRoot, m.RelPath)
-			if err != nil {
-				adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", m.RelPath, err))
-				continue
-			}
-			adoptedByID[m.FileID] = r
-		}
-	}
-
-	// Adopt files already in the <fileToken>/ layout that no lockfile records, so a
-	// missing or degraded lockfile does not force a full re-download. Read-only (no move),
-	// so it runs for status too; the hash is skipped there to keep status cheap.
-	for _, id := range selOrder {
-		if _, done := adoptedByID[id]; done {
-			continue
-		}
-		if prior, hasPrior := priorByID[id]; hasPrior && prior.Tracked {
-			continue // classify handles tracked files (Unchanged / Changed / CacheMissing)
-		}
-		f := selectedByID[id][0].file
-		rel, ok := cache.Locate(opts.LibraryRoot, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
-		if !ok {
-			continue
-		}
-		if opts.DryRun {
-			// status must not read a multi-gigabyte library back just to say what it
-			// would do, so the sniff alone stands in for the hash here.
-			if err := adoptable(opts.LibraryRoot, rel); err != nil {
-				adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
-				continue
-			}
-			adoptedByID[id] = resolved{cachePath: rel}
-			continue
-		}
-		progress(fmt.Sprintf("adopt %s", f.Key()))
-		r, err := adopt(opts.LibraryRoot, rel)
-		if err != nil {
-			adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
-			continue
-		}
-		adoptedByID[id] = r
-	}
+	adoptedByID, adoptWarnings := adoptAll(opts, adoptCandidates(selOrder, selectedByID, priorByID))
 
 	var pruneWarnings []string
 	for _, id := range selOrder {
@@ -523,6 +459,99 @@ func looksLikePackage(path string) error {
 		return err
 	}
 	return sniffPackage(head[:n])
+}
+
+// selection is one owning pack's view of a selected file. A fileId can have several.
+type selection struct {
+	pack model.Pack
+	file model.FileEntry
+}
+
+// adoptCandidates returns the representative file for every selected fileId with no
+// tracked prior — the precondition both adoption paths share. A file the lockfile
+// already tracks is excluded because the cache matches on name alone: adopting one
+// would move unverified content over a verified copy and repoint the lockfile at it
+// without ever consulting classify. Stating it once is the point; the two paths held
+// hand-copied versions of it, and they had already drifted apart once.
+func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfile.File) []model.FileEntry {
+	var out []model.FileEntry
+	for _, id := range order {
+		if p, has := prior[id]; has && p.Tracked {
+			continue // classify handles tracked files (Unchanged / Changed / CacheMissing)
+		}
+		out = append(out, byID[id][0].file)
+	}
+	return out
+}
+
+// adoptAll folds pre-existing files into the layout and takes any already in it,
+// returning what it resolved by fileId and what it refused. Nothing here is worth
+// ending a run over: adoption saves a download the run can always fall back to.
+func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string) {
+	adopted := map[int]resolved{}
+	// A file the flat-file pass moved and then refused is sitting in the layout, where
+	// the scan below finds it again. Without this it would be refused a second time and
+	// the same reason printed twice for one file.
+	refused := map[int]bool{}
+	var warnings []string
+	wanted := make([]cache.Wanted, 0, len(cands))
+	for _, f := range cands {
+		wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
+	}
+
+	// Flat files at the library root are moved into the layout, which a dry run must
+	// not do. Migrate is best-effort and returns whatever it moved alongside any
+	// error, so a failure costs the files it could not fold in rather than the run.
+	if !opts.DryRun {
+		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not fold pre-existing flat files into the layout: %v", err))
+		}
+		for _, m := range migrated {
+			r, err := adopt(opts.LibraryRoot, m.RelPath)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", m.RelPath, err))
+				refused[m.FileID] = true
+				continue
+			}
+			adopted[m.FileID] = r
+		}
+	}
+
+	// Files already in the <fileToken>/ layout that no lockfile records, so a missing
+	// or degraded lockfile does not force a full re-download. Read-only, so it runs
+	// for status too.
+	progress := opts.progressSink()
+	for i, f := range cands {
+		if _, done := adopted[f.FileID]; done {
+			continue
+		}
+		if refused[f.FileID] {
+			continue
+		}
+		rel, ok := cache.Locate(opts.LibraryRoot, wanted[i])
+		if !ok {
+			continue
+		}
+		if opts.DryRun {
+			// status must not read a multi-gigabyte library back just to say what it
+			// would do, so the checks alone stand in for the hash here.
+			if err := adoptable(opts.LibraryRoot, rel); err != nil {
+				warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
+				continue
+			}
+			adopted[f.FileID] = resolved{cachePath: rel}
+			continue
+		}
+		progress(fmt.Sprintf("adopt %s", f.Key()))
+		r, err := adopt(opts.LibraryRoot, rel)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
+			continue
+		}
+		adopted[f.FileID] = r
+	}
+	return adopted, warnings
 }
 
 // adopt takes a file already on disk as a pack's content: it checks the bytes and

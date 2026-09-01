@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -140,5 +142,34 @@ func TestHandlersAcceptTheWaysABrowserAddressesThem(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("Host %q returned %d, want the page", host, resp.StatusCode)
 		}
+	}
+}
+
+// Ctrl-C during select has to end the wait. Serve blocks until the page posts, so
+// without the cancellation case the command would hang with no way out but a kill.
+func TestServeReturnsWhenTheContextIsCancelled(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	restore := OpenBrowser
+	OpenBrowser = func(string) {}
+	t.Cleanup(func() { OpenBrowser = restore })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Serve(ctx, ln, []model.Pack{{Slug: "pirate", DisplayName: "Pirate"}}, nil)
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Serve returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after its context was cancelled")
 	}
 }

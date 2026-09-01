@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -1136,5 +1137,105 @@ func TestTruncatedLayoutFileIsNotAdopted(t *testing.T) {
 	}
 	if f.SizeBytes == int64(len(cut)) {
 		t.Error("the lockfile recorded the truncated size as the file's truth")
+	}
+}
+
+// status must not touch the library: the sweep is housekeeping a real run does, and a
+// dry run that removed a file would make "show me what would change" destructive.
+func TestStatusDoesNotSweepTemps(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".synty-dl-abandoned")
+	if err := os.WriteFile(stale, []byte("half a pack"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Swept != 0 {
+		t.Errorf("status swept %d temps; it must remove nothing", rep.Swept)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("status deleted an abandoned temp: %v", err)
+	}
+}
+
+// The two size fields mean different things and only one is an integrity figure.
+// advertisedSize is the store's rounded label and refreshes every run; sizeBytes is
+// the count that actually landed and is what cache.Verify compares against. Folding
+// them together would let a rounded display figure decide whether a file is intact.
+func TestAdvertisedSizeAndSizeBytesStaySeparate(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem != "1" {
+				return "", false
+			}
+			return itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 999), true
+		},
+	})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	// itemPage labels every row "(40 MB)"; the served body is a few hundred bytes.
+	if f.AdvertisedSize != 40<<20 {
+		t.Errorf("advertisedSize = %d, want the label's 40 MB", f.AdvertisedSize)
+	}
+	onDisk, err := os.Stat(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.SizeBytes != onDisk.Size() {
+		t.Errorf("sizeBytes = %d, want the %d that landed on disk", f.SizeBytes, onDisk.Size())
+	}
+	if f.SizeBytes == f.AdvertisedSize {
+		t.Error("sizeBytes took the rounded label instead of the byte count")
+	}
+}
+
+// An interrupt is not a per-file verdict. Returning a report instead of the error
+// would record every file the run had not reached yet as failed, for a reason that
+// has nothing to do with any of them, and write that as the committed record.
+func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := newServer(t, serverOpts{
+		fileBody: func(string) ([]byte, string, bool) {
+			cancel() // the run is interrupted part way through its first transfer
+			return packageBytes("x"), "application/zip", true
+		},
+	})
+
+	rep, err := Run(ctx, newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err == nil {
+		t.Fatalf("an interrupted run reported success: %d diffs", len(rep.Diffs))
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if len(rep.Failures) != 0 {
+		t.Errorf("an interrupt was recorded as %d per-file failures", len(rep.Failures))
+	}
+	if _, err := os.Stat(lockPath); err == nil {
+		t.Error("an interrupted run wrote the lockfile")
 	}
 }
