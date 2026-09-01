@@ -23,6 +23,10 @@ import (
 
 const binaryName = "synty-sync"
 
+// progress is where the update's user-facing lines go. It is a package variable for
+// the same reason main.stdout is: a test drives Run and reads what the user was told.
+var progress io.Writer = os.Stderr
+
 // releasesAPIURL is a var so tests can point it at a stub server.
 var releasesAPIURL = "https://api.github.com/repos/curbol/synty-sync/releases"
 
@@ -53,7 +57,7 @@ func Run(ctx context.Context, current, target string) error {
 		if target != "" {
 			label = "requested"
 		}
-		fmt.Fprintf(os.Stderr, "already on the %s version (%s)\n", label, relVer)
+		fmt.Fprintf(progress, "already on the %s version (%s)\n", label, relVer)
 		return nil
 	}
 
@@ -64,7 +68,7 @@ func Run(ctx context.Context, current, target string) error {
 	if err := downloadAndReplace(ctx, token, assetURL); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "updated %s to version %s\n", binaryName, relVer)
+	fmt.Fprintf(progress, "updated %s to version %s\n", binaryName, relVer)
 	return nil
 }
 
@@ -164,8 +168,11 @@ func platformAsset(rel *release, goos, goarch string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported platform %s/%s", goos, goarch)
 	}
+	// The separator is part of the match: every label is preceded by one, and without
+	// it "win.zip" is also a suffix of "darwin.zip", so a release that adds a darwin
+	// universal asset would hand a Windows user a Mach-O binary.
 	for _, a := range rel.Assets {
-		if strings.HasSuffix(a.Name, suffix) {
+		if strings.HasSuffix(a.Name, "-"+suffix) {
 			return a.URL, nil
 		}
 	}

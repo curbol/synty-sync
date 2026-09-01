@@ -23,21 +23,38 @@ err()  { printf 'ERROR: %s\n' "$1" >&2; }
 # rename; across filesystems mv degrades to copy+unlink, where an interruption
 # leaves a truncated binary at the live path.
 STAGE=""
-cleanup() { [[ -n "$STAGE" ]] && rm -rf "$STAGE"; return 0; }
+AUTH_CONF=""
+cleanup() {
+  [[ -n "$STAGE" ]] && rm -rf "$STAGE"
+  [[ -n "$AUTH_CONF" ]] && rm -f "$AUTH_CONF"
+  return 0
+}
 trap cleanup EXIT
 
 # A bare `var=$(cmd)` propagates cmd's status, and `set -e` acts on it, so every
 # command substitution below is guarded with `|| true` and its result checked
 # explicitly. Without that the script dies silently on the ordinary no-token path,
 # before any of the messages written for it can print.
-auth_header() {
+auth_token() {
   local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [[ -z "$token" ]] && command -v gh >/dev/null 2>&1; then
     token=$(gh auth token 2>/dev/null || true)
   fi
-  if [[ -n "$token" ]]; then
-    echo "Authorization: token $token"
-  fi
+  printf '%s' "$token"
+}
+
+# ensure_auth_config points AUTH_CONF at a curl config file holding the Authorization
+# header, or leaves it empty when no token is available. The token goes in a file
+# rather than curl's argv, where any other account on the machine could read it out of
+# ps. It sets a global rather than echoing a path because a command substitution would
+# create the file in a subshell, leaving the trap nothing to clean up.
+ensure_auth_config() {
+  [[ -z "$AUTH_CONF" ]] || return 0
+  local token; token=$(auth_token) || true
+  [[ -n "$token" ]] || return 0
+  AUTH_CONF=$(mktemp "${TMPDIR:-/tmp}/.synty-auth-XXXXXX")
+  chmod 600 "$AUTH_CONF"
+  printf 'header = "Authorization: token %s"\n' "$token" > "$AUTH_CONF"
 }
 
 detect_platform() {
@@ -57,8 +74,8 @@ detect_platform() {
 }
 
 latest_version() {
-  local hdr; hdr=$(auth_header) || true
-  local opts=(-fsSL); [[ -n "$hdr" ]] && opts+=(-H "$hdr")
+  ensure_auth_config
+  local opts=(-fsSL); [[ -n "$AUTH_CONF" ]] && opts+=(--config "$AUTH_CONF")
   VERSION=$(curl "${opts[@]}" "${API_BASE}/repos/${REPO}/releases/latest" \
     | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') || true
   VERSION=${VERSION#v}
@@ -86,14 +103,14 @@ install_binary() {
   local file="${BINARY_NAME}-${VERSION}-${PLATFORM}.zip"
   mkdir -p "$INSTALL_DIR"
   STAGE=$(mktemp -d "${INSTALL_DIR}/.${BINARY_NAME}-install-XXXXXX")
-  local hdr; hdr=$(auth_header) || true
+  ensure_auth_config
   local url
-  if [[ -n "$hdr" ]]; then
+  if [[ -n "$AUTH_CONF" ]]; then
     # Private repo: resolve the asset's API URL, then download with the token.
-    url=$(curl -fsSL -H "$hdr" "${API_BASE}/repos/${REPO}/releases/tags/v${VERSION}" \
+    url=$(curl -fsSL --config "$AUTH_CONF" "${API_BASE}/repos/${REPO}/releases/tags/v${VERSION}" \
       | grep -F -B3 "\"name\": \"${file}\"" | grep -F '"url"' | sed -E 's/.*"url": "([^"]+)".*/\1/') || true
     [[ -n "$url" ]] || { err "asset ${file} not found in release v${VERSION}"; exit 1; }
-    curl -fsSL -H "$hdr" -H "Accept: application/octet-stream" -o "${STAGE}/${file}" "$url"
+    curl -fsSL --config "$AUTH_CONF" -H "Accept: application/octet-stream" -o "${STAGE}/${file}" "$url"
   else
     curl -fsSL -o "${STAGE}/${file}" "${DOWNLOAD_BASE}/${REPO}/releases/download/v${VERSION}/${file}"
   fi

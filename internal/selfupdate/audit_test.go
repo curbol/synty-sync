@@ -408,3 +408,95 @@ func TestReplaceBinaryNamesTheAsideCopyWhenRestoreFails(t *testing.T) {
 		t.Errorf("err = %v, want it to name %s, the only copy left", err, aside)
 	}
 }
+
+// Run's own gates have no coverage otherwise, and they decide whether an update
+// happens at all. The dev-build refusal is what makes a release that failed to stamp
+// main.version unrecoverable in place, and the version comparison is what keeps
+// `update` from re-installing the same binary forever: the workflow strips the "v"
+// for the ldflag while the tag keeps it, so both sides have to be trimmed.
+func TestRunRefusesADevBuild(t *testing.T) {
+	err := Run(context.Background(), "dev", "")
+	if err == nil {
+		t.Fatal("a dev build was allowed to self-update")
+	}
+	if !strings.Contains(err.Error(), "dev build") {
+		t.Errorf("error does not explain the refusal: %v", err)
+	}
+}
+
+func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tag     string
+		current string
+		target  string
+		want    string
+	}{
+		{"latest, tag carries the v", "v1.2.3", "1.2.3", "", "already on the latest version (1.2.3)"},
+		{"explicit target", "v1.2.3", "1.2.3", "1.2.3", "already on the requested version (1.2.3)"},
+		{"current carries the v too", "v1.2.3", "v1.2.3", "", "already on the latest version (1.2.3)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"tag_name":%q,"assets":[]}`, tc.tag)
+			}))
+			defer srv.Close()
+			restoreURL := releasesAPIURL
+			releasesAPIURL = srv.URL
+			t.Cleanup(func() { releasesAPIURL = restoreURL })
+
+			var out bytes.Buffer
+			restore := progress
+			progress = &out
+			t.Cleanup(func() { progress = restore })
+
+			// No asset in the release, so reaching the download would be an error.
+			if err := Run(context.Background(), tc.current, tc.target); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := strings.TrimSpace(out.String()); got != tc.want {
+				t.Errorf("said %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A release that publishes nothing for this platform must say so and leave the
+// working binary alone, rather than reaching downloadAndReplace with an empty URL.
+func TestRunReportsAReleaseWithNoAssetForThisPlatform(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v9.9.9","assets":[{"name":"synty-sync-9.9.9-other.zip","url":"u"}]}`)
+	}))
+	defer srv.Close()
+	restoreURL := releasesAPIURL
+	releasesAPIURL = srv.URL
+	t.Cleanup(func() { releasesAPIURL = restoreURL })
+
+	err := Run(context.Background(), "1.0.0", "")
+	if err == nil {
+		t.Fatal("an update with no asset for this platform reported success")
+	}
+	if !strings.Contains(err.Error(), "no asset matching") {
+		t.Errorf("error does not name the missing asset: %v", err)
+	}
+}
+
+// "win.zip" is also a suffix of "darwin.zip", so matching without the separator would
+// hand a Windows user a Mach-O binary the moment a release adds a darwin universal
+// asset — and the label guard would still pass, since "darwin" is a label it built.
+func TestPlatformAssetDoesNotMatchALabelItMerelyEndsWith(t *testing.T) {
+	rel := &release{Assets: []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}{
+		{Name: "synty-sync-1.0.0-darwin.zip", URL: "mach-o"},
+		{Name: "synty-sync-1.0.0-win.zip", URL: "pe"},
+	}}
+	got, err := platformAsset(rel, "windows", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "pe" {
+		t.Errorf("windows resolved to %q, want the win asset", got)
+	}
+}

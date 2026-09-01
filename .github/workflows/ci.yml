@@ -40,6 +40,18 @@ jobs:
 
       - run: go vet ./...
 
+      # The release job is otherwise the only place these are ever compiled, and it
+      # runs on a tag that is already public: a break there fails the whole matrix
+      # before anything uploads, leaving the tag pointing at a release that does not
+      # exist. Cheaper to find it on the pull request.
+      - name: Cross-compile every released platform
+        run: |
+          for p in darwin/amd64 darwin/arm64 linux/arm64 windows/amd64; do
+            IFS='/' read -r goos goarch <<< "$p"
+            echo "building $goos/$goarch"
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build ./...
+          done
+
       # syncer fans out with a WaitGroup and a mutex, so the suite is worth running
       # under the detector. No network or session is needed: the tests run against
       # httptest servers and the committed testdata fixtures.

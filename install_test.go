@@ -106,7 +106,15 @@ func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	// The installer falls back to the gh CLI, which on a developer machine is logged
 	// in; clear the whole token path so the test controls it.
-	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH=/usr/bin:/bin")
+	// gh lives in /usr/bin on an ordinary developer machine, so clearing the two
+	// environment variables is not enough to clear the token path: install.sh would
+	// still find a logged-in CLI and the no-token tests would stop testing anything.
+	// Shadow it with a stub that reports no token.
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH="+stub+":/usr/bin:/bin")
 	cmd.Env = append(cmd.Env, env...)
 	raw, err := cmd.CombinedOutput()
 	out := string(raw)
@@ -161,6 +169,7 @@ func TestInstallerRefusesANonExecutableAsset(t *testing.T) {
 	if !strings.Contains(out, "not a") || !strings.Contains(out, "executable") {
 		t.Errorf("the asset was rejected for some other reason than not being a binary:\n%s", out)
 	}
+	assertNoStagingLeft(t, filepath.Dir(installed))
 	got, readErr := os.ReadFile(installed)
 	if readErr != nil {
 		t.Fatalf("the working binary is gone: %v", readErr)
@@ -197,8 +206,19 @@ func TestInstallerInstallsAndLeavesNoStagingBehind(t *testing.T) {
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("the installed binary is not executable (mode %v)", info.Mode())
 	}
+	assertNoStagingLeft(t, binDir)
+}
+
+// assertNoStagingLeft checks the install directory holds no staging directory. The
+// trap that removes it fires on every exit, so this belongs on the failure paths as
+// much as the success one — those are the ones that depend on the trap at all.
+func assertNoStagingLeft(t *testing.T, binDir string) {
+	t.Helper()
 	entries, err := os.ReadDir(binDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		t.Fatal(err)
 	}
 	for _, e := range entries {
@@ -319,4 +339,89 @@ func runInstallerAs(t *testing.T, pathPrefix string) string {
 	}
 	out, _ := cmd.CombinedOutput()
 	return string(out)
+}
+
+// The linker does not fail over an -X symbol it cannot find, so renaming or
+// relocating main.version would publish a whole release of binaries that report "dev"
+// — which selfupdate refuses to update from — with every check still green. This test
+// lives in package main so referencing the variable compiles only while it exists.
+func TestReleaseStampsTheVersionVariableThisPackageDeclares(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	const want = "-X main.version="
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("release.yml does not stamp %q; a release would ship binaries reporting %q", want, version)
+	}
+	_ = version // the symbol release.yml stamps has to exist in this package
+}
+
+// install.sh reconstructs the whole asset filename and greps for it literally, while
+// selfupdate matches only the suffix. The platform guards bind the label but not the
+// name it sits in, so a change to the zip template keeps `update` working for everyone
+// who already has a binary while every new install fails.
+func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	const template = `zip "synty-sync-${VERSION}-${label}.zip"`
+	if !strings.Contains(string(raw), template) {
+		t.Errorf("release.yml no longer builds %s; install.sh:file composes that name", template)
+	}
+	sh, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	const composed = `local file="${BINARY_NAME}-${VERSION}-${PLATFORM}.zip"`
+	if !strings.Contains(string(sh), composed) {
+		t.Errorf("install.sh no longer composes %s; release.yml publishes synty-sync-<v>-<label>.zip", composed)
+	}
+}
+
+// The release action runs with contents: write, and a tag can be moved without
+// anything here changing, so the third-party step stays pinned to a commit.
+func TestReleaseActionIsPinnedToACommit(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	pinned := regexp.MustCompile(`uses:\s+softprops/action-gh-release@[0-9a-f]{40}\b`)
+	if !pinned.Match(raw) {
+		t.Error("softprops/action-gh-release is not pinned to a 40-character commit sha")
+	}
+}
+
+// The token goes in a curl config file rather than curl's argv, where any other
+// account on the machine could read it out of ps while an install is in flight. The
+// file is created outside the staging directory, so the trap has to remove it too.
+func TestInstallerKeepsTheTokenOutOfArgvAndLeavesNoConfigBehind(t *testing.T) {
+	want := append(nativeMagic(t), []byte("a real enough binary")...)
+	home := t.TempDir()
+	srv := stubRelease(t, installerZip(t, want))
+	tmp := t.TempDir()
+
+	out, _ := runInstaller(t, home, "GITHUB_TOKEN=test-token", "TMPDIR="+tmp,
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+	if _, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync")); err != nil {
+		t.Fatalf("nothing was installed: %v\n%s", err, out)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".synty-auth-") {
+			t.Errorf("a file holding the token was left behind: %s", e.Name())
+		}
+	}
+	// install.sh must not pass the token as an argument.
+	sh, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(sh), `-H "$hdr"`) || strings.Contains(string(sh), "Authorization: token $token") {
+		t.Error("install.sh passes the Authorization header on curl's command line")
+	}
 }

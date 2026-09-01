@@ -77,3 +77,6 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/*.zip
+          # Publishing a release with no assets would make `update` report "no asset
+          # for your platform" to every user while the workflow reported success.
+          fail_on_unmatched_files: true
