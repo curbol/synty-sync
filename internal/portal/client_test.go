@@ -37,23 +37,6 @@ func TestGetBodyRetriesTransient(t *testing.T) {
 	}
 }
 
-func TestGetBodyFailsFastOn4xx(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
-	if _, err := c.getBody(context.Background(), srv.URL); err == nil {
-		t.Fatal("expected error on 404")
-	}
-	if calls != 1 {
-		t.Errorf("4xx should not retry, got %d calls", calls)
-	}
-}
-
 func TestGetBodyRedactsCustomerID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

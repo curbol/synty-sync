@@ -127,7 +127,11 @@ func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unkno
 			return true // versionless icon row
 		}
 		versioned++
-		href, ok := row.Find(".sky-pilot-actions a[href]").First().Attr("href")
+		// Match the download link by its shape, not by being first in the actions
+		// block: the store's own stylesheet spaces multiple anchors there, so taking
+		// whichever comes first would hand back a neighbouring action and fail every
+		// row on a template that renders one.
+		href, ok := row.Find(".sky-pilot-actions a[href*='/apps/downloads/downloads/']").First().Attr("href")
 		if !ok {
 			href, _ = row.Find("a[href*='/apps/downloads/downloads/']").First().Attr("href")
 		}

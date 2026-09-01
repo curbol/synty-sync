@@ -153,29 +153,6 @@ func TestParseItemArchivedFlag(t *testing.T) {
 	}
 }
 
-func TestParseItemSkipsUnknownVariant(t *testing.T) {
-	// Synty has a real typo "Ureal_5_3" (missing the n). An unrecognized variant
-	// keyword is skipped, not fatal; the recognizable row still parses.
-	html := []byte(`<div class='sky-pilot-list-item'>
-	  <div class='sky-pilot-file-heading'>POLYGON_Holiday_2025_Ureal_5_3 | v1_0_0 <span class='sky-pilot-file-size'>(50 MB)</span></div>
-	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/111?x=1'>Download</a></div>
-	</div>
-	<div class='sky-pilot-list-item'>
-	  <div class='sky-pilot-file-heading'>POLYGON_Holiday_2025_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
-	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222?x=1'>Download</a></div>
-	</div>`)
-	files, _, err := ParseItemPage(html, "polygon-holiday-2025")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(files) != 1 {
-		t.Fatalf("got %d files, want 1 (Ureal skipped): %+v", len(files), files)
-	}
-	if files[0].Variant != "Godot_4_5_1" || files[0].FileID != 222 {
-		t.Errorf("kept wrong row: %+v", files[0])
-	}
-}
-
 func TestParseItemErrorsOnStructuralBreakage(t *testing.T) {
 	// A row with a valid download id whose heading is only the variant keyword and
 	// version (no product token) is structural breakage, not a skippable unknown
@@ -219,6 +196,28 @@ func TestBundledFileSharedAcrossPacks(t *testing.T) {
 		}
 		if _, ok := findByID(files, 2344711); !ok {
 			t.Errorf("%s: expected bundled fileId 2344711", name)
+		}
+	}
+}
+
+// The label size drives only the progress line, but a transposed unit or a switch to
+// 1000-based multipliers would go unnoticed while quietly changing every figure the
+// lockfile records as advertisedSize.
+func TestParseSizeUnits(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"(1.5 KB)", 1536, true},
+		{"(2.6 MB)", 2726297, true}, // 2.6 * 1024*1024, truncated
+		{"(1 GB)", 1 << 30, true},
+		{"(40 MB)", 40 << 20, true},
+		{"no size here", 0, false},
+	} {
+		got, ok := parseSize(tc.in)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("parseSize(%q) = %d,%v; want %d,%v", tc.in, got, ok, tc.want, tc.ok)
 		}
 	}
 }

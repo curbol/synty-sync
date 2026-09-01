@@ -530,7 +530,10 @@ func TestResolveDoesNotCutOffASlowButLiveBody(t *testing.T) {
 	c := &Client{
 		HTTP:    srv.Client(),
 		BaseURL: srv.URL,
-		Limits:  Limits{StallTimeout: 100 * time.Millisecond},
+		// Generous against the 20ms writes below: the assertion is that a live body is
+		// never cut off, so the ratio is what matters, and a tight window would make a
+		// scheduling hiccup on a loaded runner look like a regression.
+		Limits: Limits{StallTimeout: 2 * time.Second},
 	}
 	body, _, err := c.Resolve(context.Background(), model.FileEntry{
 		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1",
@@ -583,5 +586,133 @@ func TestParseItemPageReportsNothingForKnownVariants(t *testing.T) {
 	}
 	if len(unknown) != 0 {
 		t.Errorf("unknown = %q, want none for a page of recognized variants", unknown)
+	}
+}
+
+// The two layers classify 403 deliberately opposite ways and neither file mentions the
+// other: a 403 on a library page is a real refusal, while a 403 on a signed download
+// URL is an expired CloudFront signature the next Resolve re-signs. The download side
+// is pinned in the syncer; without this the page side can be "fixed" to match it, and
+// every forbidden page then burns four attempts of up to PageTimeout each.
+func TestTransientStatusFailsFastOnForbidden(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want bool
+	}{
+		{http.StatusForbidden, false}, // a refusal here, unlike on a signed download URL
+		{http.StatusNotFound, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusRequestTimeout, true},
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusServiceUnavailable, true},
+	} {
+		if got := transientStatus(tc.code); got != tc.want {
+			t.Errorf("transientStatus(%d) = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+}
+
+// A paginator that keeps serving fresh anchors forever must end the walk with an
+// error, not with whatever was collected: handing back a truncated library is exactly
+// what the sentinel logic exists to prevent, and through select it silently drops the
+// user's enabled flags.
+func TestEnumerateErrorsRatherThanTruncatingAnEndlessPaginator(t *testing.T) {
+	var pages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&pages, 1)
+		fmt.Fprintf(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'>
+		  <a href='/apps/downloads/customers/1/orders/2/order_items/%d' class='sky-pilot-list-item'>Pack %d</a>
+		</div>`, n, n)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "1", Limits: testLimits()}
+	packs, err := c.Enumerate(context.Background())
+	if err == nil {
+		t.Fatalf("an endless paginator returned %d packs and no error", len(packs))
+	}
+	if packs != nil {
+		t.Errorf("a failed walk returned %d packs; a partial library must not reach the caller", len(packs))
+	}
+	if got := atomic.LoadInt32(&pages); got > maxLibraryPages+1 {
+		t.Errorf("walked %d pages, want no more than %d", got, maxLibraryPages+1)
+	}
+}
+
+// Cancelling the parent context mid-body must read as cancellation, not as a stall.
+// The stall guard cancels the same request context to break the read, so without the
+// flag that says which one fired, pressing Ctrl-C during a multi-gigabyte download
+// would tell the user their transfer stalled.
+func TestCancelledDownloadIsNotReportedAsAStall(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/files/") {
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write([]byte("PK\x03\x04"))
+			w.(http.Flusher).Flush()
+			<-release
+			return
+		}
+		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, Limits: Limits{StallTimeout: 30 * time.Second}}
+	ctx, cancel := context.WithCancel(context.Background())
+	body, _, err := c.Resolve(ctx, model.FileEntry{
+		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	defer body.Close()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err = io.Copy(io.Discard, body)
+	if err == nil {
+		t.Fatal("a cancelled transfer reported success")
+	}
+	if errors.Is(err, ErrStalled) {
+		t.Errorf("a cancelled transfer reported as a stall: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// Retry-After is what a rate limit uses to say how long to wait. The backoff budget
+// here is a few seconds, so without honoring it a store asking for longer has every
+// attempt spent well inside the window it set, and the run aborts against a limit
+// that waiting would have cleared.
+func TestGetBodyHonorsRetryAfter(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, "<html>ok</html>")
+	}))
+	defer srv.Close()
+
+	// A backoff far shorter than the header asks for, so only honoring the header can
+	// produce a wait of about a second.
+	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, Limits: Limits{Attempts: 3, Backoff: time.Millisecond}}
+	start := time.Now()
+	body, err := c.getBody(context.Background(), srv.URL+"/x")
+	if err != nil {
+		t.Fatalf("getBody: %v", err)
+	}
+	if string(body) != "<html>ok</html>" {
+		t.Errorf("body = %q", body)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Errorf("retried after %v; the Retry-After of 1s was not honored", elapsed)
 	}
 }

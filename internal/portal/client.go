@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -193,6 +194,12 @@ func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			se := &StatusError{Status: resp.StatusCode, Op: "GET " + c.redact(rawURL)}
 			if transientStatus(resp.StatusCode) {
+				// A rate limit that names its own wait is worth honoring: the backoff
+				// budget here is a few seconds, and a store asking for thirty would
+				// otherwise exhaust every attempt well inside the window it set.
+				if d, ok := retryAfter(resp.Header.Get("Retry-After")); ok {
+					return retry.After(se, d)
+				}
 				return se
 			}
 			return retry.Stop(se)
@@ -201,6 +208,25 @@ func (c *Client) getBody(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil
 	})
 	return body, err
+}
+
+// retryAfter reads a Retry-After header in either of its forms, delta-seconds or an
+// HTTP-date. A date already in the past means "now", not a negative wait.
+func retryAfter(v string) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(time.Until(t), 0), true
+	}
+	return 0, false
 }
 
 // transientStatus reports a status worth another attempt: a 5xx, or the two 4xx
