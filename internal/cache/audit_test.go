@@ -31,10 +31,10 @@ type errReader struct{ err error }
 
 func (r errReader) Read([]byte) (int, error) { return 0, r.err }
 
-// Store guards the paths it writes, but Verify/Exists/Hash/Remove take a relPath
-// straight from the lockfile — a committed file that travels with the consuming
-// project, so its contents are not the running user's to trust. An escaping
-// cachePath would make a sync delete or stat arbitrary files.
+// Store guards the paths it writes, but every accessor below takes a relPath straight
+// from the lockfile — a committed file that travels with the consuming project, so its
+// contents are not the running user's to trust. An escaping cachePath would make a sync
+// delete or stat arbitrary files, and Head and Tail would hand back their contents.
 func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "library")
@@ -59,6 +59,12 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 			}
 			if err := Remove(root, rel); err == nil {
 				t.Errorf("Remove accepted %q outside the root", rel)
+			}
+			if _, err := Head(root, rel, 16); err == nil {
+				t.Errorf("Head accepted %q outside the root", rel)
+			}
+			if _, err := Tail(root, rel, 16); err == nil {
+				t.Errorf("Tail accepted %q outside the root", rel)
 			}
 		})
 	}
@@ -218,5 +224,40 @@ func TestSweepTempsOnAMissingRoot(t *testing.T) {
 	count, bytes := SweepTemps(filepath.Join(t.TempDir(), "not-created-yet"), time.Now())
 	if count != 0 || bytes != 0 {
 		t.Errorf("SweepTemps = %d files, %d bytes on a missing root; want nothing", count, bytes)
+	}
+}
+
+// SweepTemps tolerates a library root that does not exist yet, and Migrate has to
+// agree: both run as housekeeping on the same first sync, before anything has created
+// the directory. Returning the ENOENT ended the run after the whole library had been
+// enumerated, so a fresh install could never download anything.
+func TestMigrateOnAMissingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-created-yet")
+	got, err := Migrate(root, []Wanted{{FileID: 1, FileToken: "T", Variant: "Godot_4_5_1", Version: "v1"}})
+	if err != nil {
+		t.Errorf("Migrate on a root that does not exist yet: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Migrate reported %d moves against a root with no files", len(got))
+	}
+}
+
+// A committed download is readable rather than owner-only: the library path is
+// configurable, so it can sit on a volume more than one account reads.
+func TestStoreCommitsAReadableFile(t *testing.T) {
+	root := t.TempDir()
+	p, err := Store(root, "T", "x.zip", strings.NewReader("PK\x03\x04data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(root, "T", "x.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o644 {
+		t.Errorf("committed cache file mode = %v, want 0644", got)
 	}
 }

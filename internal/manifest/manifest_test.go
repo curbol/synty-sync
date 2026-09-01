@@ -164,3 +164,58 @@ func TestValidateRejectsMalformedGlob(t *testing.T) {
 		t.Errorf("valid patterns rejected: %v", err)
 	}
 }
+
+// os.CreateTemp opens at 0600 and the rename carries that mode to the destination, so
+// rewriting a committed file used to narrow it to owner-only. Git does not track the
+// read bits, so the change is invisible in a diff and shows up as a CI step or another
+// account that can no longer read the project's manifest.
+func TestSaveKeepsTheModeOfTheFileItRewrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synty-sync.toml")
+	if err := os.WriteFile(path, []byte("variant_includes = [\"Godot_*\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, Manifest{VariantIncludes: []string{"Godot_*"}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o644 {
+		t.Errorf("mode after Save = %v, want 0644", got)
+	}
+}
+
+// A manifest that does not exist yet is created readable rather than owner-only, since
+// it is committed and shared the moment it is written.
+func TestSaveCreatesAReadableManifest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synty-sync.toml")
+	if err := Save(path, Manifest{VariantIncludes: []string{"Godot_*"}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o644 {
+		t.Errorf("mode of a newly created manifest = %v, want 0644", got)
+	}
+}
+
+// Save sorts a copy: the value receiver shares the caller's backing array, so sorting
+// in place would reorder a slice the caller still holds.
+func TestSaveDoesNotReorderTheCallersSlice(t *testing.T) {
+	m := Manifest{
+		VariantIncludes: []string{"Godot_*"},
+		Packs: []Entry{
+			{Slug: "zeta", Name: "Zeta"},
+			{Slug: "alpha", Name: "Alpha"},
+		},
+	}
+	if err := Save(filepath.Join(t.TempDir(), "synty-sync.toml"), m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Packs[0].Slug != "zeta" {
+		t.Errorf("Save reordered the caller's slice: %+v", m.Packs)
+	}
+}

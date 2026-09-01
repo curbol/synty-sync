@@ -27,6 +27,10 @@ import (
 // scan deliberately does not consider it.
 const tempPrefix = ".synty-dl-"
 
+// cachedFileMode is what a committed download ends up with. Directories the layout
+// creates are already 0755, so this keeps the files readable to match them.
+const cachedFileMode = 0o644
+
 // RelPath is a file's cache path relative to the library root, keyed by file
 // identity (not owning pack) so a bundled file shared across packs is stored once.
 // Forward slashes for portable lockfile storage.
@@ -118,6 +122,14 @@ func Store(libraryRoot, fileToken, filename string, r io.Reader) (*Pending, erro
 		return nil, err
 	}
 	tmpName := tmp.Name()
+	// CreateTemp opens owner-only and the mode survives the rename, but the library is
+	// a mirror: its path is configurable, so it can sit on a volume more than one
+	// account reads, and a pack nobody else can open is not a mirror of anything.
+	if err := tmp.Chmod(cachedFileMode); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return nil, err
+	}
 	h := sha256.New()
 	size, err := io.Copy(io.MultiWriter(tmp, h), r)
 	if err != nil {
