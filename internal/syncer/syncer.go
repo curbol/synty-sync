@@ -4,12 +4,14 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -249,11 +251,12 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	}
 
 	resolvedByID := map[int]resolved{}
-	// The files this run proved have no usable copy anywhere. The in-scope entry is
-	// rebuilt untracked below, so without carrying the same verdict to the other packs
-	// that own the fileId, one owner keeps a record naming a cache path this run just
-	// found missing while another says the file was never downloaded.
-	unresolvedByID := map[int]bool{}
+	// The files this run proved have no usable copy anywhere, mapped to the version the
+	// live page listed. The in-scope entry is rebuilt untracked at that version, so
+	// without carrying both the verdict and the version to the other packs that own the
+	// fileId, one owner keeps a record naming a cache path this run just found missing
+	// while another says the file was never downloaded — at a different version.
+	unresolvedByID := map[int]string{}
 
 	// Adopt pre-existing flat files into the layout so they are not re-downloaded.
 	// Files the lockfile already tracks are excluded: cache.Migrate matches on name
@@ -270,9 +273,13 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			f := selectedByID[id][0].file
 			wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
 		}
+		// Migrate is best-effort and returns whatever it moved alongside any error, so
+		// a failure costs the files it could not fold in, not the run: adoption only
+		// ever saves a download, and the layout scan below picks up anything already
+		// moved.
 		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
 		if err != nil {
-			return Report{}, fmt.Errorf("migrate flat files: %w", err)
+			adoptWarnings = append(adoptWarnings, fmt.Sprintf("could not fold pre-existing flat files into the layout: %v", err))
 		}
 		for _, m := range migrated {
 			r, err := adopt(opts.LibraryRoot, m.RelPath)
@@ -368,7 +375,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 						size: prior.SizeBytes, version: prior.Version,
 					}
 				} else {
-					unresolvedByID[id] = true
+					unresolvedByID[id] = rep.Version
 				}
 				continue
 			}
@@ -537,6 +544,36 @@ func adopt(libraryRoot, relPath string) (resolved, error) {
 	return resolved{cachePath: relPath, sha: sha, size: size, now: true}, nil
 }
 
+// ErrTruncatedArchive rejects a zip whose end-of-central-directory record is missing,
+// which is what a copy interrupted part way looks like.
+var ErrTruncatedArchive = errors.New("the zip is missing its end-of-central-directory record, so it is not the whole file")
+
+// eocdSig ends every zip. A trailing comment may follow it, and the comment length
+// field is 16 bits, so the record starts within the last 64KiB plus its own 22 bytes.
+var eocdSig = []byte("PK\x05\x06")
+
+const eocdSearchLen = (1 << 16) + 22
+
+// wholeArchive reports whether a zip on disk carries the trailer that only a complete
+// one has. The head sniff cannot see this: a copy that stopped part way still begins
+// with an archive's magic, and adopting it records its own short bytes as the file's
+// truth — after which every Verify compares those bytes against themselves and finds
+// them intact forever. Only .zip is checked, since it is the one container here whose
+// completeness is decidable without decompressing.
+func wholeArchive(libraryRoot, relPath string) error {
+	if !strings.EqualFold(path.Ext(relPath), ".zip") {
+		return nil
+	}
+	tail, err := cache.Tail(libraryRoot, relPath, eocdSearchLen)
+	if err != nil {
+		return err
+	}
+	if !bytes.Contains(tail, eocdSig) {
+		return fmt.Errorf("%w: %s", ErrTruncatedArchive, relPath)
+	}
+	return nil
+}
+
 // adoptable reports whether a file already on disk can be taken as a pack's content.
 // A cache written before these guards existed can hold error pages under exactly the
 // right names, so the bytes are checked rather than trusted.
@@ -545,7 +582,10 @@ func adoptable(libraryRoot, relPath string) error {
 	if err != nil {
 		return err
 	}
-	return sniffPackage(head)
+	if err := sniffPackage(head); err != nil {
+		return err
+	}
+	return wholeArchive(libraryRoot, relPath)
 }
 
 // progressStep is how much has to transfer before another line is printed. Small
@@ -633,7 +673,7 @@ func goneFromTheStore(err error) bool {
 	return ok && (code == http.StatusNotFound || code == http.StatusGone)
 }
 
-func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]bool, prev lockfile.Lockfile) {
+func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]string, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
 	// A run acts only on the packs it fetched: those filtered out (disabled in the
 	// manifest, or outside --only) are never re-fetched, so carry their prior records
@@ -655,14 +695,23 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the version has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
-			if unresolvedByID[f.FileID] {
+			if v, ok := unresolvedByID[f.FileID]; ok {
 				// The run went looking for these bytes and did not find them, so the
-				// record naming them has to go with them.
+				// record naming them has to go with them — at the version the run was
+				// looking for, or this owner reports the loss against a stale one.
 				f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
-			} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked {
+				if v != "" {
+					f.Version = v
+				}
+			} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
+				// Tracked or not: the variant filter is manifest-global, so a fileId this
+				// run selected and resolved was selectable for this owner too, and the only
+				// way its entry stayed untracked is an earlier run that failed to fetch it.
+				// That is exactly the case that has to converge.
 				if r.version != "" {
 					f.Version = r.version
 				}
+				f.Tracked = true
 				f.CachePath = r.cachePath
 				f.SHA256 = r.sha
 				f.SizeBytes = r.size
@@ -768,10 +817,27 @@ func orphanedRecords(prev, next lockfile.Lockfile) []string {
 	return w
 }
 
+// indexByFileID picks one prior record per fileId. Packs are visited in slug order
+// rather than map order: a hand-merged lockfile can hold the same fileId tracked at
+// two versions under two packs, and whichever record wins decides between Unchanged
+// and a multi-gigabyte refetch. The ambiguity is not resolvable from the data, so the
+// goal is that two runs over the same file agree, not that either answer is right.
 func indexByFileID(lf lockfile.Lockfile) map[int]lockfile.File {
 	m := map[int]lockfile.File{}
-	for _, p := range lf.Packs {
-		for _, f := range p.Files {
+	slugs := make([]string, 0, len(lf.Packs))
+	for slug := range lf.Packs {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		p := lf.Packs[slug]
+		keys := make([]string, 0, len(p.Files))
+		for k := range p.Files {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			f := p.Files[k]
 			// Prefer a tracked entry (with cachePath) if duplicated across packs.
 			if existing, ok := m[f.FileID]; !ok || (!existing.Tracked && f.Tracked) {
 				m[f.FileID] = f

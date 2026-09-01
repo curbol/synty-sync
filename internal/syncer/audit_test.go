@@ -994,3 +994,147 @@ func TestARekeyedFileIsNotReportedAsOrphaned(t *testing.T) {
 		}
 	}
 }
+
+// Nothing creates the library root before a run reaches it: on a fresh install the
+// first sync used to enumerate the whole library, fetch every item page, and then die
+// in the flat-file migration because the directory did not exist yet. status was
+// unaffected (it skips the block), so the tool reported what it would download and
+// then refused to.
+func TestFirstSyncCreatesNothingAndStillRunsOnAMissingLibraryRoot(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := filepath.Join(t.TempDir(), "not-created-yet")
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("sync on a library root that does not exist yet: %v", err)
+	}
+	if len(rep.Downloaded) == 0 {
+		t.Error("nothing downloaded on a fresh library root")
+	}
+	if _, err := lockfile.Load(lockPath); err != nil {
+		t.Errorf("no lockfile written: %v", err)
+	}
+}
+
+// A fileId bundled across packs must agree on every owner even when the carried
+// owner's entry is untracked. An earlier run that failed to fetch the file leaves
+// both owners untracked; if only one is then in scope and downloads it, requiring
+// the carried entry to be already-tracked before repointing it leaves the committed
+// lockfile holding one fileId as both tracked and untracked.
+func TestResolvedBundledFileConvergesAnUntrackedCarriedOwner(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	prev := lockfile.Lockfile{Packs: map[string]lockfile.Pack{
+		"polygon-dungeon-pack": {DisplayName: "POLYGON - Dungeon Pack", Files: map[string]lockfile.File{
+			"GENERIC_Particle_FX|Godot_4_5_1": {
+				FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1",
+				Version: "v1_0_0", FileID: 999, Tracked: false,
+			},
+		}},
+	}}
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem != "1" {
+				return "", false
+			}
+			return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", "v1_0_1", 999), true
+		},
+	})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	if _, err := Run(context.Background(), newClient(srv.URL), prev, lockPath, opts); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	in := lf.Packs["polygon-pirate-pack"].Files[key]
+	out := lf.Packs["polygon-dungeon-pack"].Files[key]
+	if !in.Tracked {
+		t.Fatalf("in-scope owner not tracked: %+v", in)
+	}
+	if in.Tracked != out.Tracked || in.CachePath != out.CachePath || in.SHA256 != out.SHA256 || in.Version != out.Version {
+		t.Errorf("owning packs disagree on fileId 999:\n  in-scope  %+v\n  carried   %+v", in, out)
+	}
+}
+
+// The same convergence for the losing direction: when a run proves a fileId has no
+// usable copy, every owner drops the record at the version the run was looking for.
+// Clearing the path but keeping the carried owner's old version records one fileId at
+// two versions in a single committed file.
+func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
+	lib := t.TempDir()
+	rep := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
+	prev := lockfile.Lockfile{Packs: map[string]lockfile.Pack{
+		"polygon-dungeon-pack": {DisplayName: "POLYGON - Dungeon Pack", Files: map[string]lockfile.File{
+			"GENERIC_Particle_FX|Godot_4_5_1": {
+				FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_0",
+				FileID: 999, Tracked: true, CachePath: "GENERIC_Particle_FX/old.zip", SHA256: "old",
+			},
+		}},
+	}}
+	pf := []packWithFiles{{
+		pack: model.Pack{Slug: "polygon-pirate-pack", DisplayName: "POLYGON - Pirate Pack"},
+		files: []model.FileEntry{{
+			FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_1", FileID: 999,
+		}},
+	}}
+	opts := runOpts(lib, false)
+	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]string{999: "v1_0_1"}, prev)
+
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
+	out := rep.NewLockfile.Packs["polygon-dungeon-pack"].Files[key]
+	if in.Tracked || out.Tracked {
+		t.Errorf("an unresolved file stayed tracked: in=%+v out=%+v", in, out)
+	}
+	if in.Version != out.Version {
+		t.Errorf("one fileId dropped at two versions: in-scope %q, carried %q", in.Version, out.Version)
+	}
+}
+
+// Adoption is the one path into the lockfile that never consults classify, and the
+// head sniff cannot tell a whole archive from a copy that stopped part way — both
+// begin with a zip's magic. Adopting a truncated one records its own short bytes as
+// the file's truth, after which every Verify compares those bytes against themselves
+// and finds them intact forever.
+func TestTruncatedLayoutFileIsNotAdopted(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cut := truncatedPackageBytes("POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
+	layout := filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
+	if err := os.WriteFile(layout, cut, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	for _, d := range rep.Adopted {
+		if d.FileID == 2282645 {
+			t.Error("a truncated zip was adopted as the pack's content")
+		}
+	}
+	if len(warnContaining(rep.Warnings, "end-of-central-directory")) == 0 {
+		t.Errorf("truncation not reported: %v", rep.Warnings)
+	}
+	// It is re-downloaded instead, so the short bytes never become the record.
+	lf, _ := lockfile.Load(lockPath)
+	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	if !f.Tracked {
+		t.Fatalf("file not recovered by download: %+v", f)
+	}
+	if f.SizeBytes == int64(len(cut)) {
+		t.Error("the lockfile recorded the truncated size as the file's truth")
+	}
+}

@@ -1,6 +1,8 @@
 package syncer
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -107,10 +109,30 @@ type serverOpts struct {
 	downloadStatus func(fileID string) (int, bool)
 }
 
-// packageBytes is a body that sniffs as an archive rather than a document, the way
-// real package bytes do.
+// packageBytes builds a real (tiny) zip carrying name, so a fixture body is a whole
+// archive the way a downloaded pack is. Adoption checks for the end-of-central-directory
+// record, which a hand-rolled "PK\x03\x04" prefix does not have.
 func packageBytes(name string) []byte {
-	return append([]byte("PK\x03\x04"), []byte(name)...)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := w.Write([]byte(name)); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+// truncatedPackageBytes is packageBytes with the trailer cut off: what an interrupted
+// copy of a pack leaves behind.
+func truncatedPackageBytes(name string) []byte {
+	full := packageBytes(name)
+	return full[:len(full)/2]
 }
 
 func newServer(t *testing.T, opts serverOpts) *httptest.Server {

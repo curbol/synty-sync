@@ -11,8 +11,10 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -200,6 +202,33 @@ func VerifyDeep(libraryRoot, relPath, sha string) bool {
 	return hex.EncodeToString(h.Sum(nil)) == sha
 }
 
+// Tail returns up to the last n bytes of a cached file, for a caller that has to look
+// at a trailer to tell a whole file from a truncated one.
+func Tail(libraryRoot, relPath string, n int) ([]byte, error) {
+	full, err := resolve(libraryRoot, relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := fi.Size()
+	if int64(n) > size {
+		n = int(size)
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, size-int64(n)); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf, nil
+}
+
 // Head returns up to n leading bytes of a cached file, for a caller that has to look
 // at what a file is before trusting it.
 func Head(libraryRoot, relPath string, n int) ([]byte, error) {
@@ -286,6 +315,11 @@ func normalizeName(s string) string {
 // untouched and will simply re-download. It is best-effort and idempotent.
 func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	entries, err := os.ReadDir(libraryRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		// A root that does not exist yet holds no flat files to fold in. The first run
+		// on a fresh install reaches here before anything has created it.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
