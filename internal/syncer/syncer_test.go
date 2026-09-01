@@ -465,7 +465,7 @@ func TestBuildLockfileRepointsCarriedBundledFile(t *testing.T) {
 	opts := Options{Filter: func(model.Variant) bool { return true }, Now: "now"}
 	report := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
 
-	buildLockfile(&report, packFiles, opts, resolvedByID, prev)
+	buildLockfile(&report, packFiles, opts, resolvedByID, nil, prev)
 
 	got := report.NewLockfile.Packs["out"].Files["T|V"]
 	if got.CachePath != "T/new.zip" || got.SHA256 != "newsha" {

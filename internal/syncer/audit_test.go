@@ -828,3 +828,169 @@ func TestFailedUpdateKeepsOwningPacksInAgreement(t *testing.T) {
 		t.Errorf("owning packs diverged after a failed update:\n  in-scope %+v\n  carried  %+v", in, out)
 	}
 }
+
+// The same divergence one class over. A missing cache file whose re-download fails
+// leaves the in-scope owner untracked; without carrying that verdict, the pack this
+// run left out of scope keeps a record naming a cachePath the run just found gone,
+// so the committed lockfile holds one fileId both tracked and untracked at once.
+func TestFailedCacheMissingKeepsOwningPacksInAgreement(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	broken := false
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1", "4": // Pirate and Dungeon both bundle fileId 999
+				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", "v1_0_0", 999), true
+			}
+			return "", false
+		},
+		downloadStatus: func(fileID string) (int, bool) {
+			if broken && fileID == "999" {
+				return http.StatusInternalServerError, true
+			}
+			return 0, false
+		},
+	})
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	seed := lf.Packs["polygon-pirate-pack"].Files[key]
+	if !seed.Tracked {
+		t.Fatal("seed produced no tracked bundled file")
+	}
+
+	// The cached bytes go missing, and the version has not moved: CacheMissing, not
+	// Changed, so there is no prior copy to fall back to.
+	if err := os.Remove(filepath.Join(lib, filepath.FromSlash(seed.CachePath))); err != nil {
+		t.Fatal(err)
+	}
+	broken = true
+	only := runOpts(lib, false)
+	only.Attempts, only.Backoff = 1, 0
+	only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := after.Packs["polygon-pirate-pack"].Files[key]
+	out := after.Packs["polygon-dungeon-pack"].Files[key]
+	if in.Tracked != out.Tracked || in.CachePath != out.CachePath || in.SHA256 != out.SHA256 || in.SizeBytes != out.SizeBytes {
+		t.Errorf("owning packs diverged after a failed cache-missing download:\n  in-scope %+v\n  carried  %+v", in, out)
+	}
+	if out.Tracked {
+		t.Errorf("the carried entry still records bytes the run could not find: %+v", out)
+	}
+}
+
+// A pack that leaves the library is reported and keeps its lockfile record. A single
+// file leaving takes its record with it — the in-scope pack is rebuilt from the live
+// page alone — and the bytes stay in the cache with nothing pointing at them. Losing
+// that silently is how a renamed variant keyword costs a multi-gigabyte file its
+// record between two green runs.
+func TestADelistedFileIsReportedNotJustDropped(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	both := true
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem != "1" {
+				return "", false
+			}
+			page := itemPage("EXTRA_Thing", "Godot_4_5_1", "v1_0_0", 1000)
+			if both {
+				page = itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 999) + page
+			}
+			return page, true
+		},
+	})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "POLYGON_Pirate|Godot_4_5_1"
+	seed := lf.Packs["polygon-pirate-pack"].Files[key]
+	if !seed.Tracked {
+		t.Fatal("seed produced no tracked file to lose")
+	}
+
+	both = false
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, still := after.Packs["polygon-pirate-pack"].Files[key]; still {
+		t.Fatalf("the delisted file is still recorded; this test no longer covers what it names")
+	}
+	var found string
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, key) {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("a tracked file left the library with no word about it; warnings = %q", rep.Warnings)
+	}
+	if !strings.Contains(found, seed.CachePath) {
+		t.Errorf("the warning does not name the bytes left behind at %s: %q", seed.CachePath, found)
+	}
+	if !cacheFileExists(lib, seed.CachePath) {
+		t.Errorf("the cached copy was removed; the run reports the orphan, it does not delete it")
+	}
+}
+
+// A variant the store renames to another recognized keyword moves the file's key but
+// not its fileId, so the bytes stay referenced. Reporting that as a loss would fire
+// the warning on an ordinary version bump.
+func TestARekeyedFileIsNotReportedAsOrphaned(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	variant := "Godot_4_5_1"
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem != "1" {
+				return "", false
+			}
+			return itemPage("POLYGON_Pirate", variant, "v1_0_0", 999), true
+		},
+	})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	variant = "Godot_4_6_0"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "no longer listed") {
+			t.Errorf("a rekeyed file reported as orphaned: %q", w)
+		}
+	}
+}

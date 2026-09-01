@@ -316,11 +316,12 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 	return nil, fmt.Errorf("library pagination exceeded %d pages", maxLibraryPages)
 }
 
-// ItemFiles fetches and parses one pack's item page.
-func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) ([]model.FileEntry, error) {
+// ItemFiles fetches and parses one pack's item page, returning its files and the
+// labels of any rows whose variant this build does not recognize (see ParseItemPage).
+func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) (files []model.FileEntry, unknown []string, err error) {
 	body, err := c.getBody(ctx, withShop(c.BaseURL+pack.ItemURL))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return ParseItemPage(body, pack.Slug)
 }

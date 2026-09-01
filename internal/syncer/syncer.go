@@ -32,7 +32,7 @@ const (
 	Changed
 	DownloadNow  // owned, was filtered out before, now selected
 	CacheMissing // tracked + version matches, but absent/corrupt on disk
-	Adopted      // matched a pre-existing flat zip and folded into the layout
+	Adopted      // matched a file already on disk, folded in without a download
 )
 
 func (c Class) String() string {
@@ -92,7 +92,7 @@ type Failure struct {
 type Report struct {
 	Diffs       []FileDiff
 	Downloaded  []FileDiff
-	Adopted     []FileDiff // matched pre-existing flat zips, no download
+	Adopted     []FileDiff // matched files already on disk, no download
 	Failures    []Failure
 	Removed     []string // lockfile packs the library no longer lists
 	Swept       int      // abandoned download temps removed
@@ -249,8 +249,13 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	}
 
 	resolvedByID := map[int]resolved{}
+	// The files this run proved have no usable copy anywhere. The in-scope entry is
+	// rebuilt untracked below, so without carrying the same verdict to the other packs
+	// that own the fileId, one owner keeps a record naming a cache path this run just
+	// found missing while another says the file was never downloaded.
+	unresolvedByID := map[int]bool{}
 
-	// Adopt pre-existing flat zips into the layout so they are not re-downloaded.
+	// Adopt pre-existing flat files into the layout so they are not re-downloaded.
 	// Files the lockfile already tracks are excluded: cache.Migrate matches on name
 	// alone, so adopting one would move unverified content over a verified copy and
 	// repoint the lockfile at it without ever consulting classify.
@@ -267,18 +272,15 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
 		if err != nil {
-			return Report{}, fmt.Errorf("migrate flat zips: %w", err)
+			return Report{}, fmt.Errorf("migrate flat files: %w", err)
 		}
 		for _, m := range migrated {
-			if err := adoptable(opts.LibraryRoot, m.RelPath); err != nil {
+			r, err := adopt(opts.LibraryRoot, m.RelPath)
+			if err != nil {
 				adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", m.RelPath, err))
 				continue
 			}
-			sha, size, err := cache.Hash(opts.LibraryRoot, m.RelPath)
-			if err != nil {
-				return Report{}, fmt.Errorf("hash migrated %s: %w", m.From, err)
-			}
-			adoptedByID[m.FileID] = resolved{cachePath: m.RelPath, sha: sha, size: size, now: true}
+			adoptedByID[m.FileID] = r
 		}
 	}
 
@@ -297,20 +299,23 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		if !ok {
 			continue
 		}
-		if err := adoptable(opts.LibraryRoot, rel); err != nil {
-			adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
-			continue
-		}
 		if opts.DryRun {
+			// status must not read a multi-gigabyte library back just to say what it
+			// would do, so the sniff alone stands in for the hash here.
+			if err := adoptable(opts.LibraryRoot, rel); err != nil {
+				adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
+				continue
+			}
 			adoptedByID[id] = resolved{cachePath: rel}
 			continue
 		}
 		progress(fmt.Sprintf("adopt %s", f.Key()))
-		sha, size, err := cache.Hash(opts.LibraryRoot, rel)
+		r, err := adopt(opts.LibraryRoot, rel)
 		if err != nil {
-			return Report{}, fmt.Errorf("hash adopted %s: %w", rel, err)
+			adoptWarnings = append(adoptWarnings, fmt.Sprintf("not adopting %s: %v", rel, err))
+			continue
 		}
-		adoptedByID[id] = resolved{cachePath: rel, sha: sha, size: size, now: true}
+		adoptedByID[id] = r
 	}
 
 	var pruneWarnings []string
@@ -356,12 +361,14 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 				// stay on disk, orphaning them with nothing recording it, and leaves an
 				// out-of-scope owner of the same fileId carrying a record this one lost.
 				// Only Changed qualifies: every other class reaches here with no good
-				// prior copy to hold on to.
+				// prior copy to hold on to, and every owning pack has to say so.
 				if fd.Class == Changed && prior.CachePath != "" && cacheOK(prior) {
 					resolvedByID[id] = resolved{
 						cachePath: prior.CachePath, sha: prior.SHA256,
 						size: prior.SizeBytes, version: prior.Version,
 					}
+				} else {
+					unresolvedByID[id] = true
 				}
 				continue
 			}
@@ -378,8 +385,9 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 	}
 
-	buildLockfile(&report, packFiles, opts, resolvedByID, lf)
-	report.Warnings = append(warnings(packFiles, opts.Filter), append(adoptWarnings, pruneWarnings...)...)
+	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, lf)
+	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
+	report.Warnings = append(report.Warnings, append(adoptWarnings, pruneWarnings...)...)
 
 	if !opts.DryRun {
 		if err := lockfile.Save(lockPath, report.NewLockfile); err != nil {
@@ -390,8 +398,9 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 }
 
 type packWithFiles struct {
-	pack  model.Pack
-	files []model.FileEntry
+	pack    model.Pack
+	files   []model.FileEntry
+	unknown []string // rows whose variant this build does not recognize
 }
 
 func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurrency int) ([]packWithFiles, error) {
@@ -418,7 +427,7 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 			if fetchCtx.Err() != nil {
 				return
 			}
-			files, err := c.ItemFiles(fetchCtx, p)
+			files, unknown, err := c.ItemFiles(fetchCtx, p)
 			if err == nil && len(files) == 0 {
 				// Rebuilding a pack from an empty list erases every entry it holds, and
 				// an owned pack always ships at least one downloadable file, so this is
@@ -434,7 +443,7 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 				cancel()
 				return
 			}
-			out[i] = packWithFiles{pack: p, files: files}
+			out[i] = packWithFiles{pack: p, files: files, unknown: unknown}
 		}(i, p)
 	}
 	wg.Wait()
@@ -511,10 +520,26 @@ func looksLikePackage(path string) error {
 	return sniffPackage(head[:n])
 }
 
+// adopt takes a file already on disk as a pack's content: it checks the bytes and
+// hashes them. Adoption is the one path into the lockfile that never consults
+// classify, so both steps live here rather than at each call site, where a check
+// added to one and missed on the other would let a rejected body through the gap.
+// Every failure is the caller's to report and skip: adoption saves a download it
+// could always fall back to, so nothing here is worth ending a run over.
+func adopt(libraryRoot, relPath string) (resolved, error) {
+	if err := adoptable(libraryRoot, relPath); err != nil {
+		return resolved{}, err
+	}
+	sha, size, err := cache.Hash(libraryRoot, relPath)
+	if err != nil {
+		return resolved{}, err
+	}
+	return resolved{cachePath: relPath, sha: sha, size: size, now: true}, nil
+}
+
 // adoptable reports whether a file already on disk can be taken as a pack's content.
-// Adoption is the one path into the lockfile that never consults classify, and a cache
-// written before these guards existed can hold error pages under exactly the right
-// names, so the bytes are checked here too.
+// A cache written before these guards existed can hold error pages under exactly the
+// right names, so the bytes are checked rather than trusted.
 func adoptable(libraryRoot, relPath string) error {
 	head, err := cache.Head(libraryRoot, relPath, sniffLen)
 	if err != nil {
@@ -608,7 +633,7 @@ func goneFromTheStore(err error) bool {
 	return ok && (code == http.StatusNotFound || code == http.StatusGone)
 }
 
-func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, prev lockfile.Lockfile) {
+func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]bool, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
 	// A run acts only on the packs it fetched: those filtered out (disabled in the
 	// manifest, or outside --only) are never re-fetched, so carry their prior records
@@ -630,7 +655,11 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the version has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
-			if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked {
+			if unresolvedByID[f.FileID] {
+				// The run went looking for these bytes and did not find them, so the
+				// record naming them has to go with them.
+				f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
+			} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" && f.Tracked {
 				if r.version != "" {
 					f.Version = r.version
 				}
@@ -702,6 +731,37 @@ func warnings(packFiles []packWithFiles, filter func(model.Variant) bool) []stri
 		}
 		if !any {
 			w = append(w, fmt.Sprintf("no downloadable variant for %q (owned, but nothing matches the filter)", pf.pack.DisplayName))
+		}
+		for _, label := range pf.unknown {
+			w = append(w, fmt.Sprintf("%q lists a file whose variant this build does not recognize: %q (it will not be mirrored)", pf.pack.DisplayName, label))
+		}
+	}
+	sort.Strings(w)
+	return w
+}
+
+// orphanedRecords names every file the prior lockfile tracked whose fileId the new
+// one records nowhere. A pack that leaves the library is reported on its own and
+// keeps its record; a single file leaving takes its record with it, and the bytes
+// stay in the cache with nothing pointing at them, so say so rather than let the
+// entry disappear between two runs. Matching on fileId rather than key keeps a
+// renamed variant — same file under a new key — from reading as a loss.
+func orphanedRecords(prev, next lockfile.Lockfile) []string {
+	kept := map[int]bool{}
+	for _, p := range next.Packs {
+		for _, f := range p.Files {
+			kept[f.FileID] = true
+		}
+	}
+	seen := map[int]bool{}
+	var w []string
+	for _, p := range prev.Packs {
+		for key, f := range p.Files {
+			if !f.Tracked || f.CachePath == "" || kept[f.FileID] || seen[f.FileID] {
+				continue
+			}
+			seen[f.FileID] = true
+			w = append(w, fmt.Sprintf("%s is no longer listed by any pack you own; its record is gone and the cached copy at %s is now unreferenced", key, f.CachePath))
 		}
 	}
 	sort.Strings(w)

@@ -93,7 +93,7 @@ func TestParseLibraryAllPages(t *testing.T) {
 }
 
 func TestParseItemPirate(t *testing.T) {
-	files, err := ParseItemPage(read(t, "item_1.html"), "polygon-pirate-pack")
+	files, _, err := ParseItemPage(read(t, "item_1.html"), "polygon-pirate-pack")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestParseItemPirate(t *testing.T) {
 }
 
 func TestParseItemSourceSpritesSplitLess(t *testing.T) {
-	files, err := ParseItemPage(read(t, "item_5.html"), "interface-dark-fantasy-hud")
+	files, _, err := ParseItemPage(read(t, "item_5.html"), "interface-dark-fantasy-hud")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestParseItemSourceSpritesSplitLess(t *testing.T) {
 }
 
 func TestParseItemArchivedFlag(t *testing.T) {
-	files, err := ParseItemPage(read(t, "item_2.html"), "polygon-alpine-mountain-nature-biome")
+	files, _, err := ParseItemPage(read(t, "item_2.html"), "polygon-alpine-mountain-nature-biome")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestParseItemSkipsUnknownVariant(t *testing.T) {
 	  <div class='sky-pilot-file-heading'>POLYGON_Holiday_2025_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
 	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222?x=1'>Download</a></div>
 	</div>`)
-	files, err := ParseItemPage(html, "polygon-holiday-2025")
+	files, _, err := ParseItemPage(html, "polygon-holiday-2025")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestParseItemErrorsOnStructuralBreakage(t *testing.T) {
 	  <div class='sky-pilot-file-heading'>Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
 	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222?x=1'>Download</a></div>
 	</div>`)
-	if _, err := ParseItemPage(html, "x"); err == nil {
+	if _, _, err := ParseItemPage(html, "x"); err == nil {
 		t.Fatal("expected an error for a versioned row with a valid id but no token")
 	}
 }
@@ -196,7 +196,7 @@ func TestSourceSpritesUnderscoreCanonicalized(t *testing.T) {
 	  <div class='sky-pilot-file-heading'>INTERFACE_Fantasy_Warrior_HUD_Source_Sprites | v3 <span class='sky-pilot-file-size'>(201 MB)</span></div>
 	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/777?x=1'>Download</a></div>
 	</div>`)
-	files, err := ParseItemPage(html, "interface-fantasy-warrior-hud")
+	files, _, err := ParseItemPage(html, "interface-fantasy-warrior-hud")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestBundledFileSharedAcrossPacks(t *testing.T) {
 	// The same fileId 2344711 is bundled under Pirate (item_1), Dungeon (item_4),
 	// and Fantasy Kingdom (item_6); dedup keys on this.
 	for _, name := range []string{"item_1.html", "item_4.html", "item_6.html"} {
-		files, err := ParseItemPage(read(t, name), "x")
+		files, _, err := ParseItemPage(read(t, name), "x")
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

@@ -124,7 +124,7 @@ func TestGetBodyReusesConnectionAcrossRetries(t *testing.T) {
 func TestParseItemPageErrorsOnNoRows(t *testing.T) {
 	html := []byte(`<div class='sky-pilot rte'><h2>Pack</h2>
 		<div class='renamed-list-item'>POLYGON_Pack<br><span>SourceFiles | v3</span></div></div>`)
-	if _, err := ParseItemPage(html, "pack"); err == nil {
+	if _, _, err := ParseItemPage(html, "pack"); err == nil {
 		t.Error("a page with no recognizable file rows must be a loud error")
 	}
 }
@@ -138,7 +138,7 @@ func TestParseItemPageErrorsWhenNoRowCarriesAVersion(t *testing.T) {
 	  <div class='sky-pilot-file-title'>POLYGON_Pirate_Godot_4_5_1 | v1_0_1 <span class='sky-pilot-file-size'>(40 MB)</span></div>
 	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222'>Download</a></div>
 	</div>`)
-	files, err := ParseItemPage(html, "polygon-pirate")
+	files, _, err := ParseItemPage(html, "polygon-pirate")
 	if err == nil {
 		t.Errorf("rows present but none versioned must be a loud error; got %d files, nil error", len(files))
 	}
@@ -154,7 +154,7 @@ func TestParseItemPageErrorsOnIconOnlyPage(t *testing.T) {
 	html := []byte(`<div class='sky-pilot-list-item'>
 	  <div class='sky-pilot-file-heading'>POLYGON_Pirate_icon.png</div>
 	</div>`)
-	if _, err := ParseItemPage(html, "polygon-pirate"); err == nil {
+	if _, _, err := ParseItemPage(html, "polygon-pirate"); err == nil {
 		t.Error("an item page yielding no versioned rows must be a loud error")
 	}
 }
@@ -546,5 +546,42 @@ func TestResolveDoesNotCutOffASlowButLiveBody(t *testing.T) {
 	}
 	if n != 32 {
 		t.Errorf("read %d bytes, want the whole 32-byte body", n)
+	}
+}
+
+// A row whose variant keyword this build does not know is skipped, not failed — a
+// future engine must not abort a run. But that skip is also how a renamed keyword
+// takes a tracked file out of the lockfile without a word, so the label has to come
+// back for the caller to report.
+func TestParseItemPageReportsAnUnrecognizedVariant(t *testing.T) {
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_PirateGodot_4_5_1 | v1_0_1 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/222'>Download</a></div>
+	</div>
+	<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_PirateUreal_5_3 | v1_0_1 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/223'>Download</a></div>
+	</div>`)
+	files, unknown, err := ParseItemPage(html, "polygon-pirate")
+	if err != nil {
+		t.Fatalf("an unrecognized variant must not fail the page: %v", err)
+	}
+	if len(files) != 1 || files[0].FileID != 222 {
+		t.Errorf("files = %+v, want only the recognized row", files)
+	}
+	if len(unknown) != 1 || !strings.Contains(unknown[0], "Ureal_5_3") {
+		t.Errorf("unknown = %q, want the skipped row's label", unknown)
+	}
+}
+
+// The recognized-variant path must not report anything: a warning on every run is a
+// warning nobody reads.
+func TestParseItemPageReportsNothingForKnownVariants(t *testing.T) {
+	_, unknown, err := ParseItemPage(read(t, "item_1.html"), "polygon-pirate-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unknown) != 0 {
+		t.Errorf("unknown = %q, want none for a page of recognized variants", unknown)
 	}
 }

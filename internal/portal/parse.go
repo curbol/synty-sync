@@ -97,19 +97,24 @@ func ParseLibraryPage(html []byte) ([]model.Pack, error) {
 
 // ParseItemPage extracts the downloadable files on one pack's item page. Versionless
 // rows (icons) are skipped. packSlug stamps each FileEntry's owning pack.
-func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
+//
+// unknown holds the label of every row that carries a version and a download id but
+// no variant keyword this build recognizes. Such a row is skipped rather than failed,
+// because a future engine must not abort a run — but the skip is how a renamed
+// keyword drops a file the lockfile already tracks, so the caller is told rather than
+// left to notice the entry missing.
+func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unknown []string, err error) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(html))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows := doc.Find("div.sky-pilot-list-item")
 	if rows.Length() == 0 {
 		// Every owned pack's item page carries at least an icon row, so zero rows
 		// means the markup moved, not that the pack is empty. Failing here keeps a
 		// selector change from rewriting the pack's lockfile entry as empty.
-		return nil, fmt.Errorf("item page for %q: no file rows found", packSlug)
+		return nil, nil, fmt.Errorf("item page for %q: no file rows found", packSlug)
 	}
-	var files []model.FileEntry
 	var parseErr error
 	versioned := 0
 	rows.EachWithBreak(func(_ int, row *goquery.Selection) bool {
@@ -133,18 +138,19 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		}
 		fileID, _ := strconv.Atoi(idMatch[1])
 
-		token, variant, version, ok, err := splitLabel(label)
-		if err != nil {
+		token, variant, version, ok, splitErr := splitLabel(label)
+		if splitErr != nil {
 			// A row that already has a valid download id but is otherwise malformed
 			// (empty version, or a recognized variant keyword with no token) is
 			// structural breakage, not a skippable variant — fail loud.
-			parseErr = fmt.Errorf("file row %q: %w", label, err)
+			parseErr = fmt.Errorf("file row %q: %w", label, splitErr)
 			return false
 		}
 		if !ok {
 			// Unrecognized variant keyword (e.g. Synty's "Ureal" typo, or a future
 			// engine). Skip rather than abort: such variants are never in the
 			// Godot/SourceFiles filter.
+			unknown = append(unknown, label)
 			return true
 		}
 		size, _ := parseSize(sizeText)
@@ -161,15 +167,15 @@ func ParseItemPage(html []byte, packSlug string) ([]model.FileEntry, error) {
 		return true
 	})
 	if parseErr != nil {
-		return nil, parseErr
+		return nil, nil, parseErr
 	}
 	if versioned == 0 {
 		// The zero-rows guard above only covers the row selector. If the file-heading
 		// class moves, every row parses to an empty label and is skipped as an icon
 		// row, and this pack would silently rebuild its lockfile entry as empty.
-		return nil, fmt.Errorf("item page for %q: %d rows, none carrying a version label", packSlug, rows.Length())
+		return nil, nil, fmt.Errorf("item page for %q: %d rows, none carrying a version label", packSlug, rows.Length())
 	}
-	return files, nil
+	return files, unknown, nil
 }
 
 // splitLabel turns "POLYGON_PirateGodot_4_5_1 | v1_0_1" (or the underscore-fused
