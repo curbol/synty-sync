@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
 )
@@ -136,16 +137,20 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 			http.Error(w, "this form did not come from the page synty-sync is serving", http.StatusForbidden)
 			return
 		}
-		// A slug this page never offered comes from a stale tab. The returned set is
-		// the user's whole selection, so passing one through would make an empty
-		// submission read as a deliberate choice of packs that no longer exist.
+		// The returned set is the user's whole selection, so a slug this page never
+		// rendered must not ride along in it: a client that holds the token still has
+		// to stay inside what it was offered, or a submission naming packs that do not
+		// exist reads as a deliberate choice of them.
 		chosen := map[string]bool{}
 		for _, slug := range r.PostForm["pack"] {
 			if known[slug] {
 				chosen[slug] = true
 			}
 		}
-		fmt.Fprintf(w, "Saved %d packs. You can close this tab.", len(chosen))
+		// The caller decides whether this selection is written — it refuses an empty
+		// submission, and the save itself can fail — so the page reports only what it
+		// knows, and the terminal reports the outcome.
+		fmt.Fprintf(w, "Got your selection (%d packs). Return to the terminal.", len(chosen))
 		result <- chosen
 	})
 
@@ -203,9 +208,14 @@ func localRequest(r *http.Request, bound net.Addr) bool {
 	return boundIP != nil && !boundIP.IsUnspecified() && boundIP.Equal(ip)
 }
 
+// shutdownGrace bounds how long a shutdown waits for the response already being
+// written. The handler sends its result before returning, so without a grace period
+// the process can exit before the browser has the page.
+const shutdownGrace = 2 * time.Second
+
 func shutdown(srv *http.Server) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
 	_ = srv.Shutdown(ctx)
 }
 

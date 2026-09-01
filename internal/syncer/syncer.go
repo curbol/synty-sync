@@ -104,8 +104,9 @@ type Report struct {
 }
 
 // ActionableFailures counts the failures a later run, a fresh session, or a fix on
-// this side could clear. It is what the exit status is built from, so the rule lives
-// here rather than being restated by whoever needs the count.
+// this side could clear, and is what the exit status is built from. Gone is excluded:
+// the store no longer serves the file, so no re-run clears it, and counting it would
+// make every future sync exit non-zero over the same file forever.
 func (r Report) ActionableFailures() int {
 	n := 0
 	for _, f := range r.Failures {
@@ -115,9 +116,6 @@ func (r Report) ActionableFailures() int {
 	}
 	return n
 }
-
-// Failed reports whether the run should exit non-zero.
-func (r Report) Failed() bool { return r.ActionableFailures() > 0 }
 
 // ErrEmptyLibrary guards the committed record against a well-formed but wrong
 // enumeration. The lockfile travels with someone's project, and a read that returns

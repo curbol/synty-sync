@@ -48,6 +48,52 @@ func main() {
 // and diagnostics stay on stderr.
 var stdout io.Writer = os.Stdout
 
+// cliFlags holds every flag the CLI accepts. A subcommand only ever sees the ones
+// registerFlags binds for it; the rest keep their zero values and are never read.
+type cliFlags struct {
+	cfgDir       string
+	manifestFlag string
+	cookies      string
+	library      string
+	only         string
+	customer     string
+	concurrency  int
+	dryRun       bool
+	addr         string
+}
+
+// registerFlags binds the flags that mean something for cmd, so one that does not
+// becomes a parse error rather than being accepted and ignored. A shared set let
+// `select --dry-run` serve the page and rewrite the committed manifest, which is the
+// opposite of what the flag says.
+func registerFlags(fs *flag.FlagSet, cmd string) *cliFlags {
+	var f cliFlags
+	needsConfigDir := cmd != "update"
+	needsSession := cmd == "select" || cmd == "status" || cmd == "sync"
+	syncs := cmd == "status" || cmd == "sync"
+
+	if needsConfigDir {
+		fs.StringVar(&f.cfgDir, "config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
+		fs.StringVar(&f.manifestFlag, "manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
+	}
+	if needsSession {
+		fs.StringVar(&f.cookies, "cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
+		fs.StringVar(&f.customer, "customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
+	}
+	if syncs {
+		fs.StringVar(&f.library, "library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
+		fs.StringVar(&f.only, "only", "", "limit to packs whose slug matches this glob")
+		fs.IntVar(&f.concurrency, "concurrency", 0, "max concurrent item-page fetches (overrides config)")
+	}
+	if cmd == "sync" {
+		fs.BoolVar(&f.dryRun, "dry-run", false, "classify and report only (no downloads or writes)")
+	}
+	if cmd == "select" {
+		fs.StringVar(&f.addr, "addr", selectAddr, "the address to serve the page at (host:port)")
+	}
+	return &f
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		usage()
@@ -55,25 +101,20 @@ func run(args []string) error {
 	}
 	cmd, rest := args[0], args[1:]
 
-	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	// Silence the flag package's own dump: help prints usage() below, and a bad flag
-	// comes back as an error that main reports once.
-	fs.SetOutput(io.Discard)
-	cfgDir := fs.String("config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
-	manifestFlag := fs.String("manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
-	cookies := fs.String("cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
-	library := fs.String("library", "", "library cache directory (overrides config / SYNTY_LIBRARY)")
-	only := fs.String("only", "", "limit to packs whose slug matches this glob")
-	concurrency := fs.Int("concurrency", 0, "max concurrent item-page fetches (overrides config)")
-	customer := fs.String("customer", "", "Synty customer id (overrides SYNTY_CUSTOMER_ID and config)")
-	dryRun := fs.Bool("dry-run", false, "on sync, classify and report only (no downloads or writes)")
-	addr := fs.String("addr", selectAddr, "on select, the address to serve the page at (host:port)")
 	switch cmd {
 	case "status", "sync", "list", "select", "update", "version", "-h", "--help", "help", "--version", "-v":
 	default:
 		usage()
 		return fmt.Errorf("unknown subcommand %q", cmd)
 	}
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	// Silence the flag package's own dump: help prints usage() below, and a bad flag
+	// comes back as an error that main reports once.
+	fs.SetOutput(io.Discard)
+	f := registerFlags(fs, cmd)
+	cfgDir, manifestFlag, cookies := &f.cfgDir, &f.manifestFlag, &f.cookies
+	library, only, customer := &f.library, &f.only, &f.customer
+	concurrency, dryRun, addr := &f.concurrency, &f.dryRun, &f.addr
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
 		usage()
 		return nil
@@ -296,17 +337,28 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	if err != nil {
 		return err
 	}
-	prev := man.EnabledSet()
+	// Enumerate returns no packs both for an empty library and for a page whose anchors
+	// stopped parsing, and Reconcile rebuilds the pack list from what it is handed. The
+	// syncer refuses the same shape rather than rewriting its committed file; so does
+	// this one, or a markup change deletes the user's whole pack list.
+	if len(packs) == 0 && len(man.Packs) > 0 {
+		return fmt.Errorf("the library listed no packs while %s holds %d; refusing to rewrite it", manifestPath, len(man.Packs))
+	}
 	man.Reconcile(packs)
-	chosen, err := web.Serve(ctx, ln, packs, man.EnabledSet())
+	// Compared against what the page actually offered, not against what was enabled
+	// before: a pack that has left the library is dropped by Reconcile, so measuring
+	// against the prior set would refuse an honest empty submission naming a pack the
+	// user was never shown.
+	offered := man.EnabledSet()
+	chosen, err := web.Serve(ctx, ln, packs, offered)
 	if err != nil {
 		return err
 	}
 	// Turning off every pack is a real choice, but it is also what an empty or
 	// drive-by submission looks like, and it costs the user their whole selection in
 	// a committed file. Make them state it.
-	if len(chosen) == 0 && len(prev) > 0 {
-		return fmt.Errorf("the selection came back empty while %d packs were enabled; %s left unchanged (deselect them in the manifest if that is what you meant)", len(prev), manifestPath)
+	if len(chosen) == 0 && len(offered) > 0 {
+		return fmt.Errorf("the selection came back empty while %d packs were enabled; %s left unchanged (deselect them in the manifest if that is what you meant)", len(offered), manifestPath)
 	}
 	man.SetEnabled(chosen)
 	if err := manifest.Save(manifestPath, man); err != nil {
@@ -327,7 +379,9 @@ func printVersion() {
 func resolveCookie(cfg config.Config, override string) (string, error) {
 	src := cfg.SessionSource
 	if override != "" {
-		src = override
+		// The flag is applied after config.Load has expanded its own paths, so a
+		// quoted --cookies "~/cookies.txt" needs the same treatment here.
+		src = config.ExpandHome(override)
 	}
 	return session.Resolve(src)
 }
@@ -409,16 +463,21 @@ usage:
   synty-sync update [ver]     update to the latest release (or a specific version)
   synty-sync version          print the version
 
-flags:
-  -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
-  -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
-  -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
-  -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
-  -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
-  -only <glob>        limit to packs whose slug matches the glob
-  -concurrency <n>    max concurrent item-page fetches
-  -dry-run            on sync, report only (no downloads or lockfile write)
-  -addr <host:port>   on select, the address to serve the page at (default: localhost:8787)
+flags (a subcommand accepts only the ones listed for it):
+  select status sync list
+    -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
+    -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
+  select status sync
+    -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
+    -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
+  status sync
+    -library <dir>      cache directory (overrides config / SYNTY_LIBRARY)
+    -only <glob>        limit to packs whose slug matches the glob
+    -concurrency <n>    max concurrent item-page fetches
+  sync
+    -dry-run            report only (no downloads or lockfile write)
+  select
+    -addr <host:port>   the address to serve the page at (default: localhost:8787)
 
 Auth is user-scoped: config.toml (customer id, session, cache default) lives in the
 config dir. The project manifest (synty-sync.toml: variant_includes + the pack

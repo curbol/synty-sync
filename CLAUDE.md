@@ -63,7 +63,7 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   URL each attempt) → build and save the new lockfile. `classify` is pure and unit-tested;
   the `Class` enum (New/Changed/DownloadNow/CacheMissing/Adopted/Unchanged) is the core
   diff logic. It also owns the semantic download guards (the body sniff) and the failure
-  model: `Report.Failures` plus `Report.Failed()`, which drives the exit status.
+  model: `Report.Failures` plus `Report.ActionableFailures()`, which drives the exit status.
 - `cache` — the local mirror, keyed by **file identity, not owning pack**, so a file
   bundled across packs is stored once. Two-phase writes: `Store` hashes into a
   `.synty-dl-*` temp and returns a `*Pending`, which the caller `Commit`s or `Discard`s.

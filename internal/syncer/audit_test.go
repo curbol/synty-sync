@@ -455,8 +455,8 @@ func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
 	if len(rep.Failures) == 0 {
 		t.Fatal("no failures reported for a run where every body was a document")
 	}
-	if !rep.Failed() {
-		t.Error("Failed() is false, so the command would exit 0 on a session that is not working")
+	if rep.ActionableFailures() == 0 {
+		t.Error("no actionable failures, so the command would exit 0 on a session that is not working")
 	}
 	if left := cachedFiles(t, lib); len(left) != 0 {
 		t.Errorf("a rejected body left files in the cache: %v", left)
@@ -500,8 +500,8 @@ func TestAPulledFileCostsItsFileNotTheRun(t *testing.T) {
 	if !rep.Failures[0].Gone {
 		t.Error("a 404 is not marked Gone, so the run exits non-zero on a file no re-run can fetch")
 	}
-	if rep.Failed() {
-		t.Error("Failed() is true for a file the store no longer serves")
+	if rep.ActionableFailures() != 0 {
+		t.Error("a file the store no longer serves counted as an actionable failure")
 	}
 	lf, err := lockfile.Load(lockPath)
 	if err != nil {
@@ -535,8 +535,8 @@ func TestARetryableFailureMakesTheRunFail(t *testing.T) {
 	if len(rep.Failures) != 1 || rep.Failures[0].Gone {
 		t.Fatalf("failures = %+v, want one failure that is not Gone", rep.Failures)
 	}
-	if !rep.Failed() {
-		t.Error("Failed() is false for a server error the next run might clear")
+	if rep.ActionableFailures() == 0 {
+		t.Error("no actionable failures for a server error the next run might clear")
 	}
 }
 

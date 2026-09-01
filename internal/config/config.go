@@ -5,7 +5,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,10 +38,14 @@ type fileConfig struct {
 // here.
 func ResolveDir(flag string) string {
 	if flag != "" {
-		return flag
+		return ExpandHome(flag)
 	}
+	// No shell expands an environment value or a quoted flag, so a "~" written in
+	// either arrives literally and would resolve to a directory of that name — the
+	// config file is then never found, and the run reports the setting it contains
+	// as missing.
 	if v := os.Getenv("SYNTY_CONFIG_DIR"); v != "" {
-		return v
+		return ExpandHome(v)
 	}
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return filepath.Join(v, "synty-sync")
@@ -76,12 +82,16 @@ func defaults() Config {
 func Load(dir string) (Config, error) {
 	c := defaults()
 	p := filepath.Join(dir, "config.toml")
-	if _, err := os.Stat(p); err == nil {
-		var fc fileConfig
-		md, err := toml.DecodeFile(p, &fc)
-		if err != nil {
-			return Config{}, err
-		}
+	// Only a file that is not there is "no config file". Anything else — a dangling
+	// symlink from a dotfiles tree, an unreadable file — is surfaced, since skipping it
+	// leaves the user reading an error that names a setting their file already holds.
+	var fc fileConfig
+	md, err := toml.DecodeFile(p, &fc)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return Config{}, err
+	default:
 		// A key that decodes to nothing is a typo, and silently dropping it leaves the
 		// user reading an error that names the setting their file already contains.
 		if un := md.Undecoded(); len(un) > 0 {
@@ -100,6 +110,7 @@ func Load(dir string) (Config, error) {
 		c.LibraryPath = v
 	}
 	c.LibraryPath = ExpandHome(c.LibraryPath)
+	c.SessionSource = ExpandHome(c.SessionSource)
 	return c, nil
 }
 

@@ -382,8 +382,10 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 	if err == nil {
 		t.Fatal("a sync that downloaded nothing it was asked for returned success")
 	}
-	if !strings.Contains(out.String(), "failed") {
-		t.Errorf("the report does not name the failures:\n%s", out.String())
+	// Not just the word "failed": printReport always emits a "failed: N" summary
+	// line, so matching that alone passes on a run with no failures at all.
+	if !strings.Contains(out.String(), "failed: pirate POLYGON_Pirate|Godot_4_5_1") {
+		t.Errorf("the report does not name the failed file:\n%s", out.String())
 	}
 }
 
@@ -588,5 +590,93 @@ func TestPrintReportNamesEveryOutcome(t *testing.T) {
 	}
 	if strings.Contains(wet.String(), "would download") {
 		t.Errorf("sync report hedges about work it already did:\n%s", wet.String())
+	}
+}
+
+// A file the store no longer serves fails forever, so it is reported without moving
+// the exit status — otherwise a single 404 makes every future sync exit non-zero and
+// the status stops meaning "something a re-run could fix". main restates the rule
+// that syncer.ActionableFailures owns, so it needs its own guard: swapping the call
+// for len(rep.Failures) leaves the rest of the suite green.
+func TestSyncWithAGoneFileReportsItWithoutFailingTheRun(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "synty-sync.toml")
+	if err := os.WriteFile(manifestPath, []byte(
+		"variant_includes = [\"Godot_*\"]\n\n[[pack]]\nslug = \"pirate\"\nname = \"Pirate\"\nenabled = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = `<input class='sky-pilot-search-input'>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Query().Get("line_items_page") == "1":
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
+				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate</a></div>`)
+		case r.URL.Query().Get("line_items_page") != "":
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
+		case strings.Contains(r.URL.Path, "/order_items/"):
+			fmt.Fprint(w, `<div class='sky-pilot-list-item'>
+			  <div class='sky-pilot-file-heading'>POLYGON_Pirate_Godot_4_5_1 | v1.0.0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+			  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/77?x=1'>Download</a></div>
+			</div>`)
+		default:
+			http.NotFound(w, r) // the store no longer serves this file
+		}
+	}))
+	defer srv.Close()
+
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	cfg := config.Config{LibraryPath: t.TempDir(), Concurrency: 2}
+	lockPath := filepath.Join(dir, "synty-sync.lock.json")
+
+	var out bytes.Buffer
+	restore := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = restore })
+
+	if err := runSyncOrStatus(context.Background(), client, cfg, manifestPath, lockPath, "", false); err != nil {
+		t.Errorf("a file the store no longer serves moved the exit status: %v", err)
+	}
+	if !strings.Contains(out.String(), "gone from the store") {
+		t.Errorf("the report does not name the file as gone:\n%s", out.String())
+	}
+	// The record of everything the run did is still written.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("no lockfile written: %v", err)
+	}
+}
+
+// select rewrites the committed manifest from what the page returns, and Enumerate
+// answers an unparseable library the same way it answers an empty one. Without the
+// refusal the syncer already makes for the lockfile, a markup change reconciles the
+// pack list down to nothing and Save deletes every [[pack]] entry the user had.
+func TestSelectRefusesToRewriteTheManifestFromAnEmptyLibrary(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "synty-sync.toml")
+	original := "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate\"\n  name = \"Pirate\"\n  enabled = false\n"
+	if err := os.WriteFile(manifestPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A logged-in page whose pack anchors no longer parse: the sentinel is there, so
+	// Enumerate reports an empty library rather than an expired session.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
+	}))
+	defer srv.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	if err := selectPacks(context.Background(), client, manifestPath, ln); err == nil {
+		t.Error("select rewrote the manifest from a library that listed no packs")
+	}
+	got, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Errorf("the committed manifest was rewritten:\n%s", got)
 	}
 }
