@@ -612,3 +612,18 @@ func warnContaining(warnings []string, sub string) []string {
 	}
 	return out
 }
+
+// seedRun does a first full sync and returns the lockfile it wrote. Most guards here
+// need that starting state before they change one thing and run again, and spelling it
+// out each time buries the change under eight lines of setup.
+func seedRun(t *testing.T, srv *httptest.Server, lockPath string, opts Options) lockfile.Lockfile {
+	t.Helper()
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lf
+}

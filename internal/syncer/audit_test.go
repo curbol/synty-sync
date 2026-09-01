@@ -45,13 +45,7 @@ func TestStrayFlatZipLeavesTrackedFileAlone(t *testing.T) {
 	lib := t.TempDir()
 	lockPath := filepath.Join(t.TempDir(), "lock.json")
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
 
 	var key string
 	var before lockfile.File
@@ -325,13 +319,7 @@ func TestAdoptsLayoutFileWithUntrackedPrior(t *testing.T) {
 		},
 	})
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
 	const key = "POLYGON_Pirate|Godot_4_5_1"
 	pirate := lf.Packs["polygon-pirate-pack"]
 	seeded := pirate.Files[key]
@@ -383,13 +371,7 @@ func TestFailedPruneIsReported(t *testing.T) {
 		},
 	})
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
 	prior := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
 
 	// Replace the cached file with a non-empty directory so the prune cannot succeed.
@@ -739,13 +721,7 @@ func TestFailedUpdateKeepsTheVerifiedCopyRecorded(t *testing.T) {
 
 	opts := runOpts(lib, false)
 	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, opts)
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	before := lf.Packs["polygon-pirate-pack"].Files[key]
 	if !before.Tracked {
@@ -802,13 +778,7 @@ func TestFailedUpdateKeepsOwningPacksInAgreement(t *testing.T) {
 		},
 	})
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
 
 	version, broken = "v2_0_0", true
 	only := runOpts(lib, false)
@@ -854,13 +824,7 @@ func TestFailedCacheMissingKeepsOwningPacksInAgreement(t *testing.T) {
 		},
 	})
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	seed := lf.Packs["polygon-pirate-pack"].Files[key]
 	if !seed.Tracked {
@@ -917,13 +881,7 @@ func TestADelistedFileIsReportedNotJustDropped(t *testing.T) {
 	})
 	opts := runOpts(lib, false)
 	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, opts)
 	const key = "POLYGON_Pirate|Godot_4_5_1"
 	seed := lf.Packs["polygon-pirate-pack"].Files[key]
 	if !seed.Tracked {
@@ -976,13 +934,7 @@ func TestARekeyedFileIsNotReportedAsOrphaned(t *testing.T) {
 	})
 	opts := runOpts(lib, false)
 	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lf := seedRun(t, srv, lockPath, opts)
 
 	variant = "Godot_4_6_0"
 	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)

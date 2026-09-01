@@ -52,15 +52,20 @@ func nativeMagic(t *testing.T) []byte {
 // itself, so the script can be run end to end without network.
 func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 	t.Helper()
-	var base string
+	// Resolved on the test goroutine, before any handler can run: platformLabel can
+	// call t.Skipf, and a Goexit from a server goroutine would abort a response
+	// mid-write rather than skip the test.
+	label := platformLabel(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"tag_name": "v9.9.9"}`)
 	})
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/tags/v9.9.9", func(w http.ResponseWriter, r *http.Request) {
 		// The shape the installer greps: a "url" line within three lines of "name".
-		fmt.Fprintf(w, "{\n  \"assets\": [\n    {\n      \"url\": \"%s/asset\",\n      \"x\": 1,\n      \"y\": 2,\n      \"name\": \"%s\"\n    }\n  ]\n}\n",
-			base, "synty-sync-9.9.9-"+platformLabel(t)+".zip")
+		// The asset URL is built from the request's own Host rather than a variable the
+		// test goroutine writes after the server is already serving.
+		fmt.Fprintf(w, "{\n  \"assets\": [\n    {\n      \"url\": \"http://%s/asset\",\n      \"x\": 1,\n      \"y\": 2,\n      \"name\": \"%s\"\n    }\n  ]\n}\n",
+			r.Host, "synty-sync-9.9.9-"+label+".zip")
 	})
 	mux.HandleFunc("/asset", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(asset)
@@ -70,7 +75,6 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 		w.Write(asset)
 	})
 	srv := httptest.NewServer(mux)
-	base = srv.URL
 	t.Cleanup(srv.Close)
 	return srv
 }

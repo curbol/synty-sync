@@ -245,8 +245,14 @@ func checkExecutable(path string) error {
 	if err != nil && n == 0 {
 		return fmt.Errorf("downloaded binary is empty")
 	}
-	head = head[:n]
-	magics, known := executableMagic[runtime.GOOS]
+	return checkMagic(runtime.GOOS, head[:n])
+}
+
+// checkMagic takes goos as a parameter for the same reason platformAsset does: CI runs
+// on one platform, and a table this build cannot execute is exactly where a wrong
+// constant hides until it swaps a web page over someone's working binary.
+func checkMagic(goos string, head []byte) error {
+	magics, known := executableMagic[goos]
 	if !known {
 		return nil
 	}
@@ -255,7 +261,7 @@ func checkExecutable(path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("downloaded file is not a %s executable", runtime.GOOS)
+	return fmt.Errorf("downloaded file is not a %s executable", goos)
 }
 
 // replaceBinary puts newPath at exe, which is the image currently executing.

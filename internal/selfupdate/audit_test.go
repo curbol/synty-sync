@@ -500,3 +500,41 @@ func TestPlatformAssetDoesNotMatchALabelItMerelyEndsWith(t *testing.T) {
 		t.Errorf("windows resolved to %q, want the win asset", got)
 	}
 }
+
+// The sniff is what stops a GitHub error page being chmod +x'd over a working install,
+// and CI runs on one platform, so two of the three tables are never executed. Feeding
+// each through the same function with goos as a parameter asserts all of them on one
+// machine — including that each platform rejects the others' magic.
+func TestExecutableMagicPerPlatform(t *testing.T) {
+	heads := map[string][]byte{
+		"linux":   []byte("\x7fELF\x02\x01"),
+		"darwin":  {0xcf, 0xfa, 0xed, 0xfe},
+		"windows": []byte("MZ\x90\x00"),
+	}
+	// The Mach-O variants the table accepts, all of which must pass on darwin.
+	for _, h := range [][]byte{{0xce, 0xfa, 0xed, 0xfe}, {0xca, 0xfe, 0xba, 0xbe}} {
+		if err := checkMagic("darwin", h); err != nil {
+			t.Errorf("darwin rejected a Mach-O variant %x: %v", h, err)
+		}
+	}
+	for goos, head := range heads {
+		if err := checkMagic(goos, head); err != nil {
+			t.Errorf("%s rejected its own magic: %v", goos, err)
+		}
+		for other := range heads {
+			if other == goos {
+				continue
+			}
+			if err := checkMagic(other, head); err == nil {
+				t.Errorf("%s accepted %s's magic %x", other, goos, head)
+			}
+		}
+		if err := checkMagic(goos, []byte("<!doctype html>")); err == nil {
+			t.Errorf("%s accepted an HTML error page as a binary", goos)
+		}
+	}
+	// A platform with no table is not second-guessed.
+	if err := checkMagic("plan9", []byte("whatever")); err != nil {
+		t.Errorf("an unknown platform was refused: %v", err)
+	}
+}
