@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -91,7 +92,11 @@ func platformLabel(t *testing.T) string {
 }
 
 // runInstaller runs install.sh with a throwaway HOME and no token in the
-// environment, returning its combined output and exit error.
+// environment, returning its combined output and exit error. Any token the caller
+// does supply is checked against the output before it is returned: the installer is
+// the half a user pipes into a shell, and its Go twin already guards this
+// (TestFetchReleaseErrorOmitsToken), so the check belongs where every test that
+// passes a token gets it rather than on the two that happen to remember.
 func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("unzip"); err != nil {
@@ -103,8 +108,20 @@ func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 	// in; clear the whole token path so the test controls it.
 	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH=/usr/bin:/bin")
 	cmd.Env = append(cmd.Env, env...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
+	for _, e := range env {
+		for _, key := range []string{"GITHUB_TOKEN=", "GH_TOKEN="} {
+			token, ok := strings.CutPrefix(e, key)
+			if !ok || token == "" {
+				continue
+			}
+			if strings.Contains(out, token) {
+				t.Errorf("the installer put %s in its output:\n%s", strings.TrimSuffix(key, "="), out)
+			}
+		}
+	}
+	return out, err
 }
 
 // The ordinary no-token case must say so. auth_header returns non-zero when it finds
@@ -189,4 +206,117 @@ func TestInstallerInstallsAndLeavesNoStagingBehind(t *testing.T) {
 			t.Errorf("a staging directory was left behind: %s", e.Name())
 		}
 	}
+}
+
+// releasePlatform is one entry of release.yml's platforms list: the pair it builds
+// for and the label the asset carries.
+type releasePlatform struct{ goos, goarch, label string }
+
+var platformEntryRe = regexp.MustCompile(`"([a-z0-9]+)/([a-z0-9]+)/([a-z0-9-]+)"`)
+
+// releasePlatforms reads what the release workflow actually builds. The installer
+// composes the same labels from uname output in its own language, and the workflow
+// is the only place they are really decided.
+func releasePlatforms(t *testing.T) []releasePlatform {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	_, rest, ok := strings.Cut(string(raw), "platforms=(")
+	if !ok {
+		t.Fatal("release.yml has no platforms=( ... ) list; this guard no longer reads what the workflow builds")
+	}
+	block, _, ok := strings.Cut(rest, ")")
+	if !ok {
+		t.Fatal("release.yml's platforms list is unterminated")
+	}
+	var out []releasePlatform
+	for _, m := range platformEntryRe.FindAllStringSubmatch(block, -1) {
+		out = append(out, releasePlatform{goos: m[1], goarch: m[2], label: m[3]})
+	}
+	if len(out) == 0 {
+		t.Fatal("no platforms parsed from release.yml")
+	}
+	return out
+}
+
+// unameStub puts a uname on PATH that answers for the given platform, so the
+// installer's real detect_platform can be run for a machine this one is not.
+func unameStub(t *testing.T, sysname, machine string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n  -s) echo %q ;;\n  -m) echo %q ;;\nesac\n", sysname, machine)
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The installer builds the asset label from uname in shell, the updater builds it in
+// Go, and release.yml decides what is actually published. Nothing compiles the three
+// together, so a label renamed in the workflow leaves every check green and breaks
+// installs on the one platform CI does not run. Run the real detect_platform for
+// each pair the workflow builds and hold it to the published label.
+func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
+	unameFor := map[string][]string{ // goos/goarch -> the uname -s, -m spellings to try
+		"darwin/amd64": {"Darwin", "x86_64"}, "darwin/arm64": {"Darwin", "arm64"},
+		"linux/amd64": {"Linux", "x86_64"}, "linux/arm64": {"Linux", "aarch64"},
+	}
+	// The other spelling of each arch, so both arms of the installer's case are held
+	// to the same label rather than only the one this machine reports.
+	alias := map[string]string{"x86_64": "amd64", "aarch64": "arm64", "arm64": "aarch64"}
+
+	covered := 0
+	for _, p := range releasePlatforms(t) {
+		if p.goos == "windows" {
+			continue // install.sh refuses Windows by design; the release zip is used directly
+		}
+		un, ok := unameFor[p.goos+"/"+p.goarch]
+		if !ok {
+			t.Errorf("release.yml builds %s/%s but this guard does not know its uname output", p.goos, p.goarch)
+			continue
+		}
+		covered++
+		for _, machine := range []string{un[1], alias[un[1]]} {
+			t.Run(p.label+"/"+machine, func(t *testing.T) {
+				out := runInstallerAs(t, unameStub(t, un[0], machine))
+				// The whole line, terminator included: a label that merely starts with
+				// the expected one ("mac-applesilicon" for "mac-apple") names an asset
+				// no release publishes and must not read as a match.
+				want := "INFO: platform: " + p.label + "\n"
+				if !strings.Contains(out, want) {
+					t.Errorf("install.sh reported no %q for uname -s %q -m %q; release.yml publishes %s.zip\n%s",
+						want, un[0], machine, p.label, out)
+				}
+			})
+		}
+	}
+	if covered == 0 {
+		t.Fatal("no installable platform found in release.yml")
+	}
+	// The label this package's own test harness serves has to be the same one, or the
+	// end-to-end installer tests would pass against an asset no release publishes.
+	for _, p := range releasePlatforms(t) {
+		if p.goos == runtime.GOOS && p.goarch == runtime.GOARCH && platformLabel(t) != p.label {
+			t.Errorf("platformLabel = %q, want the %q release.yml publishes for this host", platformLabel(t), p.label)
+		}
+	}
+}
+
+// runInstallerAs runs install.sh with pathPrefix ahead of the system directories and
+// an unreachable release, so it gets as far as announcing the platform and no
+// further. Its non-zero exit is the expected outcome, not a failure.
+func runInstallerAs(t *testing.T, pathPrefix string) string {
+	t.Helper()
+	cmd := exec.Command("bash", "install.sh")
+	cmd.Env = []string{
+		"HOME=" + t.TempDir(),
+		"PATH=" + pathPrefix + ":/usr/bin:/bin",
+		"GITHUB_TOKEN=", "GH_TOKEN=",
+		"SYNTY_INSTALL_API=http://127.0.0.1:1",
+		"SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1",
+	}
+	out, _ := cmd.CombinedOutput()
+	return string(out)
 }
