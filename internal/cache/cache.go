@@ -1,5 +1,5 @@
 // Package cache manages the local library mirror: file-identity-keyed layout,
-// hashed downloads, and folding pre-existing flat zips into the layout.
+// hashed downloads, and folding pre-existing flat files into the layout.
 // The cache is expendable; durability of used assets lives in the game repo.
 //
 // Writes are two-phase: Store leaves the bytes in a temp file so the caller's checks
@@ -221,7 +221,7 @@ func Head(libraryRoot, relPath string, n int) ([]byte, error) {
 }
 
 // Hash returns the sha256 and byte size of a cached file (used to adopt a file
-// migrated in from a pre-existing flat zip).
+// migrated in from a pre-existing flat file).
 func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {
 	full, err := resolve(libraryRoot, relPath)
 	if err != nil {
@@ -253,7 +253,7 @@ func Remove(libraryRoot, relPath string) error {
 	return err
 }
 
-// Wanted identifies a file to look for among pre-existing flat zips.
+// Wanted identifies a file to look for among pre-existing flat files.
 type Wanted struct {
 	FileID    int
 	FileToken string
@@ -261,7 +261,7 @@ type Wanted struct {
 	Version   string
 }
 
-// MigrateResult records one flat zip folded into the layout.
+// MigrateResult records one flat file folded into the layout.
 type MigrateResult struct {
 	FileID  int
 	From    string // original filename
@@ -280,10 +280,10 @@ func normalizeName(s string) string {
 	return nonAlnum.ReplaceAllString(strings.ToLower(s), "")
 }
 
-// Migrate folds pre-existing flat *.zip files at the library root into the
-// file-identity layout, matching each wanted file by a normalized name key (so
-// variant-rendering and (N) differences don't block a match). Unmatched zips are
-// left untouched and will simply re-download. It is best-effort and idempotent.
+// Migrate folds pre-existing flat files at the library root into the file-identity
+// layout, matching each wanted file by a normalized name key (so variant-rendering,
+// extension and (N) differences don't block a match). Unmatched files are left
+// untouched and will simply re-download. It is best-effort and idempotent.
 func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	entries, err := os.ReadDir(libraryRoot)
 	if err != nil {
@@ -299,7 +299,11 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	}
 	var results []MigrateResult
 	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".zip") {
+		// Matching on the normalized name, which drops the extension, is what lets a
+		// Unity pack's .unitypackage fold in beside a .zip. An abandoned download temp
+		// is skipped outright: a partial transfer can carry enough of the name to
+		// normalize onto a wanted file, and the caller hashes whatever lands here.
+		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
 			continue
 		}
 		w, ok := byNorm[normalizeName(e.Name())]
@@ -314,7 +318,7 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 		target := filepath.Join(dest, e.Name())
 		if _, err := os.Stat(target); err == nil {
 			// The layout copy wins. os.Rename would replace it silently, and the caller
-			// hashes whatever lands here and records that sha, so a stale flat zip would
+			// hashes whatever lands here and records that sha, so a stale flat file would
 			// be adopted as verified content.
 			continue
 		}

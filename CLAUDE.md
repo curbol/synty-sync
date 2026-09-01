@@ -68,7 +68,8 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   bundled across packs is stored once. Two-phase writes: `Store` hashes into a
   `.synty-dl-*` temp and returns a `*Pending`, which the caller `Commit`s or `Discard`s.
   `Verify` (exact recorded size) / `VerifyDeep` (sha) / `Hash` / `Remove` / `SweepTemps`;
-  `Migrate` folds pre-existing flat zips into the layout.
+  `Migrate` folds pre-existing flat files into the layout, matching on a name key that
+  drops the extension.
 - `lockfile` — `synty-sync.lock.json` (beside the manifest, committed with the consuming
   project): the authoritative record of owned packs, versions, checksums, and which files
   are downloaded. `advertisedSize` (the portal's rounded label, refreshed every run) is

@@ -127,23 +127,55 @@ func TestMigrateDoesNotClobberLayoutCopy(t *testing.T) {
 	}
 }
 
-// Migrate considers a .ZIP (case-insensitively) but the name key stripped the
-// extension case-sensitively, so it could never match one and silently left
-// gigabytes to re-download.
-func TestMigrateMatchesUppercaseExtension(t *testing.T) {
+// Synty serves a Unity pack as .unitypackage and everything else as .zip, and an
+// exporter can upper-case the extension. Migrate matches on the normalized name,
+// which drops the extension, so a filter on one of them silently left the others
+// flat at the root to re-download — gigabytes, with nothing said about it.
+func TestMigrateFoldsAnyExtension(t *testing.T) {
+	for _, name := range []string{
+		"TOK_Godot_4_5_1_v1.zip",
+		"TOK_Godot_4_5_1_v1.ZIP",
+		"TOK_Godot_4_5_1_v1.unitypackage",
+		"TOK_Godot_4_5_1_v1(1).zip",
+	} {
+		t.Run(name, func(t *testing.T) {
+			lib := t.TempDir()
+			if err := os.WriteFile(filepath.Join(lib, name), []byte("BYTES"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%s was not migrated: %+v", name, res)
+			}
+			if _, err := os.Stat(filepath.Join(lib, filepath.FromSlash(res[0].RelPath))); err != nil {
+				t.Errorf("migrated file missing at %s", res[0].RelPath)
+			}
+		})
+	}
+}
+
+// Migrate no longer filters by extension, which puts abandoned download temps in
+// front of it for the first time. A partial transfer can carry enough of the name to
+// normalize onto a wanted file, and moving one into the layout hands the caller a
+// truncated body to hash and record as that file's truth.
+func TestMigrateSkipsAnAbandonedTemp(t *testing.T) {
 	lib := t.TempDir()
-	if err := os.WriteFile(filepath.Join(lib, "TOK_Godot_4_5_1_v1.ZIP"), []byte("BYTES"), 0o644); err != nil {
+	temp := filepath.Join(lib, tempPrefix+"TOK_Godot_4_5_1_v1")
+	if err := os.WriteFile(temp, []byte("PARTIAL"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 1 {
-		t.Fatalf("a .ZIP was not migrated: %+v", res)
+	if len(res) != 0 {
+		t.Errorf("an in-flight download temp was migrated as finished content: %+v", res)
 	}
-	if _, err := os.Stat(filepath.Join(lib, filepath.FromSlash(res[0].RelPath))); err != nil {
-		t.Errorf("migrated file missing at %s", res[0].RelPath)
+	if _, err := os.Stat(temp); err != nil {
+		t.Errorf("the temp was moved out from under a running download: %v", err)
 	}
 }
 
