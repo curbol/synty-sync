@@ -82,13 +82,13 @@ func defaults() Config {
 func Load(dir string) (Config, error) {
 	c := defaults()
 	p := filepath.Join(dir, "config.toml")
-	// Only a file that is not there is "no config file". Anything else — a dangling
-	// symlink from a dotfiles tree, an unreadable file — is surfaced, since skipping it
-	// leaves the user reading an error that names a setting their file already holds.
+	// Only a path with nothing at it is "no config file". Anything else is surfaced,
+	// since skipping it leaves the user reading an error that names a setting their
+	// file already holds.
 	var fc fileConfig
 	md, err := toml.DecodeFile(p, &fc)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case err != nil && absentConfig(p, err):
 	case err != nil:
 		return Config{}, err
 	default:
@@ -139,4 +139,16 @@ func ExpandHome(p string) string {
 		}
 	}
 	return p
+}
+
+// absentConfig reports whether the decode failed because nothing is at the path at
+// all. A dangling symlink — a dotfiles tree that has not been checked out — opens with
+// the same ENOENT as an absent file, so Lstat is what separates them. Skipping one in
+// silence leaves the run reporting the very setting the file holds as missing.
+func absentConfig(path string, err error) bool {
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	_, lerr := os.Lstat(path)
+	return errors.Is(lerr, fs.ErrNotExist)
 }

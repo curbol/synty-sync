@@ -6,11 +6,15 @@ package session
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +76,13 @@ func FromCurl(content string) (string, error) {
 func FromFile(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// A source that is neither a browser name nor a readable file is far more often
+		// a mistyped browser than a missing file, and "open firefx: no such file or
+		// directory" does not say so.
+		if errors.Is(err, fs.ErrNotExist) && !strings.ContainsAny(path, `/\.`) {
+			return "", fmt.Errorf("no session source %q: use %s, or a path to a cookies.txt / pasted-curl file",
+				path, strings.Join(browserNames, " or "))
+		}
 		return "", err
 	}
 	content := string(raw)
@@ -99,11 +110,43 @@ func isCurlPaste(content string) bool {
 	return false
 }
 
-// browserBases maps a session source name to its Gecko profile base dir (relative
-// to home). Zen is a Firefox fork, so its cookies.sqlite reads identically.
-var browserBases = map[string]string{
-	"firefox": filepath.Join(".mozilla", "firefox"),
-	"zen":     filepath.Join(".config", "zen"),
+// browserNames are the Gecko browsers this tool can read cookies from. Zen is a
+// Firefox fork, so its cookies.sqlite reads identically.
+var browserNames = []string{"firefox", "zen"}
+
+// browserBases maps a session source name to its Gecko profile base dirs, relative to
+// home, for the platform in hand. Releases ship macOS and Windows binaries, so the
+// Linux paths alone would leave the zero-paste default broken out of the box on two
+// of the three.
+func browserBases(goos, name string) []string {
+	switch goos {
+	case "darwin":
+		switch name {
+		case "firefox":
+			return []string{filepath.Join("Library", "Application Support", "Firefox")}
+		case "zen":
+			return []string{filepath.Join("Library", "Application Support", "zen")}
+		}
+	case "windows":
+		switch name {
+		case "firefox":
+			return []string{filepath.Join("AppData", "Roaming", "Mozilla", "Firefox")}
+		case "zen":
+			return []string{filepath.Join("AppData", "Roaming", "zen")}
+		}
+	default:
+		switch name {
+		case "firefox":
+			return []string{filepath.Join(".mozilla", "firefox")}
+		case "zen":
+			return []string{filepath.Join(".config", "zen"), filepath.Join(".zen")}
+		}
+	}
+	return nil
+}
+
+func knownBrowser(name string) bool {
+	return slices.Contains(browserNames, name)
 }
 
 // Resolve turns a session source into the syntystore.com Cookie header. The source
@@ -113,7 +156,7 @@ func Resolve(src string) (string, error) {
 	if src == "" {
 		src = "firefox"
 	}
-	if _, ok := browserBases[src]; ok {
+	if knownBrowser(src) {
 		return FromBrowser(src)
 	}
 	return FromFile(src)
@@ -125,19 +168,27 @@ func FromBrowser(name string) (string, error) {
 	if p := os.Getenv("SYNTY_BROWSER_PROFILE"); p != "" {
 		return geckoCookieHeader(filepath.Join(p, "cookies.sqlite"))
 	}
-	rel, ok := browserBases[name]
-	if !ok {
-		return "", fmt.Errorf("unknown browser %q (use firefox, zen, or a cookies file path)", name)
+	if !knownBrowser(name) {
+		return "", fmt.Errorf("unknown browser %q (use %s, or a cookies file path)", name, strings.Join(browserNames, ", "))
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	db, err := locateGeckoCookieDB(filepath.Join(home, rel))
-	if err != nil {
-		return "", err
+	bases := browserBases(runtime.GOOS, name)
+	if len(bases) == 0 {
+		return "", fmt.Errorf("no known %s profile location on %s (set SYNTY_BROWSER_PROFILE)", name, runtime.GOOS)
 	}
-	return geckoCookieHeader(db)
+	var errs []error
+	for _, rel := range bases {
+		db, err := locateGeckoCookieDB(filepath.Join(home, rel))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return geckoCookieHeader(db)
+	}
+	return "", errors.Join(errs...)
 }
 
 func geckoCookieHeader(dbPath string) (string, error) {
@@ -210,10 +261,13 @@ func joinCookies(pairs map[string]string) (string, error) {
 	return b.String(), nil
 }
 
-// walSidecars are the files SQLite keeps beside a WAL-mode database. A running
-// browser can hold recent cookie writes in -wal for the whole session, so the copy
-// has to bring them along or it reads a stale snapshot.
-var walSidecars = []string{"-wal", "-shm"}
+// walSidecars are the files SQLite keeps beside a WAL-mode database that the copy has
+// to bring along. A running browser can hold recent cookie writes in -wal for the
+// whole session, so without it the copy reads a stale snapshot and the user is told
+// the session they just refreshed has expired. The -shm wal-index is deliberately not
+// copied: SQLite rebuilds it from the -wal, and copying it second would let a write
+// landing between the two describe frames the copied -wal does not have.
+var walSidecars = []string{"-wal"}
 
 // copyDBToTemp copies a SQLite database and its WAL sidecars into a fresh temp
 // directory, keeping the basename so SQLite finds the sidecars on open. It returns
@@ -262,6 +316,10 @@ func copyFile(src, dst string) error {
 // Profile folder names vary ("x.default-release", "y.Default (release)", …), so it
 // prefers a default+release profile, then any default, then the most-recently-used.
 func locateGeckoCookieDB(base string) (string, error) {
+	// macOS and Windows nest the profiles one level further down than Linux does.
+	if entries, err := os.ReadDir(filepath.Join(base, "Profiles")); err == nil && len(entries) > 0 {
+		base = filepath.Join(base, "Profiles")
+	}
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return "", fmt.Errorf("browser profile dir %s: %w (set SYNTY_BROWSER_PROFILE)", base, err)

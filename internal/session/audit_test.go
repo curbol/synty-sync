@@ -208,11 +208,22 @@ func newCookieDB(t *testing.T, wal bool, rows ...[3]string) string {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(`CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT)`); err != nil {
+	// Firefox's real table, not a three-column stand-in: a query that starts reading
+	// expiry, path or originAttributes has to be testable without a live profile.
+	if _, err := db.Exec(`CREATE TABLE moz_cookies (
+		id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '',
+		name TEXT, value TEXT, host TEXT, path TEXT, expiry INTEGER,
+		lastAccessed INTEGER, creationTime INTEGER, isSecure INTEGER, isHttpOnly INTEGER,
+		inBrowserElement INTEGER DEFAULT 0, sameSite INTEGER DEFAULT 0,
+		rawSameSite INTEGER DEFAULT 0, schemeMap INTEGER DEFAULT 0)`); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range rows {
-		if _, err := db.Exec(`INSERT INTO moz_cookies VALUES (?,?,?)`, r[0], r[1], r[2]); err != nil {
+		if _, err := db.Exec(
+			`INSERT INTO moz_cookies (originAttributes, name, value, host, path, expiry,
+			 lastAccessed, creationTime, isSecure, isHttpOnly)
+			 VALUES ('', ?, ?, ?, '/', 4102444800, 0, 0, 1, 1)`,
+			r[1], r[2], r[0]); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -247,5 +258,45 @@ func TestCookieDBWithNoStoreCookies(t *testing.T) {
 	}
 	if strings.Contains(got, "junk") {
 		t.Errorf("a non-syntystore cookie was forwarded: %q", got)
+	}
+}
+
+// Releases ship macOS and Windows binaries, and browser reading is the documented
+// zero-paste default. Linux-only profile bases left that default broken out of the
+// box on two of the three platforms, with --cookies as the only way through.
+func TestEveryReleasedPlatformHasAProfileLocation(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, name := range browserNames {
+			if len(browserBases(goos, name)) == 0 {
+				t.Errorf("no %s profile base for %s", name, goos)
+			}
+		}
+	}
+}
+
+// SYNTY_BROWSER_PROFILE is the documented escape hatch for a profile in a place the
+// built-in bases do not name, and it is the only route for a layout this build has
+// not seen.
+func TestBrowserProfileOverrideIsHonored(t *testing.T) {
+	db := newCookieDB(t, false, [3]string{"syntystore.com", "session", "abc"})
+	t.Setenv("SYNTY_BROWSER_PROFILE", filepath.Dir(db))
+	got, err := FromBrowser("firefox")
+	if err != nil {
+		t.Fatalf("FromBrowser with an explicit profile: %v", err)
+	}
+	if got != "session=abc" {
+		t.Errorf("Cookie header = %q, want session=abc", got)
+	}
+}
+
+// A source that is neither a browser name nor a path is far more often a mistyped
+// browser than a missing file, and the bare open error does not say so.
+func TestMistypedBrowserNamesTheOnesThatWork(t *testing.T) {
+	_, err := Resolve("firefx")
+	if err == nil {
+		t.Fatal("a mistyped browser name resolved")
+	}
+	if !strings.Contains(err.Error(), "firefox") {
+		t.Errorf("error does not name the browsers that work: %v", err)
 	}
 }
