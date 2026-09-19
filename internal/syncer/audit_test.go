@@ -1582,3 +1582,33 @@ func TestTruncatedArchiveIsRefusedWithoutAZipExtension(t *testing.T) {
 		t.Error("the lockfile recorded the truncated size as the file's truth")
 	}
 }
+
+// Selection is opt-in, and the allowlist has to narrow what the run *fetches*, not
+// just what it records. TestPackSelectedLimitsToAllowlist asserts the diff and the
+// lockfile, both of which would still come out right if filterPacks ran after
+// fetchAll — leaving the run reading item pages for every pack the user owns and
+// declined, a request per pack against the store on every sync.
+func TestADisabledPacksItemPageIsNeverRequested(t *testing.T) {
+	var fetched int32
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			atomic.AddInt32(&fetched, 1)
+			return "", false // fall through to the real fixture
+		},
+	})
+	lib := t.TempDir()
+	opts := runOpts(lib, true)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), "", opts)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	// The library fixture lists four packs; only the enabled one may be read.
+	if got := atomic.LoadInt32(&fetched); got != 1 {
+		t.Errorf("read %d item pages, want 1: the allowlist has to narrow the fetch, not just the record", got)
+	}
+	if rep.PacksInScope != 1 {
+		t.Errorf("PacksInScope = %d, want 1", rep.PacksInScope)
+	}
+}

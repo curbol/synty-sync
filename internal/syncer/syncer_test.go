@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -251,8 +252,12 @@ func TestEndToEndSync(t *testing.T) {
 			t.Errorf("first run: %s/%s class=%v, want New", d.PackSlug, d.Key, d.Class)
 		}
 	}
-	if len(warnContaining(rep.Warnings, "Elven Warriors")) == 0 {
-		t.Errorf("expected no-download warning for Elven Warriors, got %v", rep.Warnings)
+	// The pack is Unity-only and the filter is Godot+source, so the warning has to be
+	// the "nothing matches the filter" one. Matching on the pack name alone would be
+	// satisfied by any warning that happened to mention it — an unrecognized variant,
+	// an archived file, a refused adoption — each of which means something else.
+	if len(warnContaining(rep.Warnings, "no downloadable variant for \"Elven Warriors")) == 0 {
+		t.Errorf("expected the nothing-matches-the-filter warning for Elven Warriors, got %v", rep.Warnings)
 	}
 
 	// Lockfile written; bundled file shares one cachePath across packs.
@@ -326,91 +331,101 @@ func TestCacheMissingRedownloads(t *testing.T) {
 	}
 }
 
-func TestMigrateAdoptsExistingFlatZip(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	// Pre-place a Synty-named flat zip matching POLYGON_Pirate Godot_4_5_1 v1_0_1.
-	flat := filepath.Join(lib, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	if err := os.WriteFile(flat, packageBytes("EXISTING-CONTENT"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	adopted := false
-	for _, d := range rep.Adopted {
-		if d.FileID == 2282645 {
-			adopted = true
-		}
-	}
-	if !adopted {
-		t.Errorf("fileId 2282645 not adopted: %+v", rep.Adopted)
-	}
-	for _, d := range rep.Downloaded {
-		if d.FileID == 2282645 {
-			t.Error("2282645 was downloaded; should have been adopted from the flat zip")
-		}
-	}
-	lf, _ := lockfile.Load(lockPath)
-	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
-	if !f.Tracked || f.CachePath == "" {
-		t.Fatalf("adopted entry not tracked: %+v", f)
-	}
-	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
-	if string(got) != string(packageBytes("EXISTING-CONTENT")) {
-		t.Errorf("adopted content changed: %q (re-downloaded instead of adopted?)", got)
-	}
-	if _, err := os.Stat(flat); err == nil {
-		t.Error("flat zip still at library root after adopt")
-	}
-}
+// Both adoption paths: a Synty-named zip sitting flat at the library root (folded
+// into the layout first) and one already in the <fileToken>/ layout that no lockfile
+// records — the state a lost or degraded lockfile leaves against a populated cache.
+// They differ only in where the file starts out, so the rest of the scenario is
+// shared: the file is taken rather than re-downloaded, its own bytes are what end up
+// recorded, and nothing rewrote them on the way.
+func TestExistingFilesAreAdoptedRatherThanReDownloaded(t *testing.T) {
+	// fileId 2282645 is POLYGON_Pirate Godot_4_5_1 v1_0_1 in the committed fixture.
+	const fileID = 2282645
+	const name = "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip"
 
-func TestAdoptsExistingLayoutFileWithoutLockfile(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	// A zip already sitting in the <fileToken>/ layout that no lockfile records — the
-	// state after a lost/degraded lockfile against a populated cache.
-	dir := filepath.Join(lib, "POLYGON_Pirate")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	layoutZip := filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	if err := os.WriteFile(layoutZip, packageBytes("LAYOUT-CONTENT"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		// plant writes the file and returns a path that must no longer exist
+		// afterwards, or "" when nothing should have moved.
+		plant func(t *testing.T, lib string) (movedFrom string)
+	}{
+		{
+			name:    "flat at the library root",
+			content: "FLAT-CONTENT",
+			plant: func(t *testing.T, lib string) string {
+				flat := filepath.Join(lib, name)
+				if err := os.WriteFile(flat, packageBytes("FLAT-CONTENT"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return flat // Migrate moves it into the layout
+			},
+		},
+		{
+			name:    "already in the layout, untracked",
+			content: "LAYOUT-CONTENT",
+			plant: func(t *testing.T, lib string) string {
+				dir := filepath.Join(lib, "POLYGON_Pirate")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), packageBytes("LAYOUT-CONTENT"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return "" // it is already where it belongs
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			movedFrom := tc.plant(t, lib)
 
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatal(err)
-	}
+			rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range rep.Downloaded {
+				if d.FileID == fileID {
+					t.Error("the existing file was re-downloaded; adoption is what saves the transfer")
+				}
+			}
+			adopted := false
+			for _, d := range rep.Adopted {
+				if d.FileID == fileID {
+					adopted = true
+				}
+			}
+			if !adopted {
+				t.Errorf("fileId %d not adopted: %+v", fileID, rep.Adopted)
+			}
 
-	// fileId 2282645 (POLYGON_Pirate Godot_4_5_1 v1_0_1) is adopted from the layout, not re-downloaded.
-	for _, d := range rep.Downloaded {
-		if d.FileID == 2282645 {
-			t.Error("layout file 2282645 was re-downloaded; want adopted")
-		}
-	}
-	adopted := false
-	for _, d := range rep.Adopted {
-		if d.FileID == 2282645 {
-			adopted = true
-		}
-	}
-	if !adopted {
-		t.Errorf("fileId 2282645 not adopted from the layout: %+v", rep.Adopted)
-	}
-	// Adopted, not overwritten by a download.
-	lf, _ := lockfile.Load(lockPath)
-	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
-	if !f.Tracked || f.CachePath == "" {
-		t.Fatalf("adopted layout file not tracked: %+v", f)
-	}
-	got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
-	if string(got) != string(packageBytes("LAYOUT-CONTENT")) {
-		t.Errorf("adopted content changed to %q (re-downloaded instead of adopted?)", got)
+			lf, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+			if !f.Tracked || f.CachePath == "" {
+				t.Fatalf("adopted entry not tracked: %+v", f)
+			}
+			// The adopted bytes are what the record names — a download would have
+			// replaced them with the fixture's.
+			got, err := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(packageBytes(tc.content)) {
+				t.Errorf("adopted content changed to %q (re-downloaded instead of adopted?)", got)
+			}
+			if f.SizeBytes != int64(len(got)) {
+				t.Errorf("recorded sizeBytes %d, want the %d bytes on disk", f.SizeBytes, len(got))
+			}
+			if movedFrom != "" {
+				if _, err := os.Stat(movedFrom); err == nil {
+					t.Errorf("%s is still at the library root after being folded into the layout", movedFrom)
+				}
+			}
+		})
 	}
 }
 
@@ -439,33 +454,61 @@ func TestPackSelectedLimitsToAllowlist(t *testing.T) {
 	}
 }
 
-func TestDisabledPackPreservedInLockfile(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
+// Both ways a run can be narrowed converge on the same carry-forward in
+// buildLockfile: a pack the manifest disables and a pack outside --only are equally
+// out of scope, and neither may leave the committed record. Tabled so the two cannot
+// drift into testing different things, and so the next narrowing mechanism has an
+// obvious place to land.
+func TestNarrowingARunPreservesTheOtherPacksRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		narrow func(*Options)
+	}{
+		{"disabled in the manifest", func(o *Options) {
+			o.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+		}},
+		{"outside --only", func(o *Options) { o.OnlyGlob = "polygon-pirate-pack" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
 
-	// First sync with every pack enabled populates the lockfile.
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatal(err)
-	}
-	lf, _ := lockfile.Load(lockPath)
-	if _, ok := lf.Packs["polygon-dungeon-pack"]; !ok {
-		t.Fatalf("setup: dungeon pack should be present after a full sync")
-	}
+			// A full sync first, so there is a record to lose.
+			if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+				t.Fatal(err)
+			}
+			seeded, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, slug := range []string{"polygon-pirate-pack", "polygon-dungeon-pack", "polygon-fantasy-kingdom-pack"} {
+				if _, ok := seeded.Packs[slug]; !ok {
+					t.Fatalf("setup: %s missing after a full sync", slug)
+				}
+			}
 
-	// Disable the dungeon pack, then re-sync: its record (and downloaded files) must
-	// survive rather than being silently erased from the committed lockfile.
-	opts := runOpts(lib, false)
-	opts.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
-	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := lockfile.Load(lockPath)
-	if _, ok := after.Packs["polygon-dungeon-pack"]; !ok {
-		t.Error("disabled pack was dropped from the lockfile")
-	}
-	if _, ok := after.Packs["polygon-pirate-pack"]; !ok {
-		t.Error("enabled pack missing from the lockfile")
+			opts := runOpts(lib, false)
+			tc.narrow(&opts)
+			if _, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts); err != nil {
+				t.Fatal(err)
+			}
+			after, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := after.Packs["polygon-pirate-pack"]; !ok {
+				t.Error("the in-scope pack is missing from the lockfile")
+			}
+			// Carried forward means untouched, not merely present: the entries keep the
+			// paths and shas the full sync recorded.
+			for _, slug := range []string{"polygon-dungeon-pack", "polygon-fantasy-kingdom-pack"} {
+				if !reflect.DeepEqual(after.Packs[slug], seeded.Packs[slug]) {
+					t.Errorf("out-of-scope %s was rewritten:\n before %+v\n after  %+v",
+						slug, seeded.Packs[slug], after.Packs[slug])
+				}
+			}
+		})
 	}
 }
 
@@ -533,38 +576,6 @@ func TestDownloadRetriesForbidden(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 3 {
 		t.Errorf("403 should keep retrying: %d attempts, want 3", n)
-	}
-}
-
-func TestOnlyGlobPreservesOtherLockfilePacks(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-
-	// Full sync populates the lockfile with several packs.
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatal(err)
-	}
-	lf, _ := lockfile.Load(lockPath)
-	if _, ok := lf.Packs["polygon-dungeon-pack"]; !ok {
-		t.Fatalf("setup: dungeon pack should be in the lockfile after a full sync")
-	}
-
-	// A scoped sync (--only pirate) touches only pirate; it must not drop the
-	// out-of-scope packs from the lockfile.
-	opts := runOpts(lib, false)
-	opts.OnlyGlob = "polygon-pirate-pack"
-	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := lockfile.Load(lockPath)
-	if _, ok := after.Packs["polygon-pirate-pack"]; !ok {
-		t.Error("scoped pack missing after --only sync")
-	}
-	for _, slug := range []string{"polygon-dungeon-pack", "polygon-fantasy-kingdom-pack"} {
-		if _, ok := after.Packs[slug]; !ok {
-			t.Errorf("--only sync dropped out-of-scope pack %q from the lockfile", slug)
-		}
 	}
 }
 

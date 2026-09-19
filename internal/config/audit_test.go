@@ -78,3 +78,35 @@ func TestLoadReportsAConfigItCannotRead(t *testing.T) {
 		t.Error("a config.toml that could not be read was silently skipped")
 	}
 }
+
+// The documented precedence is --config › $SYNTY_CONFIG_DIR › $XDG_CONFIG_HOME ›
+// ~/.config. TestResolveDir walks the rungs one at a time with everything above each
+// one cleared, so it says which rung is *reachable* but nothing about which wins — an
+// implementation that consulted XDG_CONFIG_HOME before SYNTY_CONFIG_DIR, or the
+// environment before the flag, passes it unchanged. Order is the whole contract of
+// this function: getting it wrong points the tool at a config dir the user is not
+// editing, and it then reports the settings their file already holds as missing.
+func TestResolveDirPrecedenceWithEveryRungSetAtOnce(t *testing.T) {
+	t.Setenv("SYNTY_CONFIG_DIR", "/from/synty-env")
+	t.Setenv("XDG_CONFIG_HOME", "/from/xdg")
+
+	// All three set: the flag wins.
+	if got := ResolveDir("/from/flag"); got != "/from/flag" {
+		t.Errorf("with every rung set, ResolveDir = %q, want the flag to win", got)
+	}
+	// Flag gone: SYNTY_CONFIG_DIR beats XDG.
+	if got := ResolveDir(""); got != "/from/synty-env" {
+		t.Errorf("ResolveDir = %q, want SYNTY_CONFIG_DIR to beat XDG_CONFIG_HOME", got)
+	}
+	// SYNTY_CONFIG_DIR gone: XDG beats the home fallback.
+	t.Setenv("SYNTY_CONFIG_DIR", "")
+	want := filepath.Join("/from/xdg", "synty-sync")
+	if got := ResolveDir(""); got != want {
+		t.Errorf("ResolveDir = %q, want %q", got, want)
+	}
+	// And only with both cleared does the home fallback apply.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got := ResolveDir(""); !strings.HasSuffix(got, filepath.Join(".config", "synty-sync")) {
+		t.Errorf("ResolveDir = %q, want the ~/.config fallback", got)
+	}
+}
