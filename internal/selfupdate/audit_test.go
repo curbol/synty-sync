@@ -486,10 +486,7 @@ func TestRunReportsAReleaseWithNoAssetForThisPlatform(t *testing.T) {
 // hand a Windows user a Mach-O binary the moment a release adds a darwin universal
 // asset — and the label guard would still pass, since "darwin" is a label it built.
 func TestPlatformAssetDoesNotMatchALabelItMerelyEndsWith(t *testing.T) {
-	rel := &release{Assets: []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	}{
+	rel := &release{Assets: []asset{
 		{Name: "synty-sync-1.0.0-darwin.zip", URL: "mach-o"},
 		{Name: "synty-sync-1.0.0-win.zip", URL: "pe"},
 	}}

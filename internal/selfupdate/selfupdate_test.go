@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,22 +13,34 @@ import (
 // list this test writes down would just be a fourth copy of them: renaming a label
 // in the workflow would leave every check green and ship "no asset for your
 // platform" to the one platform CI does not run on. So read the workflow.
+//
+// Both directions are checked against assetSuffix rather than against a synthesized
+// release. Asking platformAsset instead cannot see a label the workflow *stopped*
+// publishing: it only ever returns a URL for an asset that is present, so a reverse
+// check built on it passes by construction, and dropping a platform from the array
+// silently drops it from this test too.
 func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 	built := releasePlatforms(t)
-	rel := &release{Assets: []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	}{}}
+	published := map[string]bool{}
 	for _, p := range built {
-		rel.Assets = append(rel.Assets, struct {
-			Name string `json:"name"`
-			URL  string `json:"url"`
-		}{Name: "synty-sync-1.0.0-" + p.label + ".zip", URL: "u/" + p.label})
+		published[p.label] = true
 	}
 
-	claimed := map[string]bool{}
+	rel := &release{}
+	for _, p := range built {
+		rel.Assets = append(rel.Assets, asset{Name: "synty-sync-1.0.0-" + p.label + ".zip", URL: "u/" + p.label})
+	}
+
+	// Forward: every platform the workflow builds resolves to that platform's asset.
 	for _, p := range built {
 		t.Run(p.goos+"/"+p.goarch, func(t *testing.T) {
+			label, err := assetSuffix(p.goos, p.goarch)
+			if err != nil {
+				t.Fatalf("release.yml builds %s/%s but the updater has no label for it: %v", p.goos, p.goarch, err)
+			}
+			if label != p.label {
+				t.Errorf("the updater wants %q, but release.yml publishes %q", label, p.label)
+			}
 			url, err := platformAsset(rel, p.goos, p.goarch)
 			if err != nil {
 				t.Fatalf("release.yml builds %s/%s but the updater cannot find it: %v", p.goos, p.goarch, err)
@@ -38,25 +49,26 @@ func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 				t.Errorf("platformAsset = %q, want the %q asset release.yml publishes", url, p.label)
 			}
 		})
-		claimed[p.label] = true
 	}
-	// The other direction: a suffix the updater asks for that the workflow no longer
-	// publishes fails the same way, and would otherwise go unnoticed until a user ran
-	// update on that platform.
+
+	// Reverse: every label the updater asks for is one the workflow publishes. This is
+	// what catches a platform removed from the array, which the forward loop cannot see
+	// because it iterates that same array.
 	for _, goos := range []string{"darwin", "linux", "windows"} {
 		for _, goarch := range []string{"amd64", "arm64"} {
-			url, err := platformAsset(rel, goos, goarch)
+			label, err := assetSuffix(goos, goarch)
 			if err != nil {
-				continue // not built for this pair; the loop above covers what is
+				continue // the updater does not claim this platform
 			}
-			if !claimed[strings.TrimPrefix(url, "u/")] {
-				t.Errorf("the updater resolves %s/%s to %q, which release.yml does not build", goos, goarch, url)
+			if !published[label] {
+				t.Errorf("the updater resolves %s/%s to %q, which release.yml does not build; "+
+					"`update` on that platform reports no asset for it", goos, goarch, label)
 			}
 		}
 	}
 
-	if _, err := platformAsset(rel, "plan9", "amd64"); err == nil {
-		t.Error("an unsupported platform resolved to an asset")
+	if _, err := assetSuffix("plan9", "amd64"); err == nil {
+		t.Error("an unsupported platform resolved to a label")
 	}
 }
 
@@ -88,16 +100,4 @@ func releasePlatforms(t *testing.T) []releasePlatform {
 		t.Fatal("no platforms parsed from release.yml")
 	}
 	return out
-}
-
-func TestPlatformAssetMissing(t *testing.T) {
-	rel := &release{Assets: []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	}{
-		{Name: "synty-sync-1.0.0-solaris-sparc.zip", URL: "u/nope"},
-	}}
-	if _, err := platformAsset(rel, runtime.GOOS, runtime.GOARCH); err == nil || !strings.Contains(err.Error(), "no asset matching") {
-		t.Errorf("expected no-asset error, got %v", err)
-	}
 }

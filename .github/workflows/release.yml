@@ -85,6 +85,18 @@ jobs:
               }
             done
 
+            # The linker does not fail over an -X it cannot apply, and applies nothing at
+            # all to a const, so main.version becoming one ships a whole release of
+            # binaries reporting "dev", which `update` then refuses to update from. Only
+            # the native build can be run to ask it.
+            if [ "$goos/$goarch" = "linux/amd64" ]; then
+              reported=$("dist/$bin" version)
+              case "$reported" in
+                "synty-sync ${VERSION} "*) ;;
+                *) echo "Error: the binary reports '$reported', not version ${VERSION}; -X main.version did not apply"; exit 1 ;;
+              esac
+            fi
+
             (cd dist && zip "synty-sync-${VERSION}-${label}.zip" "$bin" && rm "$bin")
           done
 

@@ -51,6 +51,13 @@ func nativeMagic(t *testing.T) []byte {
 // stubRelease serves the two GitHub endpoints the installer reads plus the asset
 // itself, so the script can be run end to end without network.
 func stubRelease(t *testing.T, asset []byte) *httptest.Server {
+	return stubReleaseShaped(t, asset, 0)
+}
+
+// stubReleaseShaped is stubRelease with extraAssetFields keys inserted between an
+// asset's "url" and its "name", standing in for GitHub adding one. The installer reads
+// the URL out of this by text, so how far apart those two keys sit must not matter.
+func stubReleaseShaped(t *testing.T, asset []byte, extraAssetFields int) *httptest.Server {
 	t.Helper()
 	// Resolved on the test goroutine, before any handler can run: platformLabel can
 	// call t.Skipf, and a Goexit from a server goroutine would abort a response
@@ -76,13 +83,23 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 		fmt.Fprint(w, `{"tag_name": "v9.9.9"}`)
 	}))
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/tags/v9.9.9", authed(func(w http.ResponseWriter, r *http.Request) {
-		// The shape the installer greps: a "url" line within three lines of "name".
+		// GitHub's real asset object, keys in the order the API returns them and the
+		// uploader block included. A hand-made object with "url" three lines above
+		// "name" would assert the installer's own assumption about the JSON's shape
+		// rather than test the parse: the fixture and the grep would agree with each
+		// other and disagree with GitHub the moment a field is added ahead of "name".
 		// The asset URL is built from the request's own Host rather than a variable the
 		// test goroutine writes after the server is already serving.
-		fmt.Fprintf(w, "{\n  \"assets\": [\n    {\n      \"url\": \"http://%s/asset\",\n      \"x\": 1,\n      \"y\": 2,\n      \"name\": \"%s\"\n    }\n  ]\n}\n",
-			r.Host, "synty-sync-9.9.9-"+label+".zip")
+		fmt.Fprint(w, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", extraAssetFields))
 	}))
-	mux.HandleFunc("/asset", authed(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/curbol/synty-sync/releases/assets/", authed(func(w http.ResponseWriter, r *http.Request) {
+		// The wanted asset is id 2; resolving to the decoy's id means the parse picked
+		// the wrong object out of the list.
+		if !strings.HasSuffix(r.URL.Path, "/2") {
+			t.Errorf("the installer resolved %s, not the asset matching its platform label", r.URL.Path)
+			http.Error(w, "wrong asset", http.StatusNotFound)
+			return
+		}
 		w.Write(asset)
 	}))
 	// Registered so no test can reach the real github.com, but reaching it at all is
@@ -95,6 +112,53 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// githubReleaseJSON renders a release payload shaped like the one api.github.com
+// returns: every key an asset object carries, in the API's order, with the uploader
+// block and a second asset ahead of the wanted one. install.sh reads the asset URL out
+// of this by text, so what it is read out of has to look like the real thing rather
+// than like whatever the reader currently happens to need.
+func githubReleaseJSON(host, wantName string, extraAssetFields int) string {
+	var padding strings.Builder
+	for i := range extraAssetFields {
+		fmt.Fprintf(&padding, "\n      \"field_github_added_%d\": null,", i)
+	}
+	asset := func(id int, name string) string {
+		return fmt.Sprintf(`    {
+      "url": "http://%s/repos/curbol/synty-sync/releases/assets/%d",
+      "id": %d,
+      "node_id": "RA_kwDOAbCdEf4AAAAA",`+padding.String()+`
+      "name": %q,
+      "label": null,
+      "uploader": {
+        "login": "curbol",
+        "id": 1,
+        "node_id": "MDQ6VXNlcjE=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+        "url": "http://%s/users/curbol",
+        "html_url": "https://github.com/curbol",
+        "type": "User",
+        "site_admin": false
+      },
+      "content_type": "application/zip",
+      "state": "uploaded",
+      "size": 4096,
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "download_count": 0,
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "browser_download_url": "http://%s/curbol/synty-sync/releases/download/v9.9.9/%s"
+    }`, host, id, id, name, host, host, name)
+	}
+	return fmt.Sprintf(`{
+  "tag_name": "v9.9.9",
+  "assets": [
+%s,
+%s
+  ]
+}
+`, asset(1, "synty-sync-9.9.9-some-other-platform.zip"), asset(2, wantName))
 }
 
 // stubToken is the token every installer test passes, and the one stubRelease
@@ -124,24 +188,40 @@ func platformLabel(t *testing.T) string {
 // the half a user pipes into a shell, and its Go twin already guards this
 // (TestFetchReleaseErrorOmitsToken), so the check belongs where every test that
 // passes a token gets it rather than on the two that happen to remember.
+// ghStub returns a directory holding a gh that prints token and succeeds, or reports no
+// token when token is empty. gh lives in /usr/bin on an ordinary developer machine, so
+// clearing GITHUB_TOKEN and GH_TOKEN is not enough to control install.sh's token path:
+// without shadowing it the no-token tests find a logged-in CLI and stop testing
+// anything, and the gh tier cannot be exercised on a machine where gh is absent.
+func ghStub(t *testing.T, token string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexit 1\n"
+	if token != "" {
+		script = "#!/bin/sh\n[ \"$1 $2\" = \"auth token\" ] || exit 1\nprintf %s " + token + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func runInstaller(t *testing.T, home string, env ...string) (string, error) {
+	t.Helper()
+	return runInstallerWithGh(t, home, "", env...)
+}
+
+// runInstallerWithGh is runInstaller with a gh on PATH that hands back ghToken, so the
+// tier install.sh reaches only when neither environment variable is set can be driven
+// on a machine where gh is absent or logged out.
+func runInstallerWithGh(t *testing.T, home, ghToken string, env ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("unzip"); err != nil {
 		t.Skip("install.sh needs unzip")
 	}
 	cmd := exec.Command("bash", "install.sh")
 	cmd.Env = append(os.Environ(), "HOME="+home)
-	// The installer falls back to the gh CLI, which on a developer machine is logged
-	// in; clear the whole token path so the test controls it.
-	// gh lives in /usr/bin on an ordinary developer machine, so clearing the two
-	// environment variables is not enough to clear the token path: install.sh would
-	// still find a logged-in CLI and the no-token tests would stop testing anything.
-	// Shadow it with a stub that reports no token.
-	stub := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stub, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH="+stub+":/usr/bin:/bin")
+	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH="+ghStub(t, ghToken)+":/usr/bin:/bin")
 	cmd.Env = append(cmd.Env, env...)
 	raw, err := cmd.CombinedOutput()
 	out := string(raw)
@@ -155,6 +235,10 @@ func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 				t.Errorf("the installer put %s in its output:\n%s", strings.TrimSuffix(key, "="), out)
 			}
 		}
+	}
+	// A token from the gh CLI is as much a credential as one from the environment.
+	if ghToken != "" && strings.Contains(out, ghToken) {
+		t.Errorf("the installer put the gh CLI's token in its output:\n%s", out)
 	}
 	return out, err
 }
@@ -203,6 +287,75 @@ func TestInstallerRefusesANonExecutableAsset(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "the working one") {
 		t.Errorf("the working binary was replaced with a document:\n%s", out)
+	}
+}
+
+// install.sh resolves a token from GITHUB_TOKEN, then GH_TOKEN, then `gh auth token`,
+// the same order selfupdate.resolveToken uses. Only the first tier was ever exercised:
+// every test that supplied a token supplied GITHUB_TOKEN, and runInstaller shadows gh
+// with a stub that reports none. Simplifying auth_token to ${GITHUB_TOKEN:-$GH_TOKEN},
+// or reordering the `command -v gh` guard, left the suite green while the user whose only
+// credential is GH_TOKEN or a logged-in gh got "private repo needs gh auth or
+// GITHUB_TOKEN", which reads as their setup being wrong.
+func TestInstallerAcceptsEveryCredentialSource(t *testing.T) {
+	want := append(nativeMagic(t), []byte("a real enough binary")...)
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		ghToken string
+	}{
+		{name: "GITHUB_TOKEN", env: []string{"GITHUB_TOKEN=" + stubToken}},
+		{name: "GH_TOKEN", env: []string{"GH_TOKEN=" + stubToken}},
+		{name: "gh auth token", ghToken: stubToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			srv := stubRelease(t, installerZip(t, want))
+			env := append(tc.env, "SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+			// The smoke test at the end runs the installed file, which is not a real
+			// binary here, so a non-zero exit is expected. stubRelease fails any request
+			// that arrives without the header, so reaching the asset at all is the proof
+			// the token was found.
+			out, _ := runInstallerWithGh(t, home, tc.ghToken, env...)
+			got, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync"))
+			if err != nil {
+				t.Fatalf("nothing installed from a %s credential: %v\n%s", tc.name, err, out)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("installed bytes differ from the asset:\n%s", out)
+			}
+		})
+	}
+}
+
+// install.sh finds the asset's API URL by text, because the private-repo download needs
+// the id and there is no jq on a fresh machine. What must not matter is how far "url"
+// sits from "name": GitHub puts them three lines apart today with no margin, and has
+// already added a key to this object once ("digest"). One field ahead of "name" used to
+// drop the URL out of the grep's window, leaving every fresh install with "asset not
+// found in release" while everyone who already had a binary kept updating fine.
+func TestInstallerFindsTheAssetHoweverGitHubPadsTheObject(t *testing.T) {
+	want := append(nativeMagic(t), []byte("a real enough binary")...)
+	for _, extra := range []int{0, 1, 8} {
+		t.Run(fmt.Sprintf("%d added fields", extra), func(t *testing.T) {
+			home := t.TempDir()
+			srv := stubReleaseShaped(t, installerZip(t, want), extra)
+			// The smoke test at the end runs the installed file, which is not a real
+			// binary here, so a non-zero exit is expected; what matters is that the right
+			// asset was resolved and landed.
+			out, _ := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
+				"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+			if strings.Contains(out, "not found in release") {
+				t.Fatalf("the asset URL was not found with %d extra fields between \"url\" and \"name\":\n%s", extra, out)
+			}
+			got, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync"))
+			if err != nil {
+				t.Fatalf("nothing installed: %v\n%s", err, out)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("installed bytes differ from the asset:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -361,14 +514,10 @@ func runInstallerAs(t *testing.T, pathPrefix string) string {
 	// leaves install.sh a logged-in CLI to find. Without this the test takes the
 	// authenticated branch on a developer's machine and the unauthenticated one on CI,
 	// and writes their real token into a file on the way.
-	stub := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stub, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	cmd := exec.Command("bash", "install.sh")
 	cmd.Env = []string{
 		"HOME=" + t.TempDir(),
-		"PATH=" + stub + ":" + pathPrefix + ":/usr/bin:/bin",
+		"PATH=" + ghStub(t, "") + ":" + pathPrefix + ":/usr/bin:/bin",
 		"GITHUB_TOKEN=", "GH_TOKEN=",
 		"SYNTY_INSTALL_API=http://127.0.0.1:1",
 		"SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1",
@@ -390,7 +539,18 @@ func TestReleaseStampsTheVersionVariableThisPackageDeclares(t *testing.T) {
 	if !strings.Contains(string(raw), want) {
 		t.Errorf("release.yml does not stamp %q; a release would ship binaries reporting %q", want, version)
 	}
-	_ = version // the symbol release.yml stamps has to exist in this package
+	// Taking the address is the part that cannot be faked: -X applies to a string
+	// variable and is silently ignored for a constant, so `_ = version` compiles for
+	// either while only this stops compiling the moment main.version stops being
+	// settable. A const would otherwise ship a whole release reporting "dev".
+	_ = &version
+
+	// The workflow runs the binary it just built and reads the version back, because the
+	// two checks above are both static: neither can see a -X that was accepted and did
+	// nothing.
+	if !strings.Contains(string(raw), `"dist/$bin" version`) {
+		t.Error("release.yml no longer asks a built binary what version it reports; an -X that did not apply would ship")
+	}
 }
 
 // install.sh reconstructs the whole asset filename and greps for it literally, while

@@ -32,12 +32,17 @@ var progress io.Writer = os.Stderr
 // releasesAPIURL is a var so tests can point it at a stub server.
 var releasesAPIURL = "https://api.github.com/repos/curbol/synty-sync/releases"
 
+// asset is one file attached to a release. Named rather than inline because every test
+// that builds a release has to write the type out, and an anonymous struct has to be
+// repeated verbatim at each one.
+type asset struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
 type release struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	} `json:"assets"`
+	TagName string  `json:"tag_name"`
+	Assets  []asset `json:"assets"`
 }
 
 // Run updates the binary to target (a version like "0.2.0"), or to the latest
@@ -151,29 +156,38 @@ func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 	return &r, nil
 }
 
-// platformAsset returns the asset API URL for goos/goarch, matching the label
-// suffix the release workflow uses. The platform is a parameter rather than read
-// from runtime so every branch can be asserted on one machine: the suffixes have to
-// stay in lockstep with release.yml, and a typo in a platform CI does not run on
-// would otherwise ship as "no asset for your platform".
-func platformAsset(rel *release, goos, goarch string) (string, error) {
-	var suffix string
+// assetSuffix is the release label this platform's asset is named for. Separate from
+// platformAsset so a test can ask what label the updater wants for a platform without
+// synthesizing a release to answer it: the labels have to stay in lockstep with
+// release.yml in both directions, and a label the workflow no longer publishes is only
+// discoverable by asking this. The platform is a parameter rather than read from runtime
+// so every branch can be asserted on one machine.
+func assetSuffix(goos, goarch string) (string, error) {
 	switch goos {
 	case "darwin":
-		suffix = "mac-intel.zip"
 		if goarch == "arm64" {
-			suffix = "mac-apple.zip"
+			return "mac-apple", nil
 		}
+		return "mac-intel", nil
 	case "linux":
-		suffix = "linux-intel.zip"
 		if goarch == "arm64" {
-			suffix = "linux-arm64.zip"
+			return "linux-arm64", nil
 		}
+		return "linux-intel", nil
 	case "windows":
-		suffix = "win.zip"
-	default:
-		return "", fmt.Errorf("unsupported platform %s/%s", goos, goarch)
+		return "win", nil
 	}
+	return "", fmt.Errorf("unsupported platform %s/%s", goos, goarch)
+}
+
+// platformAsset returns the asset API URL for goos/goarch, matching the label the
+// release workflow names its zips for.
+func platformAsset(rel *release, goos, goarch string) (string, error) {
+	label, err := assetSuffix(goos, goarch)
+	if err != nil {
+		return "", err
+	}
+	suffix := label + ".zip"
 	// The separator is part of the match: every label is preceded by one, and without
 	// it "win.zip" is also a suffix of "darwin.zip", so a release that adds a darwin
 	// universal asset would hand a Windows user a Mach-O binary.

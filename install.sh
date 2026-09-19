@@ -107,8 +107,15 @@ install_binary() {
   local url
   if [[ -n "$AUTH_CONF" ]]; then
     # Private repo: resolve the asset's API URL, then download with the token.
+    #
+    # The window is wide and the nearest match wins, rather than depending on "url"
+    # sitting an exact number of lines above "name". GitHub's asset object happens to
+    # put it three lines up today, with no margin: one field added ahead of "name" and
+    # every fresh install breaks with "asset not found". Matching the assets URL shape
+    # directly also cannot pick up browser_download_url or the uploader block.
     url=$(curl -fsSL --config "$AUTH_CONF" "${API_BASE}/repos/${REPO}/releases/tags/v${VERSION}" \
-      | grep -F -B3 "\"name\": \"${file}\"" | grep -F '"url"' | sed -E 's/.*"url": "([^"]+)".*/\1/') || true
+      | grep -F -B40 "\"name\": \"${file}\"" \
+      | grep -oE "https?://[^\"]+/releases/assets/[0-9]+" | tail -1) || true
     [[ -n "$url" ]] || { err "asset ${file} not found in release v${VERSION}"; exit 1; }
     curl -fsSL --config "$AUTH_CONF" -H "Accept: application/octet-stream" -o "${STAGE}/${file}" "$url"
   else
