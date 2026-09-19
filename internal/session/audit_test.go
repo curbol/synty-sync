@@ -527,3 +527,84 @@ func TestLinuxBasesCoverSandboxedBrowsers(t *testing.T) {
 		}
 	}
 }
+
+// Ranking profiles on cookies.sqlite's own mtime reads every running browser as older
+// than it is: a WAL-mode database takes its writes in the -wal sidecar and moves the
+// main file only on a checkpoint. That is how the leftover from a browser that moved
+// between layouts (a deb install replaced by a snap) wins the tie against the profile
+// actually in use, after which the run reads real but months-old cookies — not an
+// empty set, so nothing errors — and tells the user the session they just refreshed
+// has expired. The existing liveness guard plants non-WAL databases and stamps them
+// with Chtimes, so it cannot see this.
+func TestALiveWALProfileBeatsALeftoverWithANewerMainFile(t *testing.T) {
+	base := t.TempDir()
+
+	walProfile := func(dir, value string) string {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dbPath := filepath.Join(dir, "cookies.sqlite")
+		db, err := sql.Open("sqlite", "file:"+dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Held open for the life of the test: SQLite removes the sidecars when the last
+		// connection closes, and the sidecar is the whole point here.
+		t.Cleanup(func() { db.Close() })
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(geckoSchema); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatal(err)
+		}
+		// Written after the checkpoint, so it lives only in the sidecar and the main
+		// file's mtime stays at the checkpoint.
+		if _, err := db.Exec(
+			`INSERT INTO moz_cookies (originAttributes, name, value, host, path, expiry,
+			 lastAccessed, creationTime, isSecure, isHttpOnly)
+			 VALUES ('', 'sid', ?, ?, '/', 4102444800, 0, 0, 1, 1)`, value, cookieHost); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(dbPath + "-wal"); err != nil || fi.Size() == 0 {
+			t.Skip("sqlite driver produced no WAL sidecar")
+		}
+		return dbPath
+	}
+
+	// Both names tie on default and release, so recency is what decides between them.
+	live := walProfile(filepath.Join(base, "bbb.default-release"), "live")
+	dead := filepath.Join(base, "aaa.default-release")
+	if err := os.MkdirAll(dead, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deadDB := filepath.Join(dead, "cookies.sqlite")
+	src, err := os.ReadFile(newCookieDB(t, false, [3]string{cookieHost, "sid", "stale"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deadDB, src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The leftover's main file is newer than the live profile's main file, and older
+	// than the live profile's sidecar. Only the sidecar tells them apart.
+	stamp := func(path string, age time.Duration) {
+		at := time.Now().Add(-age)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp(live, 90*24*time.Hour)
+	stamp(deadDB, time.Hour)
+
+	cands, err := geckoCandidates(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pickGeckoProfile(cands); got != live {
+		t.Errorf("picked %q, want the live WAL profile %q", got, live)
+	}
+}

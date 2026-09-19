@@ -410,7 +410,14 @@ func copyDBPair(dir, src string) (dbPath string, err error) {
 		if _, err := os.Stat(src + suffix); err != nil {
 			continue
 		}
+		// The browser can exit between the stat and the copy, and SQLite deletes the
+		// sidecars as the last connection closes. That is the same race the retry above
+		// this exists for, so it reads as "no sidecar" rather than ending the run with
+		// an ENOENT on a file the user never asked about.
 		if err := copyFile(src+suffix, dbPath+suffix); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return "", err
 		}
 	}
@@ -432,6 +439,29 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// livenessSidecars are the files whose timestamps say when a profile was last written
+// to. It is a superset of walSidecars: -shm is not worth copying (SQLite rebuilds it)
+// but its presence and mtime are the strongest signal a profile gives that a browser
+// is holding the database open right now.
+var livenessSidecars = []string{"-wal", "-shm"}
+
+// lastWritten is when a profile's cookie store was last touched, which is not the main
+// file's mtime. A WAL-mode database — which is every running Firefox or Zen — takes its
+// writes in cookies.sqlite-wal and moves the main file only on a checkpoint, so ranking
+// on the main file alone reads a live profile as older than it is. That is how a dead
+// profile left behind by a browser that moved between layouts (a deb install replaced
+// by a snap) wins the tie against the one in use, after which the run reads real but
+// months-old cookies and reports the session the user just refreshed as expired.
+func lastWritten(db string, fi os.FileInfo) time.Time {
+	mod := fi.ModTime()
+	for _, suffix := range livenessSidecars {
+		if si, err := os.Stat(db + suffix); err == nil && si.ModTime().After(mod) {
+			mod = si.ModTime()
+		}
+	}
+	return mod
 }
 
 // geckoProfile is one cookies.sqlite found under a profile base, with the facts that
@@ -464,7 +494,7 @@ func geckoCandidates(base string) ([]geckoProfile, error) {
 			continue
 		}
 		low := strings.ToLower(e.Name())
-		cands = append(cands, geckoProfile{db, fi.ModTime(), strings.Contains(low, "default"), strings.Contains(low, "release")})
+		cands = append(cands, geckoProfile{db, lastWritten(db, fi), strings.Contains(low, "default"), strings.Contains(low, "release")})
 	}
 	if len(cands) == 0 {
 		return nil, fmt.Errorf("no cookies.sqlite under %s (set SYNTY_BROWSER_PROFILE)", base)
