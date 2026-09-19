@@ -83,8 +83,9 @@ Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml`
 from cwd), `--config <dir>` (user config dir; not a `list` flag, since `list` reads no
 user config), `--cookies <curl|file>` (override session source), `--only <pack-glob>`,
 `--dry-run` (alias of `status` semantics on `sync`), `--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the `select` page's address,
-default 8787). Subcommands take no positional arguments, so a stray one is an error rather
-than silently swallowing the flags after it.
+default `localhost:8787`, and loopback only — see The selection page). Subcommands take no
+positional arguments, so a stray one is an error rather than silently swallowing the flags
+after it.
 
 ## Run flow
 
@@ -109,6 +110,13 @@ Primary: read cookies directly from Firefox. The store cookies live in
 `~/.mozilla/firefox/<profile>/cookies.sqlite` in plaintext; copy the (possibly locked) DB to
 a temp path, query rows for `host LIKE '%syntystore.com'`, and rebuild the Cookie header. The
 monthly run becomes just `synty sync`, auto-refreshed whenever the user has browsed the store.
+The `-wal` sidecar is copied with it, and when several profiles are in the running they are
+ranked on the newest of the database and its sidecars: a WAL-mode database — which is every
+browser that is actually open — takes its writes in the sidecar and moves the main file only
+on a checkpoint, so the main file's mtime reads a live profile as older than it is. That is
+how a leftover from a browser that moved between layouts (a deb install replaced by a snap)
+wins the tie, and the run then reads real but months-old cookies and reports a session the
+user just refreshed as expired.
 
 Fallback: `--cookies <file>` accepts a pasted `curl` command or a `cookies.txt`, for
 portability or when the browser path doesn't apply.
@@ -122,7 +130,11 @@ exact one.
 ## Lockfile
 
 Committed beside the project manifest as `synty-sync.lock.json`. JSON with sorted keys and
-stable formatting so a sync produces a minimal, readable diff. Keyed by a stable **pack slug**
+stable formatting so a sync produces a minimal, readable diff. It and the manifest are both
+replaced through `internal/atomicfile`: a temp in the same directory, flushed, then renamed.
+The flush is the half that is easy to leave out and impossible to notice — renaming is atomic
+against a reader but says nothing about durability, so a crash can otherwise leave a
+full-length file of zeros where the record of every cached byte used to be. Keyed by a stable **pack slug**
 derived from the library-list display name, because the file-label token is *not* stable
 within a pack (one pack's files can read `POLYGON_Pirate`, `POLYGON_Pirate_Pack`, and
 `POLYGON_Pirates_Pack`). Each pack holds a per-**file** map, not per-variant, because a
@@ -132,7 +144,12 @@ single pack can carry two files of the same variant (its own `Godot_4_5_1` plus 
 shares the same `cachePath`. A `sync` rebuilds only the packs it acted on; packs it did not
 fetch (disabled in the manifest, or outside `--only`) keep their prior records rather than
 being dropped, so the file stays a complete record of what is owned — and a bundled file
-shared with a re-downloaded pack is repointed in lockstep. The account-identifying
+shared with a re-downloaded pack is repointed in lockstep. Every verdict travels to those
+owners, not just a successful download: a file the run went looking for and did not find, and
+a file it read and declined (filtered out, or archived by the store), both land untracked
+under every owner. The declined case is the one with no failure behind it, so nothing else
+would report it, and leaving it to the packs in scope alone puts one `fileId` in the file
+tracked under one owner and untracked under another. The account-identifying
 `customerId` is **not** stored here (it is account PII; it lives in env / a gitignored local
 config). Schema:
 
@@ -197,8 +214,12 @@ of being reported unchanged.
 The existing flat files in the library are migrated into this layout on first run
 (matched by a normalized filename key, since the real names render the variant unlike the
 item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` collision suffixes).
-The key drops the extension, so a Unity pack's `.unitypackage` folds in the same way a `.zip`
-does. Migration never replaces a copy already in the layout: the match is on name alone, and
+A name off the disk drops its extension, so a Unity pack's `.unitypackage` folds in the same
+way a `.zip` does; the synthetic `<token>_<variant>_<version>` key does not, since it has no
+extension and stripping one would truncate it at the first version rendered with a dot. When
+several names normalize onto one wanted file, exactly one is folded in — the one that needed
+the least normalizing — and the rest are left flat rather than stacked up in the layout with
+nothing recording them. Migration never replaces a copy already in the layout: the match is on name alone, and
 the adopted file's hash is what gets recorded, so overwriting would let a stale flat file be
 adopted as verified content. Cache paths read back from the lockfile are confined to the
 library root before use, since that file is committed and travels with the project.
@@ -240,7 +261,9 @@ and nothing else.
 A run that dies mid-transfer leaves its temp behind. Every run sweeps temps older than a day
 before enumerating — old enough that a concurrent run's in-flight transfer survives — and the
 adopt scan skips the prefix outright, since a partial can carry enough of a name to normalize
-onto a wanted file.
+onto a wanted file. The prefix is a reserved namespace on the way in as well: a filename the
+store supplies cannot wear it, or the file would commit to a real path that the next day's
+sweep deletes and no scan can take back.
 
 ## Failure handling
 
@@ -298,9 +321,14 @@ in another tab while `select` is running could otherwise submit a set of slugs (
 derived from public display names, so they are guessable) and both discard the real
 selection and enable packs nobody chose. The rendered form carries a per-invocation token
 that `/save` requires, read from the body so a link cannot stand in for the page. Both
-handlers also refuse a request whose `Host` is not a way a browser on this machine addresses
-them, since a page that points its own name at a loopback address is otherwise same-origin
-with the selection page and free to read the whole pack list, which is a purchase history.
+handlers also refuse a request whose peer is not loopback, and then one whose `Host` is not a
+way a browser on this machine addresses them, since a page that points its own name at a
+loopback address is otherwise same-origin with the selection page and free to read the whole
+pack list, which is a purchase history. The peer comes first because the `Host` is the
+client's to claim: on a wildcard bind, checking only the `Host` inverts, admitting a remote
+client that says `127.0.0.1` while refusing the browser on the machine the bind was aimed at,
+which can only send that machine's real address. `--addr` therefore takes a loopback address
+or nothing: a wider bind cannot widen the page's reach, only leave the port open.
 
 ## Configuration
 

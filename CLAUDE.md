@@ -44,7 +44,9 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `session` — builds the syntystore.com `Cookie` header from a Gecko browser cookie DB
   (Firefox or Zen, the zero-paste default; profile bases are per-platform), a
   `cookies.txt`, or a pasted-curl file.
-  Forwards every syntystore.com cookie rather than guessing the session one.
+  Forwards every syntystore.com cookie rather than guessing the session one. The DB is
+  copied with its `-wal` sidecar, and profiles are ranked on the newest of the DB and its
+  sidecars, since a running browser moves the main file only on a checkpoint.
 - `portal` — the Sky Pilot Shopify portal client. `client.go` does HTTP (retry with
   backoff on 5xx/transient; fail-fast on 4xx), the `Enumerate` / `ItemFiles` / `Resolve`
   calls, and the response-level download guard; `parse.go` parses library-list and item
@@ -76,24 +78,31 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   `Verify` (exact recorded size) / `VerifyDeep` (sha) / `Hash` / `Head` / `Tail` /
   `Remove` / `SweepTemps` — every one confines its `relPath` through `resolve`;
   `Migrate` folds pre-existing flat files into the layout, matching on a name key that
-  drops the extension.
+  drops the extension — `normalizeName` for a name off the disk, `normalizeKey` for the
+  synthetic wanted-file key, which has no extension to drop. `Migrate` and `Locate` both
+  resolve several names onto one wanted file through `preferredMatch`, so exactly one
+  copy is folded in and the rest stay flat.
 - `lockfile` — `synty-sync.lock.json` (beside the manifest, committed with the consuming
   project): the authoritative record of owned packs, versions, checksums, and which files
   are downloaded. `advertisedSize` (the portal's rounded label, refreshed every run) is
   kept apart from `sizeBytes` (what landed on disk, written only when a run resolves the
-  file). Stable formatting for minimal diffs.
+  file). Stable formatting for minimal diffs. Written through `atomicfile`.
 - `manifest` — `synty-sync.toml`, the committed project manifest (discovered by walking up
   from cwd, lives with the consuming project, carries no account identity): the engine
   `variant_includes` filter (no default — the user must set it) plus the pack-selection
   allowlist. New packs land **disabled** (opt-in), so buying a pack never silently downloads
-  it. `sync`/`status` act only on enabled packs.
+  it. `sync`/`status` act only on enabled packs. Written through `atomicfile`.
 - `web` — serves the local pack-selection page for `select` (checkbox grid, returns the
   chosen set). Takes a bound listener, not an address. `/save` rewrites a committed file,
   so it requires the per-invocation token the rendered form carries, and both handlers
-  refuse a `Host` that is not how a browser here addresses them.
+  refuse a request whose peer is not loopback or whose `Host` is not how a browser here
+  addresses them. `main.listenLocal` refuses a non-loopback `--addr` to match.
 - `selfupdate` — the `update` subcommand: fetches a GitHub release, downloads the
   current-platform binary, and atomically replaces the running executable. The repo is
   private, so it resolves a token from `GITHUB_TOKEN` / `GH_TOKEN` / the `gh` CLI.
+- `atomicfile` — the one way a committed file is replaced: temp in the same directory,
+  `Sync`, then rename, keeping the mode the file already had. Used by `lockfile` and
+  `manifest`, whose records name bytes that are already on disk.
 - `fixtures` + `cmd/scrubfixtures` — regenerate PII-free `testdata/` from git-excluded raw
   captures via an ordered replacement map.
 
@@ -101,7 +110,12 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 
 - **Files dedupe by `fileId`.** A file bundled under several packs downloads once and every
   owning pack's lockfile entry shares the same `cachePath`. Preserve this in `syncer` and
-  `cache`.
+  `cache`. Every verdict reaches the owners the run did not fetch: `resolvedByID` for bytes
+  it got, `unresolvedByID` for a file it went looking for and did not find, and
+  `deselectedByID` for one it read and declined (filtered out, or archived by the store).
+  A verdict with no channel leaves one `fileId` tracked under one owner and untracked
+  under another, and the declined case has no failure behind it, so nothing else reports
+  it.
 - **Selection is opt-in, and never silently wiped.** Newly-owned packs are disabled by
   default in `manifest`. An enumeration that returns no packs while a committed file
   holds some is refused rather than written — `syncer.ErrEmptyLibrary` for the lockfile,
