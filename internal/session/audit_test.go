@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -242,8 +244,11 @@ func TestUnreadableCookieDBIsAnError(t *testing.T) {
 	if err := os.WriteFile(garbage, []byte("not a database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := geckoCookieHeader(garbage); err == nil && got == "" {
-		t.Error("a corrupt cookie DB returned an empty header with no error")
+	// Any success is wrong here, not just an empty one: a corrupt DB can never
+	// legitimately yield cookies, and a non-empty header out of one would be bytes
+	// from nowhere presented as the user's session.
+	if got, err := geckoCookieHeader(garbage); err == nil {
+		t.Errorf("a corrupt cookie DB returned %q with no error", got)
 	}
 }
 
@@ -298,5 +303,119 @@ func TestMistypedBrowserNamesTheOnesThatWork(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "firefox") {
 		t.Errorf("error does not name the browsers that work: %v", err)
+	}
+}
+
+// Two hosts can set the same cookie name, and only one value can go in the header.
+// The right one is always the most specific host: the apex over the domain-wide
+// ".syntystore.com" form, and either over a subdomain. Deciding by anything else —
+// alphabetical host order, or position in a file — sends a value the store did not
+// set for the apex, and the run reports an expired session against a login the user
+// just completed.
+func TestTheMostSpecificHostWinsACookieName(t *testing.T) {
+	// Deliberately includes a subdomain sorting *after* "syntystore.com", which is
+	// what an ORDER BY host alone gets wrong.
+	rows := [][3]string{
+		{"www." + cookieHost, "sid", "from-www"},
+		{"." + cookieHost, "sid", "from-dot"},
+		{cookieHost, "sid", "from-apex"},
+		{"account." + cookieHost, "sid", "from-account"},
+	}
+	got, err := readSQLiteCookies(newCookieDB(t, false, rows...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "sid=from-apex") {
+		t.Errorf("header = %q, want the apex host's value", got)
+	}
+
+	// The same rule for a cookies.txt, where there is no order to lean on at all: the
+	// apex line comes first here, so a plain last-write-wins picks the subdomain.
+	txt := strings.Join([]string{
+		strings.Join([]string{cookieHost, "TRUE", "/", "TRUE", "4102444800", "sid", "from-apex"}, "\t"),
+		strings.Join([]string{"." + cookieHost, "TRUE", "/", "TRUE", "4102444800", "sid", "from-dot"}, "\t"),
+		strings.Join([]string{"www." + cookieHost, "TRUE", "/", "TRUE", "4102444800", "sid", "from-www"}, "\t"),
+	}, "\n")
+	got, err = FromCookiesTxt(txt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "sid=from-apex") {
+		t.Errorf("cookies.txt header = %q, want the apex host's value", got)
+	}
+}
+
+// A browser that moved between layouts leaves the old profile behind: a ~/.zen beside
+// the ~/.config/zen Zen now writes, or a native ~/.mozilla/firefox beside the snap
+// that replaced it. Choosing the first base that holds any profile hands back the
+// dead one purely because it is listed first, and its cookies are real but months
+// old — so the run reports an expired session and the live profile is never opened.
+// Every base's profiles have to be ranked together.
+func TestALiveProfileBeatsALeftoverInAnEarlierBase(t *testing.T) {
+	bases := browserBases(runtime.GOOS, "zen")
+	if len(bases) < 2 {
+		t.Fatalf("zen has %d profile base(s) on %s; this guard needs two to order", len(bases), runtime.GOOS)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
+	t.Setenv("SYNTY_BROWSER_PROFILE", "")
+
+	// The leftover goes in the base that is searched first, the live one in a later
+	// base, which is the arrangement an upgrade leaves behind.
+	plant := func(base, value string, age time.Duration) string {
+		dir := filepath.Join(home, base, "abc.default-release")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := newCookieDB(t, false, [3]string{cookieHost, "sid", value})
+		b, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db := filepath.Join(dir, "cookies.sqlite")
+		if err := os.WriteFile(db, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Now().Add(-age)
+		if err := os.Chtimes(db, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	plant(bases[0], "stale", 90*24*time.Hour)
+	plant(bases[1], "live", 0)
+
+	got, err := FromBrowser("zen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "sid=live") {
+		t.Errorf("header = %q, want the recently-written profile from the later base", got)
+	}
+}
+
+// The zero-paste default is "read the browser you are already logged into", and on
+// Linux that browser is as likely to be sandboxed as native. Without the snap and
+// flatpak layouts the tool reports "no such file or directory" for a browser that is
+// installed and signed in, and the user is told to export cookies by hand.
+func TestLinuxBasesCoverSandboxedBrowsers(t *testing.T) {
+	for _, tc := range []struct{ browser, want string }{
+		{"firefox", filepath.Join("snap", "firefox", "common", ".mozilla", "firefox")},
+		{"firefox", filepath.Join(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox")},
+		{"zen", filepath.Join(".var", "app", "app.zen_browser.zen", ".zen")},
+	} {
+		if !slices.Contains(browserBases("linux", tc.browser), tc.want) {
+			t.Errorf("linux %s bases do not include %q: %v", tc.browser, tc.want, browserBases("linux", tc.browser))
+		}
+	}
+	// Every platform a release ships still resolves somewhere, or the default is
+	// broken out of the box for whoever runs that build.
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		for _, browser := range browserNames {
+			if len(browserBases(goos, browser)) == 0 {
+				t.Errorf("no %s profile base on %s", browser, goos)
+			}
+		}
 	}
 }

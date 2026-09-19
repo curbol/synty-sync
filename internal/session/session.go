@@ -31,6 +31,11 @@ const httpOnlyPrefix = "#HttpOnly_"
 // syntystore.com.
 func FromCookiesTxt(content string) (string, error) {
 	pairs := map[string]string{}
+	// How specific the host was that set the value currently in pairs, so a less
+	// specific one later in the file cannot overwrite it. A cookies.txt has no
+	// meaningful order, so file position must not decide which of two hosts setting
+	// the same name wins — the same rule the sqlite reader applies with its ORDER BY.
+	from := map[string]int{}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		// "#HttpOnly_<domain>" is a record, not a comment: exporters mark HttpOnly
@@ -47,9 +52,26 @@ func FromCookiesTxt(content string) (string, error) {
 		if !hostMatches(host) {
 			continue
 		}
-		pairs[f[5]] = f[6]
+		name, rank := f[5], hostRank(host)
+		if seen, ok := from[name]; ok && seen > rank {
+			continue
+		}
+		pairs[name], from[name] = f[6], rank
 	}
 	return joinCookies(pairs)
+}
+
+// hostRank orders a cookie's host by specificity: the apex beats the domain-wide
+// form, which beats any subdomain.
+func hostRank(host string) int {
+	switch host {
+	case cookieHost:
+		return 2
+	case "." + cookieHost:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // A Cookie value can contain the opposite quote char (Shopify's _consentik_cookie
@@ -118,6 +140,12 @@ var browserNames = []string{"firefox", "zen"}
 // home, for the platform in hand. Releases ship macOS and Windows binaries, so the
 // Linux paths alone would leave the zero-paste default broken out of the box on two
 // of the three.
+//
+// Every base is searched and the profiles found under all of them are ranked together,
+// so listing one that does not exist costs nothing. On Linux a browser is as likely to
+// be sandboxed as native: Ubuntu has shipped Firefox as a snap since 22.04, and a
+// flatpak keeps its home under .var/app. Without those, the documented default fails
+// with "no such file or directory" for a browser that is installed and logged in.
 func browserBases(goos, name string) []string {
 	switch goos {
 	case "darwin":
@@ -137,9 +165,17 @@ func browserBases(goos, name string) []string {
 	default:
 		switch name {
 		case "firefox":
-			return []string{filepath.Join(".mozilla", "firefox")}
+			return []string{
+				filepath.Join(".mozilla", "firefox"),
+				filepath.Join("snap", "firefox", "common", ".mozilla", "firefox"),
+				filepath.Join(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
+			}
 		case "zen":
-			return []string{filepath.Join(".config", "zen"), filepath.Join(".zen")}
+			return []string{
+				filepath.Join(".config", "zen"),
+				filepath.Join(".zen"),
+				filepath.Join(".var", "app", "app.zen_browser.zen", ".zen"),
+			}
 		}
 	}
 	return nil
@@ -179,16 +215,25 @@ func FromBrowser(name string) (string, error) {
 	if len(bases) == 0 {
 		return "", fmt.Errorf("no known %s profile location on %s (set SYNTY_BROWSER_PROFILE)", name, runtime.GOOS)
 	}
+	// Every base is collected before any is chosen. Taking the first base that holds
+	// a profile would let a layout left behind by an upgrade — a ~/.zen beside the
+	// ~/.config/zen the browser actually writes, or a native profile beside the snap
+	// that replaced it — win over the live one purely for being listed first, and the
+	// run would report an expired session against cookies that are simply months old.
 	var errs []error
+	var cands []geckoProfile
 	for _, rel := range bases {
-		db, err := locateGeckoCookieDB(filepath.Join(home, rel))
+		found, err := geckoCandidates(filepath.Join(home, rel))
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		return geckoCookieHeader(db)
+		cands = append(cands, found...)
 	}
-	return "", errors.Join(errs...)
+	if len(cands) == 0 {
+		return "", errors.Join(errs...)
+	}
+	return geckoCookieHeader(pickGeckoProfile(cands))
 }
 
 func geckoCookieHeader(dbPath string) (string, error) {
@@ -213,10 +258,16 @@ func readSQLiteCookies(dbPath string) (string, error) {
 		return "", err
 	}
 	defer db.Close()
-	// ORDER BY host so that for a name present on both ".syntystore.com" and
-	// "syntystore.com", the exact host is scanned last and wins the map.
-	rows, err := db.Query(`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ? ORDER BY host`,
-		"%."+cookieHost, cookieHost)
+	// Scan in increasing order of specificity, so the last write into the map for a
+	// given name is the most specific host that set it: a subdomain first, then the
+	// domain-wide ".syntystore.com", then the apex itself. Ordering by host alone
+	// would decide that alphabetically — every subdomain sorting after "syntystore"
+	// (www, for one) would beat the apex and send the wrong value, which arrives as an
+	// expired session against cookies the user just refreshed.
+	rows, err := db.Query(
+		`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ?
+		 ORDER BY CASE host WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END, host`,
+		"%."+cookieHost, cookieHost, cookieHost, "."+cookieHost)
 	if err != nil {
 		return "", fmt.Errorf("query moz_cookies: %w", err)
 	}
@@ -312,25 +363,26 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// locateGeckoCookieDB finds the best cookies.sqlite under a Gecko profile base dir.
-// Profile folder names vary ("x.default-release", "y.Default (release)", …), so it
-// prefers a default+release profile, then any default, then the most-recently-used.
-func locateGeckoCookieDB(base string) (string, error) {
+// geckoProfile is one cookies.sqlite found under a profile base, with the facts that
+// decide between several.
+type geckoProfile struct {
+	path      string
+	mod       time.Time
+	isDefault bool
+	isRelease bool
+}
+
+// geckoCandidates lists every cookies.sqlite under one Gecko profile base dir.
+func geckoCandidates(base string) ([]geckoProfile, error) {
 	// macOS and Windows nest the profiles one level further down than Linux does.
 	if entries, err := os.ReadDir(filepath.Join(base, "Profiles")); err == nil && len(entries) > 0 {
 		base = filepath.Join(base, "Profiles")
 	}
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return "", fmt.Errorf("browser profile dir %s: %w (set SYNTY_BROWSER_PROFILE)", base, err)
+		return nil, fmt.Errorf("browser profile dir %s: %w (set SYNTY_BROWSER_PROFILE)", base, err)
 	}
-	type cand struct {
-		path      string
-		mod       time.Time
-		isDefault bool
-		isRelease bool
-	}
-	var cands []cand
+	var cands []geckoProfile
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -341,11 +393,20 @@ func locateGeckoCookieDB(base string) (string, error) {
 			continue
 		}
 		low := strings.ToLower(e.Name())
-		cands = append(cands, cand{db, fi.ModTime(), strings.Contains(low, "default"), strings.Contains(low, "release")})
+		cands = append(cands, geckoProfile{db, fi.ModTime(), strings.Contains(low, "default"), strings.Contains(low, "release")})
 	}
 	if len(cands) == 0 {
-		return "", fmt.Errorf("no cookies.sqlite under %s (set SYNTY_BROWSER_PROFILE)", base)
+		return nil, fmt.Errorf("no cookies.sqlite under %s (set SYNTY_BROWSER_PROFILE)", base)
 	}
+	return cands, nil
+}
+
+// pickGeckoProfile chooses between candidates. Profile folder names vary
+// ("x.default-release", "y.Default (release)", …), so it prefers a default+release
+// profile, then any default, then the most-recently-used. It ranks across every base
+// at once: a browser that moved between layouts leaves the old profile in place, and
+// deciding per-base would let whichever base was listed first supply a dead one.
+func pickGeckoProfile(cands []geckoProfile) string {
 	sort.Slice(cands, func(i, j int) bool {
 		a, b := cands[i], cands[j]
 		if a.isDefault != b.isDefault {
@@ -356,5 +417,14 @@ func locateGeckoCookieDB(base string) (string, error) {
 		}
 		return a.mod.After(b.mod)
 	})
-	return cands[0].path, nil
+	return cands[0].path
+}
+
+// locateGeckoCookieDB finds the best cookies.sqlite under a single Gecko profile base.
+func locateGeckoCookieDB(base string) (string, error) {
+	cands, err := geckoCandidates(base)
+	if err != nil {
+		return "", err
+	}
+	return pickGeckoProfile(cands), nil
 }
