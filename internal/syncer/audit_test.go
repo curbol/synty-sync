@@ -1192,7 +1192,7 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 		}},
 	}}
 	opts := runOpts(lib, false)
-	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, prev)
+	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, nil, prev)
 
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
@@ -1697,5 +1697,68 @@ func TestADisabledPacksItemPageIsNeverRequested(t *testing.T) {
 	}
 	if rep.PacksInScope != 1 {
 		t.Errorf("PacksInScope = %d, want 1", rep.PacksInScope)
+	}
+}
+
+// A file the run declines is the third way one fileId ends up tracked under one owner
+// and untracked under another, and the only one that reaches buildLockfile with no
+// failure behind it: the pack in scope is rebuilt without the file while the pack left
+// out of scope carries its record forward whole. Nothing else reports it, either.
+// orphanedRecords sees the fileId still listed by a pack the user owns, and the filter
+// case is not archived so archivedRecords says nothing at all; in the archived case the
+// warning that does fire calls the cached copy unreferenced while the carried entry is
+// still pointing straight at it.
+func TestDeselectedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+		filter  func(model.Variant) bool
+	}{
+		{"archived by the store", "v1_0_0_ARCHIVED", godotSourceFilter},
+		{"dropped by variant_includes", "v1_0_0", func(model.Variant) bool { return false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			srv := newServer(t, serverOpts{
+				itemHTML: func(orderItem string) (string, bool) {
+					switch orderItem {
+					case "1", "4": // Pirate and Dungeon both bundle fileId 999
+						return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+					}
+					return "", false
+				},
+			})
+
+			lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+			const key = "GENERIC_Particle_FX|Godot_4_5_1"
+			if !lf.Packs["polygon-pirate-pack"].Files[key].Tracked {
+				t.Fatal("seed produced no tracked bundled file")
+			}
+
+			// Dungeon goes out of scope, and the shared file stops being selected.
+			version = tc.version
+			only := runOpts(lib, false)
+			only.Filter = tc.filter
+			only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+			if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+				t.Fatalf("second sync: %v", err)
+			}
+
+			after, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in := after.Packs["polygon-pirate-pack"].Files[key]
+			out := after.Packs["polygon-dungeon-pack"].Files[key]
+			if in.Tracked {
+				t.Errorf("the in-scope owner still tracks a file this run declined: %+v", in)
+			}
+			if in.Tracked != out.Tracked || in.Version != out.Version ||
+				in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
+				t.Errorf("owning packs diverged over a declined file:\n  in-scope %+v\n  carried  %+v", in, out)
+			}
+		})
 	}
 }

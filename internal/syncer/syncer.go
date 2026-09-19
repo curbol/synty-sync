@@ -245,9 +245,17 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// Group selected files by fileId for dedup.
 	selectedByID := map[int][]selection{}
 	var selOrder []int
+	// What this run read and declined: a file the variant filter drops, or one the
+	// store has archived. The packs the run rebuilt record it untracked, so the packs
+	// it did not fetch have to hear the same thing. Carrying their records forward
+	// untouched instead leaves one fileId tracked under one owner and untracked under
+	// another, at two versions, in a committed file — and no failure happened here, so
+	// nothing else would ever say so.
+	deselectedByID := map[int]live{}
 	for _, pf := range packFiles {
 		for _, f := range pf.files {
 			if !opts.Filter(f.Variant) || f.Archived {
+				deselectedByID[f.FileID] = live{version: f.Version, variant: string(f.Variant)}
 				continue
 			}
 			if _, seen := selectedByID[f.FileID]; !seen {
@@ -255,6 +263,12 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			}
 			selectedByID[f.FileID] = append(selectedByID[f.FileID], selection{pf.pack, f})
 		}
+	}
+	// Selected anywhere wins. Archived is a per-row label and the filter reads a
+	// variant, so one pack can decline a fileId that another pack offers under a
+	// variant this run does take.
+	for id := range selectedByID {
+		delete(deselectedByID, id)
 	}
 
 	if opts.Attempts <= 0 {
@@ -347,7 +361,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 	}
 
-	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, lf)
+	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, deselectedByID, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
 	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf)...)
 	report.Warnings = append(report.Warnings, unreadable...)
@@ -765,7 +779,63 @@ func goneFromTheStore(err error) bool {
 	return ok && (code == http.StatusNotFound || code == http.StatusGone)
 }
 
-func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]live, prev lockfile.Lockfile) {
+// clearTracking marks an entry as not downloaded, at the identity this run's pages give
+// the fileId. Both fields travel with the verdict: the version because an entry
+// otherwise names one version against another version's sha, and the variant because it
+// is half the entry's key.
+func clearTracking(f lockfile.File, v live) lockfile.File {
+	f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
+	if v.version != "" {
+		f.Version = v.version
+	}
+	if v.variant != "" {
+		f.Variant = v.variant
+	}
+	return f
+}
+
+// applyResolved writes what the run resolved for a fileId onto an entry. The resolved
+// version and variant travel with the bytes: the sha belongs to whichever version was
+// actually resolved, so recording the live page's labels against it would name one
+// version, under one engine, over another's content. Only a failed update on a renamed
+// variant makes these differ from the page, and that is exactly the case where the page
+// describes bytes this run did not get.
+//
+// fallbackDownloadedAt is what to keep when the bytes were not fetched on this run:
+// the entry's own stamp for a carried pack, the prior record's for a rebuilt one.
+func applyResolved(f lockfile.File, r resolved, now, fallbackDownloadedAt string) lockfile.File {
+	if r.version != "" {
+		f.Version = r.version
+	}
+	if r.variant != "" {
+		f.Variant = r.variant
+	}
+	f.Tracked = true
+	f.CachePath = r.cachePath
+	f.SHA256 = r.sha
+	f.SizeBytes = r.size
+	switch {
+	case r.now:
+		f.DownloadedAt = now
+	case fallbackDownloadedAt != "":
+		f.DownloadedAt = fallbackDownloadedAt
+	}
+	return f
+}
+
+// keyFor is the key an entry belongs under once the run is done with it. The key is
+// half variant, so an entry whose variant moved has to move key with it, or the new
+// engine's file stays filed under the old engine's name for every owner the run did not
+// fetch while the one it did fetch is rebuilt under the new one. An entry the run left
+// alone keeps the key it arrived with, whatever shape that key is in.
+func keyFor(f lockfile.File, wasVariant, key string) string {
+	if f.Variant == wasVariant {
+		return key
+	}
+	return model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(f.Variant)}.Key()
+}
+
+func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID, deselectedByID map[int]live, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
 	// A run acts only on the packs it fetched: those filtered out (disabled in the
 	// manifest, or outside --only) are never re-fetched, so carry their prior records
@@ -791,45 +861,28 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the identity has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
-			if v, ok := unresolvedByID[f.FileID]; ok {
+			switch v, unresolved := unresolvedByID[f.FileID]; {
+			case unresolved:
 				// The run went looking for these bytes and did not find them, so the
 				// record naming them has to go with them — at the version the run was
 				// looking for, or this owner reports the loss against a stale one.
-				f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
-				if v.version != "" {
-					f.Version = v.version
-				}
-				if v.variant != "" {
-					f.Variant = v.variant
-				}
-			} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
-				// Tracked or not: the variant filter is manifest-global, so a fileId this
-				// run selected and resolved was selectable for this owner too, and the only
-				// way its entry stayed untracked is an earlier run that failed to fetch it.
-				// That is exactly the case that has to converge.
-				if r.version != "" {
-					f.Version = r.version
-				}
-				if r.variant != "" {
-					f.Variant = r.variant
-				}
-				f.Tracked = true
-				f.CachePath = r.cachePath
-				f.SHA256 = r.sha
-				f.SizeBytes = r.size
-				if r.now {
-					f.DownloadedAt = opts.Now
+				f = clearTracking(f, v)
+			default:
+				if v, deselected := deselectedByID[f.FileID]; deselected {
+					// The run read this file and declined it, so it is not downloaded any
+					// more for this owner either. Nothing failed, so no other channel says
+					// so, and leaving the record alone is what let one fileId end up
+					// tracked here and untracked in the pack the run rebuilt.
+					f = clearTracking(f, v)
+				} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
+					// Tracked or not: a fileId this run selected and resolved was selectable
+					// for this owner too, and the only way its entry stayed untracked is an
+					// earlier run that failed to fetch it. That is the case that has to
+					// converge.
+					f = applyResolved(f, r, opts.Now, f.DownloadedAt)
 				}
 			}
-			// The key is half variant, so an entry this run moved to a renamed variant has
-			// to move key with it, or the new engine's file stays filed under the old
-			// engine's name for every owner the run did not fetch while the one it did
-			// fetch is rebuilt under the new one. An entry the run left alone keeps the
-			// key it arrived with, whatever shape that key is in.
-			if f.Variant != wasVariant {
-				key = model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(f.Variant)}.Key()
-			}
-			carried.Files[key] = f
+			carried.Files[keyFor(f, wasVariant, key)] = f
 		}
 		report.NewLockfile.Packs[slug] = carried
 	}
@@ -850,41 +903,18 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				AdvertisedSize: f.SizeBytes,
 			}
 			key := f.Key()
+			wasVariant := entry.Variant
 			if selected {
 				if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
-					// The resolved version and variant travel with the bytes, the same way
-					// they do for a carried pack: the sha below belongs to whichever
-					// version was actually resolved, so recording this page's labels
-					// against it would name one version, under one engine, over another's
-					// content. Only a failed update on a renamed variant makes these differ
-					// from the live page, and that is exactly the case where the page is
-					// describing bytes this run did not get.
-					if r.version != "" {
-						entry.Version = r.version
-					}
-					// The key is half variant, so an entry kept at the prior variant has to
-					// keep the prior key with it, or this owner files the old engine's bytes
-					// under the new engine's name while the packs the run did not fetch
-					// carry the old one.
-					if r.variant != "" && r.variant != entry.Variant {
-						entry.Variant = r.variant
-						key = model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(r.variant)}.Key()
-					}
-					entry.Tracked = true
-					entry.CachePath = r.cachePath
-					entry.SHA256 = r.sha
-					entry.SizeBytes = r.size
-					if r.now {
-						entry.DownloadedAt = opts.Now
-					} else if p, ok := prevByID[f.FileID]; ok {
-						entry.DownloadedAt = p.DownloadedAt
-					}
+					entry = applyResolved(entry, r, opts.Now, prevByID[f.FileID].DownloadedAt)
 				}
 				// DryRun selected-but-not-resolved stays Tracked=false here; status
 				// does not mutate the committed lockfile, so this report copy is
 				// informational only.
 			}
-			lp.Files[key] = entry
+			// A file the run declined is already untracked at the live identity here,
+			// which is the same place clearTracking leaves the carried owners.
+			lp.Files[keyFor(entry, wasVariant, key)] = entry
 		}
 		report.NewLockfile.Packs[pf.pack.Slug] = lp
 	}
