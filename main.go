@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -197,9 +198,9 @@ func run(args []string) error {
 		if bind == "" {
 			bind = selectAddr
 		}
-		ln, err := net.Listen("tcp", bind)
+		ln, err := listenLocal(bind)
 		if err != nil {
-			return fmt.Errorf("listen %s: %w", bind, err)
+			return err
 		}
 		return explainSession(selectPacks(ctx, client, manifestPath, ln), src)
 	}
@@ -333,6 +334,53 @@ func resolveManifestPath(flag, cmd string) (string, error) {
 	return "", fmt.Errorf("no %s found (searched up from %s); run `synty-sync select` or pass --manifest <path>", manifest.FileName, wd)
 }
 
+// listenLocal binds the selection page's listener, refusing an address that is not on
+// this machine's loopback. The page lists every pack the account owns and its form
+// rewrites the committed manifest, so it is built for one browser here. A wildcard or
+// LAN bind does not widen that, it breaks it: the handlers answer only a request from
+// this machine, so the browser such a bind was meant to reach is refused while the page
+// sits open on a port anyone can knock on.
+func listenLocal(bind string) (net.Listener, error) {
+	host, _, err := net.SplitHostPort(bind)
+	if err != nil {
+		return nil, fmt.Errorf("bad --addr %q: %w (want host:port, e.g. %s)", bind, err, selectAddr)
+	}
+	if !loopbackHost(host) {
+		return nil, fmt.Errorf("--addr %q is not a loopback address: the selection page shows your whole library "+
+			"and its form rewrites the manifest, so it is served to this machine only. "+
+			"To reach it from elsewhere, forward the port (ssh -L 8787:localhost:8787 …)", bind)
+	}
+	ln, err := net.Listen("tcp", bind)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", bind, err)
+	}
+	return ln, nil
+}
+
+// loopbackHost reports whether the host half of a bind address names this machine. An
+// empty host is the wildcard form (":8787"), which binds every interface.
+func loopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// sortedKeys is a map's keys in a fixed order, so what the terminal prints does not
+// depend on Go's map iteration.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // selectAddr is where `select` serves its page when --addr is not given.
 const selectAddr = "localhost:8787"
 
@@ -359,7 +407,19 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	if len(packs) == 0 && len(man.Packs) > 0 {
 		return fmt.Errorf("the library listed no packs while %s holds %d; refusing to rewrite it", manifestPath, len(man.Packs))
 	}
+	// Reconcile rebuilds the pack list from this one enumeration, so anything the walk
+	// did not return drops out and takes its enabled flag with it. The zero-pack case
+	// above is refused, but a partial read is not detectable from here — the library
+	// parser can only see a page that yielded nothing at all — so the entries that
+	// leave are named on the way out rather than vanishing behind a count.
+	dropped := map[string]string{}
+	for _, e := range man.Packs {
+		dropped[e.Slug] = e.Name
+	}
 	man.Reconcile(packs)
+	for _, e := range man.Packs {
+		delete(dropped, e.Slug)
+	}
 	// Compared against what the page actually offered, not against what was enabled
 	// before: a pack that has left the library is dropped by Reconcile, so measuring
 	// against the prior set would refuse an honest empty submission naming a pack the
@@ -381,6 +441,10 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	}
 	fmt.Fprintf(stdout, "saved %s: %d of %d packs enabled. Run `synty-sync sync` to download.\n",
 		manifestPath, len(chosen), len(packs))
+	for _, slug := range sortedKeys(dropped) {
+		fmt.Fprintf(stdout, "  no longer in your library: %s (%s); dropped from %s\n",
+			slug, dropped[slug], manifestPath)
+	}
 	if len(man.VariantIncludes) == 0 {
 		fmt.Fprintf(stdout, "note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
 	}
@@ -441,6 +505,12 @@ func list(w io.Writer, lockPath string) error {
 	lf, err := lockfile.Load(lockPath)
 	if err != nil {
 		return err
+	}
+	if len(lf.Packs) == 0 {
+		// Load treats a missing file as an empty lockfile, so without this the whole
+		// output of `list` before the first sync is the legend under the empty table.
+		fmt.Fprintf(w, "no packs recorded yet: %s does not exist.\nRun `synty-sync select` to choose packs, then `synty-sync sync`.\n", lockPath)
+		return nil
 	}
 	slugs := make([]string, 0, len(lf.Packs))
 	for s := range lf.Packs {

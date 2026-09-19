@@ -1004,3 +1004,130 @@ func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
 		t.Errorf("select rewrote the manifest after failing to bind:\n%s", body)
 	}
 }
+
+// The selection page shows the account's whole library and its form rewrites the
+// committed manifest, so it is built for one browser on this machine — and the handlers
+// enforce exactly that. A wildcard or LAN --addr therefore cannot widen the page's
+// reach, it can only break it: the browser such a bind is aimed at gets 421 while the
+// port stands open to anything that can route to it. Refusing the bind is what keeps
+// the flag from reading as a way to share the page.
+func TestSelectRefusesANonLoopbackAddr(t *testing.T) {
+	for _, tc := range []struct {
+		bind string
+		ok   bool
+	}{
+		{"localhost:0", true},
+		{"127.0.0.1:0", true},
+		{"[::1]:0", true},
+		{":8787", false},
+		{"0.0.0.0:8787", false},
+		{"192.168.1.5:8787", false},
+		{"8787", false}, // not host:port at all
+	} {
+		t.Run(tc.bind, func(t *testing.T) {
+			ln, err := listenLocal(tc.bind)
+			if ln != nil {
+				ln.Close()
+			}
+			if tc.ok && err != nil {
+				t.Fatalf("listenLocal(%q) failed: %v", tc.bind, err)
+			}
+			if !tc.ok {
+				if err == nil {
+					t.Fatalf("listenLocal(%q) bound a listener the page cannot answer on", tc.bind)
+				}
+				if ln != nil {
+					t.Error("a refused bind still returned a listener")
+				}
+			}
+		})
+	}
+}
+
+// select rebuilds the manifest's pack list from one enumeration, so a partial read
+// drops entries and takes their enabled flags with it. The zero-pack case is refused
+// outright, but a partial one is not detectable from here, and the only thing the user
+// saw was a count of what remained. The lockfile side has always named what left
+// (Report.Removed); this is the same record for the file that holds the selection.
+func TestSelectNamesThePacksItDropsFromTheManifest(t *testing.T) {
+	openBrowserWas := web.OpenBrowser
+	web.OpenBrowser = func(string) {}
+	t.Cleanup(func() { web.OpenBrowser = openBrowserWas })
+
+	// The library lists only the pirate pack; the manifest holds both, enabled.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const sentinel = `<input class='sky-pilot-search-input'>`
+		if r.URL.Query().Get("line_items_page") == "1" {
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
+				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate Pack</a></div>`)
+			return
+		}
+		fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
+	}))
+	defer srv.Close()
+
+	manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
+	seed := "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n\n[[pack]]\n  slug = \"dungeon-pack\"\n  name = \"Dungeon Pack\"\n  enabled = true\n"
+	if err := os.WriteFile(manifestPath, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdoutWas := stdout
+	out := &bytes.Buffer{}
+	stdout = out
+	defer func() { stdout = stdoutWas }()
+
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	done := make(chan error, 1)
+	go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
+
+	token := waitForSelectPage(t, addr, done)
+	resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": {"pirate-pack"}, "csrf": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("selectPacks: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("selectPacks did not return after the save")
+	}
+
+	if got := out.String(); !strings.Contains(got, "dungeon-pack") {
+		t.Errorf("select removed dungeon-pack from the manifest without saying so:\n%s", got)
+	}
+	man, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(man.Packs) != 1 {
+		t.Errorf("manifest holds %d packs, want only the one the library listed", len(man.Packs))
+	}
+}
+
+// lockfile.Load returns an empty lockfile for a path that does not exist, so `list`
+// before the first sync printed nothing but the legend under an empty table, which
+// reads as a broken command rather than an empty record.
+func TestListSaysSoWhenThereIsNoLockfileYet(t *testing.T) {
+	var out bytes.Buffer
+	lockPath := filepath.Join(t.TempDir(), "synty-sync.lock.json")
+	if err := list(&out, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, lockPath) {
+		t.Errorf("output does not name the lockfile it looked for:\n%s", got)
+	}
+	if strings.Contains(got, "* = downloaded") {
+		t.Errorf("printed the legend for an empty table:\n%s", got)
+	}
+}

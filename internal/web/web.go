@@ -82,6 +82,10 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 // cancelled), returning the chosen set of enabled slugs. It takes a bound listener
 // rather than an address so the caller decides where the page lives and a test can
 // hand it an ephemeral port. Serve closes ln before it returns.
+//
+// Whatever ln is bound to, both handlers answer only a request that came from this
+// machine: the page is the account's whole library and the form rewrites a committed
+// file, so it is not something to hand to the network even when asked to.
 func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
 	rows := make([]row, 0, len(packs))
 	known := make(map[string]bool, len(packs))
@@ -185,6 +189,18 @@ func newToken() (string, error) {
 // the selection page and free to read the whole pack list, which is the user's
 // purchase history.
 func localRequest(r *http.Request, bound net.Addr) bool {
+	// The peer before the Host header, because Host is the client's to claim and the
+	// peer is not. On a listener bound to a wildcard address the Host check alone
+	// inverts: a remote client sending "Host: 127.0.0.1:<port>" reads as a local
+	// browser and is let in, while the browser on the machine that bind was meant to
+	// reach can only send that machine's real address and is turned away.
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	if ip := net.ParseIP(peer); ip == nil || !ip.IsLoopback() {
+		return false
+	}
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		return false

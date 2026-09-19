@@ -197,3 +197,44 @@ func TestServeReturnsWhenTheContextIsCancelled(t *testing.T) {
 		t.Fatal("Serve did not return after its context was cancelled")
 	}
 }
+
+// boundAddr stands in for a listener's address so a test can ask what the handlers
+// would do on a bind the suite never makes. Every real listener here is 127.0.0.1:0,
+// which is exactly the shape that hides the bug below.
+type boundAddr string
+
+func (b boundAddr) Network() string { return "tcp" }
+func (b boundAddr) String() string  { return string(b) }
+
+// The Host header is the client's to claim; the peer address is not. Checking only the
+// Host inverts on a wildcard bind (`select --addr :8787`): a remote client sending
+// "Host: 127.0.0.1:8787" was taken for a local browser and handed the pack list — the
+// account's purchase history — along with the token its form carries, which is enough
+// to POST /save and rewrite the committed manifest. The browser that bind was meant to
+// reach, meanwhile, can only send the machine's real address and was refused with 421.
+func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bound boundAddr
+		host  string
+		peer  string
+		want  bool
+	}{
+		{"wildcard bind, remote peer claiming loopback", "[::]:8787", "127.0.0.1:8787", "203.0.113.9:51000", false},
+		{"wildcard bind, remote peer claiming localhost", "[::]:8787", "localhost:8787", "203.0.113.9:51000", false},
+		{"0.0.0.0 bind, remote peer claiming loopback", "0.0.0.0:8787", "127.0.0.1:8787", "198.51.100.4:4000", false},
+		{"wildcard bind, remote peer with the real address", "[::]:8787", "192.168.1.5:8787", "192.168.1.77:51000", false},
+		{"wildcard bind, local browser", "[::]:8787", "127.0.0.1:8787", "127.0.0.1:51000", true},
+		{"loopback bind, local browser", "127.0.0.1:8787", "127.0.0.1:8787", "127.0.0.1:51000", true},
+		{"loopback bind, rebound name", "127.0.0.1:8787", "evil.example:8787", "127.0.0.1:51000", false},
+		{"loopback bind, wrong port", "127.0.0.1:8787", "127.0.0.1:9999", "127.0.0.1:51000", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &http.Request{Host: tc.host, RemoteAddr: tc.peer}
+			if got := localRequest(r, tc.bound); got != tc.want {
+				t.Errorf("localRequest = %v, want %v (bound %s, Host %q, peer %q)",
+					got, tc.want, tc.bound, tc.host, tc.peer)
+			}
+		})
+	}
+}
