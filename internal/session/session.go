@@ -31,11 +31,11 @@ const httpOnlyPrefix = "#HttpOnly_"
 // syntystore.com.
 func FromCookiesTxt(content string) (string, error) {
 	pairs := map[string]string{}
-	// How specific the host was that set the value currently in pairs, so a less
+	// How specific the record was that set the value currently in pairs, so a less
 	// specific one later in the file cannot overwrite it. A cookies.txt has no
-	// meaningful order, so file position must not decide which of two hosts setting
+	// meaningful order, so file position must not decide which of two records setting
 	// the same name wins; the same rule the sqlite reader applies with its ORDER BY.
-	from := map[string]int{}
+	from := map[string]cookieRank{}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		// "#HttpOnly_<domain>" is a record, not a comment: exporters mark HttpOnly
@@ -52,13 +52,29 @@ func FromCookiesTxt(content string) (string, error) {
 		if !hostMatches(host) {
 			continue
 		}
-		name, rank := f[5], hostRank(host)
-		if seen, ok := from[name]; ok && seen > rank {
+		name, rank := f[5], cookieRank{host: hostRank(host), path: len(f[2])}
+		if seen, ok := from[name]; ok && !rank.beats(seen) {
 			continue
 		}
 		pairs[name], from[name] = f[6], rank
 	}
 	return joinCookies(pairs)
+}
+
+// cookieRank orders two records that set the same cookie name. Host specificity
+// decides first; a longer path decides the rest, which is the order RFC 6265 has a
+// browser send them in, so the value a server would read first is the one kept. Only
+// the name is unique in a Cookie header, so one of the two has to be dropped.
+type cookieRank struct {
+	host int
+	path int
+}
+
+func (a cookieRank) beats(b cookieRank) bool {
+	if a.host != b.host {
+		return a.host > b.host
+	}
+	return a.path > b.path
 }
 
 // hostRank orders a cookie's host by specificity: the apex beats the domain-wide
@@ -259,14 +275,23 @@ func readSQLiteCookies(dbPath string) (string, error) {
 	}
 	defer db.Close()
 	// Scan in increasing order of specificity, so the last write into the map for a
-	// given name is the most specific host that set it: a subdomain first, then the
+	// given name is the most specific record that set it: a subdomain first, then the
 	// domain-wide ".syntystore.com", then the apex itself. Ordering by host alone
 	// would decide that alphabetically: every subdomain sorting after "syntystore"
 	// (www, for one) would beat the apex and send the wrong value, which arrives as an
 	// expired session against cookies the user just refreshed.
+	//
+	// Host is not unique: moz_cookies keys on (name, host, path, originAttributes), so
+	// a name set at two paths, or in a container tab as well as an ordinary window,
+	// gives two rows that tie on host. SQLite's sorter is not documented as stable, so
+	// without the rest of this the winner is whichever row happened to arrive last.
+	// path length is the order RFC 6265 has a browser send them in, and lastAccessed
+	// then picks the session actually in use over one left behind by an earlier login;
+	// id is there only to make the order total.
 	rows, err := db.Query(
 		`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ?
-		 ORDER BY CASE host WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END, host`,
+		 ORDER BY CASE host WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END,
+		          LENGTH(path), lastAccessed, id`,
 		"%."+cookieHost, cookieHost, cookieHost, "."+cookieHost)
 	if err != nil {
 		return "", fmt.Errorf("query moz_cookies: %w", err)
@@ -320,30 +345,76 @@ func joinCookies(pairs map[string]string) (string, error) {
 // landing between the two describe frames the copied -wal does not have.
 var walSidecars = []string{"-wal"}
 
+// copyAttempts is how many times a torn copy is retried before the pair is used as
+// taken. A checkpoint is a rare event in the millisecond or two a copy takes, so one
+// retry practically always suffices; the cap is here so a browser writing constantly
+// cannot spin.
+const copyAttempts = 3
+
 // copyDBToTemp copies a SQLite database and its WAL sidecars into a fresh temp
 // directory, keeping the basename so SQLite finds the sidecars on open. It returns
 // the directory to remove and the path of the copied database.
+//
+// The main file and the -wal are two separate copies, and a checkpoint landing between
+// them folds the -wal into the main file and resets it: the main copy is then missing
+// the pages the -wal copy no longer describes, and WAL recovery applies those frames to
+// a state that never existed. Nothing cross-checks the pair, so the read comes back
+// wrong or empty, and the user is told the session they just refreshed has expired,
+// which is the failure copying the -wal at all was meant to prevent. A checkpoint
+// always writes the main file, so the source is stat'd either side and a copy that
+// raced one is taken again.
 func copyDBToTemp(src string) (dir, dbPath string, err error) {
 	dir, err = os.MkdirTemp("", "synty-cookies-")
 	if err != nil {
 		return "", "", err
 	}
+	for attempt := range copyAttempts {
+		before, statErr := os.Stat(src)
+		if statErr != nil {
+			os.RemoveAll(dir)
+			return "", "", statErr
+		}
+		dbPath, err = copyDBPair(dir, src)
+		if err != nil {
+			os.RemoveAll(dir)
+			return "", "", err
+		}
+		after, statErr := os.Stat(src)
+		if statErr == nil && after.Size() == before.Size() && after.ModTime().Equal(before.ModTime()) {
+			return dir, dbPath, nil
+		}
+		// Last time round: the pair may be torn, but a stale read is still better than
+		// refusing to read a cookie store the browser happens to be busy with.
+		if attempt == copyAttempts-1 {
+			return dir, dbPath, nil
+		}
+	}
+	// Unreachable: the loop returns on every path.
+	return dir, dbPath, nil
+}
+
+// copyDBPair copies the database and its sidecars into dir, returning the copy's path.
+func copyDBPair(dir, src string) (dbPath string, err error) {
 	base := filepath.Base(src)
 	dbPath = filepath.Join(dir, base)
 	if err := copyFile(src, dbPath); err != nil {
-		os.RemoveAll(dir)
-		return "", "", err
+		return "", err
 	}
 	for _, suffix := range walSidecars {
+		// A retry after a checkpoint finds the sidecar gone from the source. Clearing the
+		// earlier attempt's copy is what keeps it from being applied to a main file that
+		// has already absorbed it.
+		if err := os.Remove(dbPath + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
 		if _, err := os.Stat(src + suffix); err != nil {
 			continue
 		}
 		if err := copyFile(src+suffix, dbPath+suffix); err != nil {
-			os.RemoveAll(dir)
-			return "", "", err
+			return "", err
 		}
 	}
-	return dir, dbPath, nil
+	return dbPath, nil
 }
 
 func copyFile(src, dst string) error {

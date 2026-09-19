@@ -38,16 +38,22 @@ func TestGeckoCookieHeaderReadsUncheckpointedWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL;
-		CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT);
-		INSERT INTO moz_cookies VALUES ('syntystore.com','localization','US');`); err != nil {
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(geckoSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO moz_cookies (name, value, host, path) VALUES ('localization','US','syntystore.com','/')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		t.Fatal(err)
 	}
 	// Written after the checkpoint, so it lives only in the sidecar.
-	if _, err := db.Exec(`INSERT INTO moz_cookies VALUES ('.syntystore.com','_shopify_essential','FRESH')`); err != nil {
+	if _, err := db.Exec(
+		`INSERT INTO moz_cookies (name, value, host, path) VALUES ('_shopify_essential','FRESH','.syntystore.com','/')`); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(dbPath + "-wal"); err != nil || fi.Size() == 0 {
@@ -113,23 +119,108 @@ func TestLocateGeckoCookieDBWithNoProfiles(t *testing.T) {
 	}
 }
 
-// Reading must never disturb the browser's live store.
+// Reading must never disturb the browser's live store. The whole profile directory is
+// compared, not just the database's bytes: opening the source directly instead of a
+// copy is the obvious simplification, mode=ro already reads like a promise, and what it
+// actually does is create a -shm beside the live profile and let SQLite checkpoint the
+// live -wal. On a quiescent profile that checkpoint is a no-op, so the main file is
+// unchanged and only a new sidecar gives it away.
 func TestGeckoCookieHeaderLeavesSourceUntouched(t *testing.T) {
 	dbPath := newCookieDB(t, true, [3]string{"syntystore.com", "localization", "US"})
 
-	before, err := os.ReadFile(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := snapshotDir(t, filepath.Dir(dbPath))
 	if _, err := geckoCookieHeader(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.ReadFile(dbPath)
+	after := snapshotDir(t, filepath.Dir(dbPath))
+
+	for name, content := range before {
+		got, ok := after[name]
+		if !ok {
+			t.Errorf("reading removed %s from the profile directory", name)
+			continue
+		}
+		if got != content {
+			t.Errorf("reading modified %s in the profile directory", name)
+		}
+	}
+	for name := range after {
+		if _, ok := before[name]; !ok {
+			t.Errorf("reading created %s in the profile directory; the live store must not be written to", name)
+		}
+	}
+}
+
+// snapshotDir returns every file in dir keyed by name, so a test can assert nothing in
+// it was added, removed or rewritten.
+func snapshotDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(before) != string(after) {
-		t.Error("the source cookies.sqlite was modified")
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[e.Name()] = string(b)
+	}
+	return out
+}
+
+// moz_cookies keys on (name, host, path, originAttributes), so one cookie name can have
+// several rows: set at two paths, or in a container tab as well as an ordinary window.
+// They tie on host, SQLite's sorter is not documented as stable, and only one value per
+// name fits in a Cookie header, so without the rest of the ORDER BY the winner is
+// whichever row arrived last and the user gets an intermittent expired session against
+// a login they just made.
+func TestDuplicateCookieRowsResolveToTheLiveOne(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cookies.sqlite")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(geckoSchema); err != nil {
+		t.Fatal(err)
+	}
+	// Same name and host, inserted newest-first so row order and the wanted answer
+	// disagree. The stale row is at the root path and was touched long ago; the live one
+	// is more specific and more recent.
+	for _, row := range []struct {
+		value        string
+		path         string
+		originAttrs  string
+		lastAccessed int64
+	}{
+		{"LIVE", "/apps/downloads", "^userContextId=4", 2000},
+		{"STALE-ROOT", "/", "", 1000},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO moz_cookies (originAttributes, name, value, host, path, lastAccessed)
+			 VALUES (?, '_shopify_essential', ?, ?, ?, ?)`,
+			row.originAttrs, row.value, cookieHost, row.path, row.lastAccessed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read repeatedly: a tie broken by arrival order can agree with the wanted answer
+	// once by luck.
+	for i := range 5 {
+		got, err := geckoCookieHeader(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "_shopify_essential=LIVE" {
+			t.Fatalf("read %d returned %q, want the most specific, most recently used row", i, got)
+		}
 	}
 }
 
@@ -194,6 +285,17 @@ func TestResolveRoutesBrowserNamesAndPaths(t *testing.T) {
 	}
 }
 
+// geckoSchema is Firefox's real moz_cookies table, not a three-column stand-in: the
+// reader orders on path, lastAccessed and id, so a query that reads them has to be
+// testable without a live profile. Every test that builds a cookie DB uses this one,
+// so none of them can pass against a shape the reader could not query.
+const geckoSchema = `CREATE TABLE moz_cookies (
+	id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '',
+	name TEXT, value TEXT, host TEXT, path TEXT, expiry INTEGER,
+	lastAccessed INTEGER, creationTime INTEGER, isSecure INTEGER, isHttpOnly INTEGER,
+	inBrowserElement INTEGER DEFAULT 0, sameSite INTEGER DEFAULT 0,
+	rawSameSite INTEGER DEFAULT 0, schemeMap INTEGER DEFAULT 0)`
+
 // newCookieDB creates a Gecko-shaped cookies.sqlite with the given rows, returning
 // its path. It replaces the open/schema/insert block each cookie-DB test repeats;
 // wal selects the journal mode a test needs.
@@ -210,14 +312,7 @@ func newCookieDB(t *testing.T, wal bool, rows ...[3]string) string {
 			t.Fatal(err)
 		}
 	}
-	// Firefox's real table, not a three-column stand-in: a query that starts reading
-	// expiry, path or originAttributes has to be testable without a live profile.
-	if _, err := db.Exec(`CREATE TABLE moz_cookies (
-		id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '',
-		name TEXT, value TEXT, host TEXT, path TEXT, expiry INTEGER,
-		lastAccessed INTEGER, creationTime INTEGER, isSecure INTEGER, isHttpOnly INTEGER,
-		inBrowserElement INTEGER DEFAULT 0, sameSite INTEGER DEFAULT 0,
-		rawSameSite INTEGER DEFAULT 0, schemeMap INTEGER DEFAULT 0)`); err != nil {
+	if _, err := db.Exec(geckoSchema); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range rows {
