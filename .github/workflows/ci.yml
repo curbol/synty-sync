@@ -44,13 +44,24 @@ jobs:
       # runs on a tag that is already public: a break there fails the whole matrix
       # before anything uploads, leaving the tag pointing at a release that does not
       # exist. Cheaper to find it on the pull request.
+      #
+      # Read out of release.yml rather than listed again here. A second copy is a
+      # second thing to remember: adding a platform there trips the label guards in
+      # install_test.go and selfupdate_test.go, which send you to platformAsset and
+      # install.sh — and nothing at all would mention this list, so the step meant to
+      # catch a break before the tag would silently stop covering the new platform.
       - name: Cross-compile every released platform
         run: |
-          for p in darwin/amd64 darwin/arm64 linux/arm64 windows/amd64; do
-            IFS='/' read -r goos goarch <<< "$p"
+          platforms=$(grep -oE '"[a-z0-9]+/[a-z0-9]+/[a-z0-9-]+"' .github/workflows/release.yml | tr -d '"')
+          if [ -z "$platforms" ]; then
+            echo "Error: no platforms parsed out of release.yml; the array's shape changed"
+            exit 1
+          fi
+          echo "$platforms"
+          while IFS='/' read -r goos goarch _; do
             echo "building $goos/$goarch"
-            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build ./...
-          done
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build ./...
+          done <<< "$platforms"
 
       # syncer fans out with a WaitGroup and a mutex, so the suite is worth running
       # under the detector. No network or session is needed: the tests run against

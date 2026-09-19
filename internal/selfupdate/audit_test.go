@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -536,5 +537,71 @@ func TestExecutableMagicPerPlatform(t *testing.T) {
 	// A platform with no table is not second-guessed.
 	if err := checkMagic("plan9", []byte("whatever")); err != nil {
 		t.Errorf("an unknown platform was refused: %v", err)
+	}
+}
+
+// An asset request to api.github.com is answered with a 302 to a CDN host whose query
+// carries a signature — a live bearer credential for a private release asset.
+// net/http reports a failure on a redirected request against the last URL it tried,
+// stripping only the userinfo password, so the signature rides into the error text
+// and out to stderr unless the query is dropped.
+func TestDownloadErrorAfterARedirectDropsTheSignature(t *testing.T) {
+	// A port nothing is listening on, so the hop after the redirect fails at dial.
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadURL := "http://" + dead.Addr().String()
+	if err := dead.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const secret = "SIGNATURE-THAT-MUST-NOT-BE-PRINTED"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, deadURL+"/release-assets/synty-sync.zip?X-Amz-Signature="+secret, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	err = download(context.Background(), "tok", srv.URL+"/asset", filepath.Join(t.TempDir(), "out.zip"))
+	if err == nil {
+		t.Fatal("expected the download to fail at the redirect target")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the signed asset URL leaked into the error: %q", err)
+	}
+	// Still useful: the host is what tells a user which hop failed.
+	if !strings.Contains(err.Error(), "downloading") {
+		t.Errorf("error lost its context: %q", err)
+	}
+}
+
+// GitHub answers 404 rather than 403 for a private repo the caller cannot see, so a
+// token that simply lacks access to this repo produces "no releases found" — which is
+// false, and leaves the user with nothing to check. Both branches have to point
+// somewhere.
+func TestNotFoundAlwaysSaysSomethingAboutTheToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	t.Cleanup(func(prev string) func() { return func() { releasesAPIURL = prev } }(releasesAPIURL))
+	releasesAPIURL = srv.URL
+
+	for _, tc := range []struct{ name, token, want string }{
+		{"no token at all", "", "gh auth login"},
+		{"a token that cannot see the repo", "ghp_SECRET_VALUE_9876", "gh auth status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchRelease(context.Background(), tc.token, "")
+			if err == nil {
+				t.Fatal("expected a not-found error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not point at %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), tc.token) && tc.token != "" {
+				t.Errorf("the token leaked into the error: %q", err)
+			}
+		})
 	}
 }

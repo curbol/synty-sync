@@ -67,6 +67,24 @@ jobs:
             CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build \
               -ldflags "-X main.version=${VERSION}" \
               -o "dist/$bin" .
+
+            # The label is what selfupdate and install.sh match on, and nothing else
+            # ties it to the binary inside. Two transposed entries in this array
+            # publish, say, arm64 bytes under linux-intel: the label guards compare
+            # strings so they pass, the update's magic sniff sees a valid ELF so it
+            # passes, and the first user to update replaces their working binary with
+            # one their machine cannot run, deleting the only copy that ran. The build
+            # stamps the real values into the binary, so ask it rather than trust this
+            # array.
+            stamped=$(go version -m "dist/$bin")
+            for want in "GOOS=$goos" "GOARCH=$goarch"; do
+              grep -qE "^[[:space:]]*build[[:space:]]+$want\$" <<< "$stamped" || {
+                echo "Error: dist/$bin is not $goos/$goarch, but it is about to ship as $label"
+                echo "$stamped"
+                exit 1
+              }
+            done
+
             (cd dist && zip "synty-sync-${VERSION}-${label}.zip" "$bin" && rm "$bin")
           done
 

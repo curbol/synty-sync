@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,7 +127,11 @@ func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		hint := ""
+		// GitHub answers 404, not 403, for a private repo the caller cannot see, so a
+		// 404 says as much about the token as about the version. With no token that is
+		// the likeliest cause; with one, "not found" is outright wrong for a token that
+		// simply lacks access to this repo, and the user has no way to tell from here.
+		hint := " (a token without access to this private repo reads as 404; check GITHUB_TOKEN / `gh auth status`)"
 		if token == "" {
 			hint = " (no GitHub token found; set GITHUB_TOKEN or run `gh auth login`)"
 		}
@@ -191,7 +197,7 @@ func downloadAndReplace(ctx context.Context, token, assetURL string) error {
 	if exe, err = filepath.EvalSymlinks(exe); err != nil {
 		return fmt.Errorf("resolving binary path: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "downloading update…")
+	fmt.Fprintln(progress, "downloading update…")
 	return installTo(ctx, token, assetURL, exe)
 }
 
@@ -293,15 +299,35 @@ func replaceBinary(newPath, exe string) error {
 	return nil
 }
 
-func download(ctx context.Context, token, url, dst string) error {
-	req, err := newRequest(ctx, token, http.MethodGet, url)
+// withoutQuery strips the query string from the URL a transport error quotes back.
+// An asset request to api.github.com is answered with a redirect to a CDN host whose
+// query carries a signature, and net/http reports a failure on a redirected request
+// against the *last* URL it tried — stripping only the userinfo password, never the
+// query. A reset or TLS failure on that hop would otherwise print a live bearer
+// credential for a private release asset to stderr.
+func withoutQuery(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	u, parseErr := url.Parse(ue.URL)
+	if parseErr != nil {
+		// Unparseable means we cannot prove it holds no secret, so it does not travel.
+		return ue.Err
+	}
+	u.RawQuery, u.Fragment = "", ""
+	return fmt.Errorf("%s %s: %w", ue.Op, u.Redacted(), ue.Err)
+}
+
+func download(ctx context.Context, token, assetURL, dst string) error {
+	req, err := newRequest(ctx, token, http.MethodGet, assetURL)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
-		return fmt.Errorf("downloading: %w", err)
+		return fmt.Errorf("downloading: %w", withoutQuery(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

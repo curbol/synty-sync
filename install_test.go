@@ -57,27 +57,50 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 	// mid-write rather than skip the test.
 	label := platformLabel(t)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/curbol/synty-sync/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	// The repo is private, so every one of these routes is a 404 without the token —
+	// exactly as github.com behaves. A stub that answered anyway would let the
+	// installer lose its auth entirely (an empty AUTH_CONF, a mktemp change, a call to
+	// ensure_auth_config from a subshell) and still pass every test here, while every
+	// real user got "could not resolve latest version".
+	authed := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "token "+stubToken {
+				t.Errorf("%s reached the stub without the auth header; the installer lost its token", r.URL.Path)
+				http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/repos/curbol/synty-sync/releases/latest", authed(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"tag_name": "v9.9.9"}`)
-	})
-	mux.HandleFunc("/repos/curbol/synty-sync/releases/tags/v9.9.9", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/repos/curbol/synty-sync/releases/tags/v9.9.9", authed(func(w http.ResponseWriter, r *http.Request) {
 		// The shape the installer greps: a "url" line within three lines of "name".
 		// The asset URL is built from the request's own Host rather than a variable the
 		// test goroutine writes after the server is already serving.
 		fmt.Fprintf(w, "{\n  \"assets\": [\n    {\n      \"url\": \"http://%s/asset\",\n      \"x\": 1,\n      \"y\": 2,\n      \"name\": \"%s\"\n    }\n  ]\n}\n",
 			r.Host, "synty-sync-9.9.9-"+label+".zip")
-	})
-	mux.HandleFunc("/asset", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/asset", authed(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(asset)
-	})
-	// The unauthenticated route, so no test can reach the real github.com.
+	}))
+	// Registered so no test can reach the real github.com, but reaching it at all is
+	// the failure: it is the path a private repo cannot serve, and it used to hand back
+	// the same bytes as the authenticated one, which is what hid the whole question.
 	mux.HandleFunc("/curbol/synty-sync/releases/download/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write(asset)
+		t.Errorf("the installer fell back to the unauthenticated download path (%s); a private repo answers that with a 404", r.URL.Path)
+		http.Error(w, "not found", http.StatusNotFound)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// stubToken is the token every installer test passes, and the one stubRelease
+// requires. It is not a credential shape on purpose: nothing here should resemble a
+// real GitHub token.
+const stubToken = "test-token"
 
 func platformLabel(t *testing.T) string {
 	t.Helper()
@@ -333,10 +356,19 @@ func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
 // further. Its non-zero exit is the expected outcome, not a failure.
 func runInstallerAs(t *testing.T, pathPrefix string) string {
 	t.Helper()
+	// The same gh shadow runInstaller installs, and for the same reason: gh lives in
+	// /usr/bin on a developer machine, so clearing the two environment variables still
+	// leaves install.sh a logged-in CLI to find. Without this the test takes the
+	// authenticated branch on a developer's machine and the unauthenticated one on CI,
+	// and writes their real token into a file on the way.
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("bash", "install.sh")
 	cmd.Env = []string{
 		"HOME=" + t.TempDir(),
-		"PATH=" + pathPrefix + ":/usr/bin:/bin",
+		"PATH=" + stub + ":" + pathPrefix + ":/usr/bin:/bin",
 		"GITHUB_TOKEN=", "GH_TOKEN=",
 		"SYNTY_INSTALL_API=http://127.0.0.1:1",
 		"SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1",
@@ -370,9 +402,16 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read release.yml: %v", err)
 	}
-	const template = `zip "synty-sync-${VERSION}-${label}.zip"`
+	// The zip's member name matters as much as the archive's. Both readers look for an
+	// entry named exactly "synty-sync" (or synty-sync.exe): selfupdate.extractBinary
+	// matches it outright, and install.sh unzips that path. Zipping "dist/$bin" instead
+	// of cd-ing in first keeps this archive name intact while making every entry
+	// "dist/synty-sync", which breaks the update and the install for every user with
+	// nothing here to notice — so pin the whole command, not just its first argument.
+	const template = `(cd dist && zip "synty-sync-${VERSION}-${label}.zip" "$bin"`
 	if !strings.Contains(string(raw), template) {
-		t.Errorf("release.yml no longer builds %s; install.sh:file composes that name", template)
+		t.Errorf("release.yml no longer builds the asset with %s; both readers want a bare %q entry at the zip root",
+			template, "synty-sync")
 	}
 	sh, err := os.ReadFile("install.sh")
 	if err != nil {
