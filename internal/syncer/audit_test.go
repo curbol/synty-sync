@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -199,22 +201,11 @@ func TestChangedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
 	}
 }
 
-// A pack whose item page yields no files at all cannot be rebuilt from live data
-// without erasing whatever it held. Every row here parses (they carry a version and
-// a download id) but every variant is unrecognized, so the parser is right not to
-// error and the syncer has to be the one that refuses.
-func TestPackParsingToZeroFilesAbortsRun(t *testing.T) {
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	empty := false
-	items := func(orderItem string) (string, bool) {
-		if empty && orderItem == "1" {
-			return itemPage("POLYGON_Pirate", "Ureal_5_3", "v1_0_0", 555), true
-		}
-		return "", false
-	}
-	srv := newServer(t, serverOpts{itemHTML: items})
-
+// seedPirateLockfile runs one sync against srv and returns the lockfile it wrote
+// plus how many files the pirate pack ended up holding, which is what the two
+// zero-files guards below check has not shrunk.
+func seedPirateLockfile(t *testing.T, srv *httptest.Server, lib, lockPath string) (lockfile.Lockfile, int) {
+	t.Helper()
 	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
@@ -222,14 +213,85 @@ func TestPackParsingToZeroFilesAbortsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := len(seeded.Packs["polygon-pirate-pack"].Files)
-	if want == 0 {
+	n := len(seeded.Packs["polygon-pirate-pack"].Files)
+	if n == 0 {
 		t.Fatal("seed produced no pirate files")
 	}
+	return seeded, n
+}
 
-	empty = true
+// A pack whose every row carries a variant this build does not know is a Synty
+// engine we have not shipped support for, not broken markup — the parser skips such
+// rows by design and hands back their labels. Failing the run would take the whole
+// mirror down over one future engine; rebuilding the pack from the resulting empty
+// list would erase every entry it holds. Neither is acceptable, so the pack is
+// dropped from the run and its record carried forward whole.
+func TestPackWithOnlyUnknownVariantsIsCarriedForwardNotFailed(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	unknownOnly := false
+	items := func(orderItem string) (string, bool) {
+		if unknownOnly && orderItem == "1" {
+			return itemPage("POLYGON_Pirate", "Ureal_5_3", "v1_0_0", 555), true
+		}
+		return "", false
+	}
+	srv := newServer(t, serverOpts{itemHTML: items})
+	seeded, want := seedPirateLockfile(t, srv, lib, lockPath)
+
+	unknownOnly = true
+	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("a future engine must not abort the run: %v", err)
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(after.Packs["polygon-pirate-pack"].Files); got != want {
+		t.Errorf("lockfile lost entries: %d -> %d", want, got)
+	}
+	// Carried forward means untouched, not rebuilt: the entries keep the paths and
+	// shas the seed run recorded.
+	if !reflect.DeepEqual(after.Packs["polygon-pirate-pack"], seeded.Packs["polygon-pirate-pack"]) {
+		t.Errorf("the carried pack was rewritten:\n before %+v\n after  %+v",
+			seeded.Packs["polygon-pirate-pack"], after.Packs["polygon-pirate-pack"])
+	}
+	// And it is said out loud, naming the label that was not recognized: silence here
+	// is a pack that stops updating with nothing to explain why.
+	var said bool
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "Ureal_5_3") && strings.Contains(w, "carried forward") {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("no warning named the unrecognized variant; warnings = %q", rep.Warnings)
+	}
+}
+
+// The other half: an item page the parser cannot read at all yields neither files
+// nor unrecognized labels, and that is markup that moved. There is nothing to carry
+// a diagnosis from and no way to tell which entries are still real, so the run has
+// to stop rather than rebuild the pack from nothing.
+func TestPackParsingToNothingAtAllAbortsRun(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	broken := false
+	items := func(orderItem string) (string, bool) {
+		if broken && orderItem == "1" {
+			// Rows present, none carrying a version label: the shape a renamed
+			// file-heading class leaves behind.
+			return `<div class='sky-pilot-list-item'><div class='sky-pilot-file-heading'>Icon</div></div>`, true
+		}
+		return "", false
+	}
+	srv := newServer(t, serverOpts{itemHTML: items})
+	seeded, want := seedPirateLockfile(t, srv, lib, lockPath)
+
+	broken = true
 	if _, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, runOpts(lib, false)); err == nil {
-		t.Fatal("a pack that parses to zero files must abort the run")
+		t.Fatal("an item page that parses to nothing must abort the run")
 	}
 	after, err := lockfile.Load(lockPath)
 	if err != nil {
@@ -272,9 +334,15 @@ func TestCancelledFetchIsAnErrorNotAnEmptyLibrary(t *testing.T) {
 	cancel()
 
 	packs := []model.Pack{{Slug: "polygon-pirate-pack", ItemURL: "/apps/downloads/customers/1/orders/100/order_items/1"}}
-	out, err := fetchAll(ctx, newClient(srv.URL), packs, 1)
+	out, _, err := fetchAll(ctx, newClient(srv.URL), packs, 1)
 	if err == nil {
 		t.Fatalf("cancelled fetch returned %+v with no error; the caller would rebuild these packs as empty", out)
+	}
+	// As a cancellation, not as a generic fetch failure: Run tells an interrupt apart
+	// from a per-file verdict by this, and a wrap that loses it turns Ctrl-C into a
+	// library's worth of files recorded as failed.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to carry context.Canceled", err)
 	}
 }
 
@@ -1037,7 +1105,7 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 		}},
 	}}
 	opts := runOpts(lib, false)
-	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]string{999: "v1_0_1"}, prev)
+	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, prev)
 
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
@@ -1189,5 +1257,289 @@ func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); err == nil {
 		t.Error("an interrupted run wrote the lockfile")
+	}
+}
+
+// A file the store archives keeps its lockfile entry — the pack still owns it — so
+// it never reaches orphanedRecords, but the entry is rebuilt untracked and its cache
+// path and sha go with it. The bytes stay on disk, and nothing can take them back:
+// an archived file is never selected, so it is never an adopt candidate, and the
+// adopt scan keys on the version the page now reports. Saying nothing leaves the
+// user a shrinking mirror and no account of where it went.
+func TestArchivingAFileIsReportedNotSilentlyDropped(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	items := func(orderItem string) (string, bool) {
+		if orderItem != "1" {
+			return "", false
+		}
+		return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
+	}
+	srv := newServer(t, serverOpts{itemHTML: items})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	seeded, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := seeded.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	if !before.Tracked || before.CachePath == "" {
+		t.Fatalf("seed did not track the file: %+v", before)
+	}
+
+	version = "v1_0_0_ARCHIVED"
+	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	var said bool
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, before.CachePath) && strings.Contains(w, "unreferenced") {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("the cached copy at %s lost its record with nothing said; warnings = %q", before.CachePath, rep.Warnings)
+	}
+	// Said once. The run after finds nothing tracked, so repeating it would nag about
+	// the same file for the life of the library.
+	again, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := Run(context.Background(), newClient(srv.URL), again, lockPath, opts)
+	if err != nil {
+		t.Fatalf("third sync: %v", err)
+	}
+	for _, w := range rep2.Warnings {
+		if strings.Contains(w, "unreferenced") {
+			t.Errorf("the archived file was reported a second time: %q", w)
+		}
+	}
+}
+
+// The second of the two not-a-package guards. portal refuses a document by
+// Content-Type before a byte streams; this one catches the response that claims to
+// be an archive and is not, which is what a CDN error page served as
+// application/octet-stream looks like. Without it those bytes are hashed, committed,
+// and recorded as the pack's verified content, after which every Verify compares
+// them against themselves and finds them intact forever.
+func TestABodyThatIsNotAPackageIsRefusedEvenWhenTheTypeSaysItIs(t *testing.T) {
+	srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
+		// A document wearing an archive's Content-Type, so portal.documentMediaType
+		// waves it through and only the body sniff can catch it.
+		return []byte("<!doctype html><title>Log in</title>"), "application/zip", true
+	}})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("a rejected body must fail its file, not the run: %v", err)
+	}
+	if len(rep.Failures) == 0 {
+		t.Fatal("no failures reported for a run where every body was a document")
+	}
+	for _, f := range rep.Failures {
+		if !strings.Contains(f.Err, ErrNotAPackageBody.Error()) {
+			t.Errorf("failure %q does not name the body sniff; the Content-Type guard cannot have caught this", f.Err)
+		}
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("reported %d downloads for a run that only ever received login pages", len(rep.Downloaded))
+	}
+	// Nothing committed and no temp left behind: Store stops at the temp file and the
+	// caller discards it, so a rejected body never occupies a real cache path even
+	// briefly.
+	if left := cachedFiles(t, lib); len(left) != 0 {
+		t.Errorf("a rejected body left files in the cache: %v", left)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for slug, p := range lf.Packs {
+		for key, f := range p.Files {
+			if f.Tracked || f.SHA256 != "" || f.CachePath != "" {
+				t.Errorf("%s/%s recorded a login page as content: %+v", slug, key, f)
+			}
+		}
+	}
+}
+
+// A lockfile can hold one fileId under two packs at two versions (a hand merge, or a
+// pack that left and came back). Which record wins decides between Unchanged and a
+// multi-gigabyte refetch, and the data cannot say which is right — so the only thing
+// that matters is that two runs over the same file agree. Both halves of the rule
+// are load-bearing: a tracked record beats an untracked one, and slug order breaks
+// the remaining tie instead of Go's map iteration.
+func TestIndexByFileIDPicksTheSameRecordEveryTime(t *testing.T) {
+	file := func(version, path string, tracked bool) lockfile.File {
+		return lockfile.File{
+			FileToken: "TOK", Variant: "Godot_4_5_1", Version: version, FileID: 7,
+			Tracked: tracked, CachePath: path, SHA256: version,
+		}
+	}
+	pack := func(f lockfile.File) lockfile.Pack {
+		return lockfile.Pack{Files: map[string]lockfile.File{"TOK|Godot_4_5_1": f}}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		packs map[string]lockfile.Pack
+		want  string
+	}{
+		{
+			// Tracked wins wherever it sits, so a record naming real bytes is never
+			// passed over for one that names none.
+			name:  "tracked beats untracked under a lexically earlier slug",
+			packs: map[string]lockfile.Pack{"aaa": pack(file("v1", "", false)), "zzz": pack(file("v2", "p2", true))},
+			want:  "v2",
+		},
+		{
+			name:  "tracked beats untracked under a lexically later slug",
+			packs: map[string]lockfile.Pack{"aaa": pack(file("v2", "p2", true)), "zzz": pack(file("v1", "", false))},
+			want:  "v2",
+		},
+		{
+			// Both tracked: the first slug in sort order wins, whichever order the
+			// map hands them over in.
+			name:  "two tracked records break the tie on slug order",
+			packs: map[string]lockfile.Pack{"aaa": pack(file("v1", "p1", true)), "zzz": pack(file("v2", "p2", true))},
+			want:  "v1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Repeated, because a map-order dependency passes most of the time.
+			for i := 0; i < 20; i++ {
+				got := indexByFileID(lockfile.Lockfile{Packs: tc.packs})[7]
+				if got.Version != tc.want {
+					t.Fatalf("picked %q, want %q (run %d)", got.Version, tc.want, i)
+				}
+			}
+		})
+	}
+}
+
+// status must not move a user's files. The adopt scan itself is read-only and runs
+// for status on purpose, but the flat-file migration ahead of it renames, so it is
+// gated on DryRun — a guard whose absence would make "show me what would change"
+// change something.
+func TestStatusDoesNotMigrateFlatFiles(t *testing.T) {
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			if orderItem != "1" {
+				return "", false
+			}
+			return itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 4242), true
+		},
+	})
+	lib := t.TempDir()
+	flat := filepath.Join(lib, "POLYGON_Pirate_Godot_4_5_1_v1_0_0.zip")
+	if err := os.WriteFile(flat, packageBytes("EXISTING-CONTENT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := runOpts(lib, true)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), "", opts); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if _, err := os.Stat(flat); err != nil {
+		t.Errorf("status moved a flat file out of the library root: %v", err)
+	}
+}
+
+// PacksInScope is how many packs the run actually read item pages for. The lockfile
+// carries every pack the record holds, in scope or not, so reporting its size in
+// that slot would tell a user narrowing with --only that the narrowing did nothing.
+func TestPacksInScopeCountsWhatTheRunRead(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	seeded, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := runOpts(lib, true)
+	opts.OnlyGlob = "polygon-pirate-pack"
+	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
+	if err != nil {
+		t.Fatalf("narrowed status: %v", err)
+	}
+	if rep.PacksInScope != 1 {
+		t.Errorf("PacksInScope = %d, want 1 (the one pack --only selected)", rep.PacksInScope)
+	}
+	if len(rep.NewLockfile.Packs) <= rep.PacksInScope {
+		t.Errorf("the lockfile holds %d packs and the run read %d; this test proves nothing unless they differ",
+			len(rep.NewLockfile.Packs), rep.PacksInScope)
+	}
+}
+
+// The key is half variant, so a variant the store renames on an unchanged fileId
+// moves the file's key. The in-scope pack is rebuilt from the live page and moves
+// with it; a pack the run did not fetch has no live page to rebuild from, and if the
+// carried entry keeps its old key while being repointed at the new bytes, the
+// committed lockfile ends up telling a consumer that a Godot 4.5.1 file lives at a
+// path holding Godot 4.6 content — one fileId filed under two engines.
+func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	variant, version := "Godot_4_5_1", "v1_0_0"
+	items := func(orderItem string) (string, bool) {
+		switch orderItem {
+		case "1", "4": // Pirate and Dungeon both bundle fileId 999
+			return itemPage("GENERIC_Particle_FX", variant, version, 999), true
+		}
+		return "", false
+	}
+	srv := newServer(t, serverOpts{itemHTML: items})
+
+	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The store renames the variant on the same fileId, and Dungeon is out of scope
+	// so its entry is carried rather than rebuilt.
+	variant, version = "Godot_4_6_0", "v2_0_0"
+	only := runOpts(lib, false)
+	only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const newKey = "GENERIC_Particle_FX|Godot_4_6_0"
+	const oldKey = "GENERIC_Particle_FX|Godot_4_5_1"
+	carried := after.Packs["polygon-dungeon-pack"]
+	if _, stale := carried.Files[oldKey]; stale {
+		t.Errorf("the carried owner kept %q after the variant was renamed: %+v", oldKey, carried.Files[oldKey])
+	}
+	in := after.Packs["polygon-pirate-pack"].Files[newKey]
+	out := carried.Files[newKey]
+	if out.FileID != 999 {
+		t.Fatalf("the carried owner has no entry at %q: %+v", newKey, carried.Files)
+	}
+	if in.Variant != out.Variant {
+		t.Errorf("one fileId filed under two variants: in-scope %q vs carried %q", in.Variant, out.Variant)
+	}
+	if in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
+		t.Errorf("owning packs diverged:\n  in-scope %+v\n  carried  %+v", in, out)
 	}
 }

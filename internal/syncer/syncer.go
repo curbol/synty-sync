@@ -97,7 +97,7 @@ type Report struct {
 	Adopted    []FileDiff // matched files already on disk, no download
 	Failures   []Failure
 	Removed    []string // lockfile packs the library no longer lists
-	// PacksInScope is how many packs the run actually read item pages for. NewLockfile
+	// PacksInScope is how many packs the run rebuilt from live pages. NewLockfile
 	// carries every pack the record holds, including those carried forward untouched,
 	// so it is the wrong number to report as what a run acted on.
 	PacksInScope int
@@ -163,7 +163,18 @@ type resolved struct {
 	sha       string
 	size      int64
 	version   string
+	variant   string
 	now       bool
+}
+
+// live is what this run's pages say a fileId is. Both fields travel to the owning
+// packs the run did not fetch: the version because a carried entry otherwise names
+// one version against another version's sha, and the variant because it is half the
+// entry's key, so an owner that keeps the old one ends up filing the new bytes under
+// the old engine's name.
+type live struct {
+	version string
+	variant string
 }
 
 // Run executes a sync (or status when DryRun) and returns a Report. The lockfile
@@ -222,12 +233,12 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	packs = filterPacks(packs, opts.OnlyGlob, opts.PackSelected)
 
-	report.PacksInScope = len(packs)
 	progress(fmt.Sprintf("%d packs selected; reading item pages…", len(packs)))
-	packFiles, err := fetchAll(ctx, c, packs, opts.Concurrency)
+	packFiles, unreadable, err := fetchAll(ctx, c, packs, opts.Concurrency)
 	if err != nil {
 		return Report{}, err
 	}
+	report.PacksInScope = len(packFiles)
 
 	priorByID := indexByFileID(lf)
 	cacheOK := cacheChecker(opts)
@@ -255,12 +266,12 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	}
 
 	resolvedByID := map[int]resolved{}
-	// The files this run proved have no usable copy anywhere, mapped to the version the
-	// live page listed. The in-scope entry is rebuilt untracked at that version, so
-	// without carrying both the verdict and the version to the other packs that own the
+	// The files this run proved have no usable copy anywhere, mapped to what the live
+	// page says they are. The in-scope entry is rebuilt untracked at that version, so
+	// without carrying both the verdict and the identity to the other packs that own the
 	// fileId, one owner keeps a record naming a cache path this run just found missing
 	// while another says the file was never downloaded — at a different version.
-	unresolvedByID := map[int]string{}
+	unresolvedByID := map[int]live{}
 
 	adoptedByID, adoptWarnings := adoptAll(opts, adoptCandidates(selOrder, selectedByID, priorByID))
 
@@ -273,7 +284,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			fd.Class = Adopted
 			report.Diffs = append(report.Diffs, fd)
 			report.Adopted = append(report.Adopted, fd)
-			r.version = rep.Version
+			r.version, r.variant = rep.Version, string(rep.Variant)
 			resolvedByID[id] = r
 			continue
 		}
@@ -284,7 +295,10 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 		switch {
 		case fd.Class == Unchanged:
-			resolvedByID[id] = resolved{cachePath: prior.CachePath, sha: prior.SHA256, size: prior.SizeBytes, version: rep.Version}
+			resolvedByID[id] = resolved{
+				cachePath: prior.CachePath, sha: prior.SHA256, size: prior.SizeBytes,
+				version: rep.Version, variant: string(rep.Variant),
+			}
 		case opts.DryRun:
 			// classify only; nothing resolved
 		default:
@@ -309,12 +323,15 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 				// Only Changed qualifies: every other class reaches here with no good
 				// prior copy to hold on to, and every owning pack has to say so.
 				if fd.Class == Changed && prior.CachePath != "" && cacheOK(prior) {
+					// The prior variant travels with the prior version for the same reason:
+					// these are the bytes the last run verified, so the entry has to name
+					// them as what they are, not as what the page now advertises.
 					resolvedByID[id] = resolved{
 						cachePath: prior.CachePath, sha: prior.SHA256,
-						size: prior.SizeBytes, version: prior.Version,
+						size: prior.SizeBytes, version: prior.Version, variant: prior.Variant,
 					}
 				} else {
-					unresolvedByID[id] = rep.Version
+					unresolvedByID[id] = live{version: rep.Version, variant: string(rep.Variant)}
 				}
 				continue
 			}
@@ -325,7 +342,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 					pruneWarnings = append(pruneWarnings, fmt.Sprintf("could not remove the prior %s: %v", prior.CachePath, err))
 				}
 			}
-			r.version = rep.Version
+			r.version, r.variant = rep.Version, string(rep.Variant)
 			resolvedByID[id] = r
 			report.Downloaded = append(report.Downloaded, fd)
 		}
@@ -333,6 +350,8 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
+	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf)...)
+	report.Warnings = append(report.Warnings, unreadable...)
 	report.Warnings = append(report.Warnings, append(adoptWarnings, pruneWarnings...)...)
 
 	if !opts.DryRun {
@@ -349,7 +368,12 @@ type packWithFiles struct {
 	unknown []string // rows whose variant this build does not recognize
 }
 
-func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurrency int) ([]packWithFiles, error) {
+// fetchAll reads every pack's item page, returning one entry per pack it could read
+// and a warning for each pack it read but could not make sense of. A pack is dropped
+// rather than represented by an empty entry: the caller rebuilds a lockfile record
+// from what it is handed here, so a slot that owns no files erases everything that
+// pack had.
+func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurrency int) ([]packWithFiles, []string, error) {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -359,11 +383,14 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 	// has already decided to abort.
 	fetchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	out := make([]packWithFiles, len(packs))
+	// A pointer per slot rather than a value: a pack that never ran, or one dropped
+	// below, leaves a nil that cannot be mistaken for a pack owning no files.
+	out := make([]*packWithFiles, len(packs))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
+	var dropped []string
 	for i, p := range packs {
 		wg.Add(1)
 		go func(i int, p model.Pack) {
@@ -374,10 +401,11 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 				return
 			}
 			files, unknown, err := c.ItemFiles(fetchCtx, p)
-			if err == nil && len(files) == 0 {
-				// Rebuilding a pack from an empty list erases every entry it holds, and
-				// an owned pack always ships at least one downloadable file, so this is
-				// markup we failed to read rather than a pack with nothing in it.
+			if err == nil && len(files) == 0 && len(unknown) == 0 {
+				// Nothing on the page read as a file at all: not a pack with nothing in
+				// it (an owned pack always ships at least one downloadable file) but
+				// markup we failed to read, and rebuilding from it erases every entry
+				// the pack holds.
 				err = fmt.Errorf("no files parsed (markup may have changed)")
 			}
 			if err != nil {
@@ -389,20 +417,40 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 				cancel()
 				return
 			}
-			out[i] = packWithFiles{pack: p, files: files, unknown: unknown}
+			if len(files) == 0 {
+				// The page parsed; every file on it is for an engine this build does not
+				// know. That is a future Synty variant, not breakage, and the parser
+				// deliberately skips such rows rather than failing — so the run must not
+				// fail either. Dropping the pack leaves its prior record to be carried
+				// forward whole, which is the only outcome that loses nothing.
+				mu.Lock()
+				dropped = append(dropped, fmt.Sprintf(
+					"%q lists only files whose variant this build does not recognize (%s); its lockfile record is carried forward unchanged",
+					p.DisplayName, strings.Join(unknown, ", ")))
+				mu.Unlock()
+				return
+			}
+			out[i] = &packWithFiles{pack: p, files: files, unknown: unknown}
 		}(i, p)
 	}
 	wg.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return nil, nil, firstErr
 	}
-	// A pack skipped on the way out leaves a zero entry behind, which reads
-	// downstream as a pack that owns no files and rebuilds its lockfile record as
-	// empty. Only an interrupted run gets here with nothing to report.
+	// A pack skipped on the way out leaves a nil behind. Only an interrupted run gets
+	// here with packs left unread, and it must say so rather than return a short list
+	// the caller would read as the whole library.
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out, nil
+	read := make([]packWithFiles, 0, len(out))
+	for _, pf := range out {
+		if pf != nil {
+			read = append(read, *pf)
+		}
+	}
+	sort.Strings(dropped)
+	return read, dropped, nil
 }
 
 // download fetches one file and checks the delivered bytes before letting them take a
@@ -684,9 +732,11 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, opts Options, f mo
 }
 
 // permanentDownloadFailure reports a download error a retry cannot fix: a body that
-// is not a package however many times it is fetched, or a 4xx — except 403, an
-// expired CloudFront signature that a fresh Resolve re-signs, and 429, a rate limit
-// that backing off clears.
+// is not a package however many times it is fetched, or a 4xx — except the three that
+// are about timing rather than the request being wrong. 403 is an expired CloudFront
+// signature that a fresh Resolve re-signs, 429 a rate limit that backing off clears,
+// and 408 the server saying the request did not finish in time. Only 403 is specific
+// to this layer; the other two match the page fetcher's policy.
 func permanentDownloadFailure(err error) bool {
 	if errors.Is(err, portal.ErrNotAPackage) || errors.Is(err, ErrNotAPackageBody) {
 		return true
@@ -695,7 +745,9 @@ func permanentDownloadFailure(err error) bool {
 	if !ok || code < 400 || code >= 500 {
 		return false
 	}
-	return code != http.StatusForbidden && code != http.StatusTooManyRequests
+	return code != http.StatusForbidden &&
+		code != http.StatusTooManyRequests &&
+		code != http.StatusRequestTimeout
 }
 
 // goneFromTheStore reports the one failure no future run can clear, so it is worth
@@ -705,7 +757,7 @@ func goneFromTheStore(err error) bool {
 	return ok && (code == http.StatusNotFound || code == http.StatusGone)
 }
 
-func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]string, prev lockfile.Lockfile) {
+func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID map[int]live, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
 	// A run acts only on the packs it fetched: those filtered out (disabled in the
 	// manifest, or outside --only) are never re-fetched, so carry their prior records
@@ -722,18 +774,25 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			continue
 		}
 		carried := lockfile.Pack{DisplayName: p.DisplayName, OrderID: p.OrderID, OrderItemID: p.OrderItemID, Files: map[string]lockfile.File{}}
-		for key, f := range p.Files {
+		// Sorted rather than map order: re-keying below can land two prior keys on one
+		// new key, and which entry survives must not depend on the iteration.
+		for _, key := range sortedKeys(p.Files) {
+			f := p.Files[key]
+			wasVariant := f.Variant
 			// The question is whether this fileId was re-resolved on this run, not
 			// whether its path moved: a re-fetch to the same filename still changes the
-			// bytes, and the version has to travel with them or the carried entry ends
+			// bytes, and the identity has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
 			if v, ok := unresolvedByID[f.FileID]; ok {
 				// The run went looking for these bytes and did not find them, so the
 				// record naming them has to go with them — at the version the run was
 				// looking for, or this owner reports the loss against a stale one.
 				f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
-				if v != "" {
-					f.Version = v
+				if v.version != "" {
+					f.Version = v.version
+				}
+				if v.variant != "" {
+					f.Variant = v.variant
 				}
 			} else if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
 				// Tracked or not: the variant filter is manifest-global, so a fileId this
@@ -743,6 +802,9 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				if r.version != "" {
 					f.Version = r.version
 				}
+				if r.variant != "" {
+					f.Variant = r.variant
+				}
 				f.Tracked = true
 				f.CachePath = r.cachePath
 				f.SHA256 = r.sha
@@ -750,6 +812,14 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				if r.now {
 					f.DownloadedAt = opts.Now
 				}
+			}
+			// The key is half variant, so an entry this run moved to a renamed variant has
+			// to move key with it, or the new engine's file stays filed under the old
+			// engine's name for every owner the run did not fetch while the one it did
+			// fetch is rebuilt under the new one. An entry the run left alone keeps the
+			// key it arrived with, whatever shape that key is in.
+			if f.Variant != wasVariant {
+				key = model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(f.Variant)}.Key()
 			}
 			carried.Files[key] = f
 		}
@@ -821,6 +891,48 @@ func warnings(packFiles []packWithFiles, filter func(model.Variant) bool) []stri
 	return w
 }
 
+// sortedKeys returns a pack's file keys in a fixed order, for the two places that
+// must not let Go's map iteration decide an outcome: which of two prior entries
+// sharing a fileId wins, and which of two entries landing on one key survives.
+func sortedKeys(files map[string]lockfile.File) []string {
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// archivedRecords names every file the prior lockfile tracked that this run's pages
+// now label archived. The store still lists it, so the pack keeps its entry and the
+// file never reaches orphanedRecords — but the entry is rebuilt untracked, taking its
+// cache path and sha with it while the bytes stay on disk. Nothing can take them back
+// either: an archived file is never selected, so it is never an adopt candidate, and
+// the adopt scan keys on the version the page now reports. Said once, on the run that
+// drops the record, since the run after finds nothing tracked to report.
+func archivedRecords(packFiles []packWithFiles, prev lockfile.Lockfile) []string {
+	prevByID := indexByFileID(prev)
+	seen := map[int]bool{}
+	var w []string
+	for _, pf := range packFiles {
+		for _, f := range pf.files {
+			if !f.Archived || seen[f.FileID] {
+				continue
+			}
+			p, ok := prevByID[f.FileID]
+			if !ok || !p.Tracked || p.CachePath == "" {
+				continue
+			}
+			seen[f.FileID] = true
+			w = append(w, fmt.Sprintf(
+				"%s is archived by the store (%s); it is no longer tracked and the cached copy at %s is now unreferenced",
+				f.Key(), f.Version, p.CachePath))
+		}
+	}
+	sort.Strings(w)
+	return w
+}
+
 // orphanedRecords names every file the prior lockfile tracked whose fileId the new
 // one records nowhere. A pack that leaves the library is reported on its own and
 // keeps its record; a single file leaving takes its record with it, and the bytes
@@ -863,12 +975,7 @@ func indexByFileID(lf lockfile.Lockfile) map[int]lockfile.File {
 	sort.Strings(slugs)
 	for _, slug := range slugs {
 		p := lf.Packs[slug]
-		keys := make([]string, 0, len(p.Files))
-		for k := range p.Files {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range sortedKeys(p.Files) {
 			f := p.Files[k]
 			// Prefer a tracked entry (with cachePath) if duplicated across packs.
 			if existing, ok := m[f.FileID]; !ok || (!existing.Tracked && f.Tracked) {
