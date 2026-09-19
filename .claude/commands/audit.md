@@ -39,11 +39,13 @@ formatting is not a finding.
 go build ./...
 gofmt -l .          # any output = unformatted files
 go vet ./...
-go test -race ./... # ~12s wall from a clean test cache
+go test -race ./... # ~30s wall from a clean test cache
 ```
 
-`internal/fixtures` is the slow package (~11s): four regex passes over 6.4 MB of
-committed captures. Everything else is a second or two.
+`internal/fixtures` is the slow package and is essentially the whole of that wall time
+(~30s under `-race`, ~3s without): the PII guards run several regex passes over 6.4 MB of
+committed captures, and the race detector multiplies that by roughly ten. Everything else
+is a second or two.
 
 This is exactly the gate in `.github/workflows/ci.yml`, which `release.yml` calls as its
 own gate, so the bar here is the bar for merging and tagging. There is no Makefile, task
@@ -353,9 +355,10 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   tokens the same way and should not drift from it. Tier 1/2.
 - The platform labels are shared across three files and nothing but a test binds them:
   `release.yml` publishes `mac-intel` / `mac-apple` / `linux-intel` / `linux-arm64` / `win`,
-  `selfupdate.platformAsset` matches on those suffixes, and `install.sh` derives them from
-  `uname`. A label that names an asset no release publishes fails only at update time.
-  Tier 1.
+  `selfupdate.assetSuffix` decides which one this platform wants (`platformAsset` then
+  finds it in the release), and `install.sh` derives them from `uname`. A label that names
+  an asset no release publishes fails only at update time. Both directions are bound in
+  `selfupdate_test.go`, against `release.yml` itself rather than a copied list. Tier 1.
 
 **Duplication and extraction**
 

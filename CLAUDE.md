@@ -54,7 +54,9 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   stall guard only starts once the headers arrive, so nothing else covers that phase.
   Parsing is deliberately strict: a non-empty page yielding zero files is a loud error, not
   a silent skip, except when every row's variant is unrecognized (see Key invariants).
-  `ErrExpiredSession` distinguishes an expired session from an empty library,
+  `ErrExpiredSession` distinguishes an expired session from an empty library on the
+  enumeration walk and from changed markup on an item page (a logout shell carries none of
+  the parser's selectors, so `ItemFiles` checks the sentinel before blaming the markup),
   `ErrNotAPackage` a download that answered with a document, and `ErrStalled` a body that
   stopped arriving. Downloads carry no whole-request deadline (a pack is gigabytes); the
   bound is `StallTimeout`, on silence, reset by every byte.
@@ -105,9 +107,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   holds some is refused rather than written — `syncer.ErrEmptyLibrary` for the lockfile,
   the same check in `main.selectPacks` for the manifest.
 - **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
-  `ErrExpiredSession` (via the page-1 logged-in sentinel) so a bad session aborts cleanly,
-  and an enumeration that comes back empty while the lockfile holds packs is refused
-  (`syncer.ErrEmptyLibrary`).
+  `ErrExpiredSession` via the logged-in sentinel, checked on **every** zero-anchor page and
+  not just the first, so a bad session aborts cleanly; `ItemFiles` returns it too, for a
+  session that expires part way through the item-page fetches. An enumeration that comes
+  back empty while the lockfile holds packs is refused (`syncer.ErrEmptyLibrary`).
 - **Nothing unverified reaches a real cache path.** `cache.Store` does not rename; the
   syncer `Commit`s only after the body checks pass. A download that answers with a
   document is refused twice — by Content-Type in `portal`, by a body sniff in `syncer` —
