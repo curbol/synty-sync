@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -634,14 +633,23 @@ var eocdSig = []byte("PK\x05\x06")
 
 const eocdSearchLen = (1 << 16) + 22
 
-// wholeArchive reports whether a zip on disk carries the trailer that only a complete
-// one has. The head sniff cannot see this: a copy that stopped part way still begins
-// with an archive's magic, and adopting it records its own short bytes as the file's
-// truth — after which every Verify compares those bytes against themselves and finds
-// them intact forever. Only .zip is checked, since it is the one container here whose
-// completeness is decidable without decompressing.
-func wholeArchive(libraryRoot, relPath string) error {
-	if !strings.EqualFold(path.Ext(relPath), ".zip") {
+// zipMagic opens every zip that holds anything: the first entry's local file header.
+var zipMagic = []byte("PK\x03\x04")
+
+// wholeArchive reports whether a file that opens as a zip carries the trailer only a
+// complete one has. The head sniff cannot see this: a copy that stopped part way still
+// begins with an archive's magic, and adopting it records its own short bytes as the
+// file's truth — after which every Verify compares those bytes against themselves and
+// finds them intact forever.
+//
+// Keyed on the leading bytes rather than the extension. The name comes from a signed
+// URL, a Content-Disposition, or a file someone placed by hand, so an archive can
+// arrive with no .zip on it at all — and the cache deliberately matches a wanted file
+// under any extension or none, which is exactly the set an extension check would
+// leave unexamined. A container this cannot read (.unitypackage) has no decidable
+// answer without decompressing and is passed through.
+func wholeArchive(libraryRoot, relPath string, head []byte) error {
+	if !bytes.HasPrefix(head, zipMagic) {
 		return nil
 	}
 	tail, err := cache.Tail(libraryRoot, relPath, eocdSearchLen)
@@ -665,7 +673,7 @@ func adoptable(libraryRoot, relPath string) error {
 	if err := sniffPackage(head); err != nil {
 		return err
 	}
-	return wholeArchive(libraryRoot, relPath)
+	return wholeArchive(libraryRoot, relPath, head)
 }
 
 // progressStep is how much has to transfer before another line is printed. Small

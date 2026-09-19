@@ -261,3 +261,54 @@ func TestStoreCommitsAReadableFile(t *testing.T) {
 		t.Errorf("committed cache file mode = %v, want 0644", got)
 	}
 }
+
+// Migrate and Locate are two halves of one question — is this file on disk the one
+// we want — and they have to answer it the same way. Migrate keys on the raw name;
+// Locate used to trim an extension before calling normalizeName, which trims one
+// itself, so the two disagreed on every name carrying a second dot. Both directions
+// cost something real: a name Migrate matches and Locate does not folds into the
+// layout once and is then invisible to the adopt scan forever, re-downloading
+// gigabytes after a lost lockfile; a name Locate matches and Migrate does not is a
+// partial transfer under a foreign extension, which slips the .zip-gated trailer
+// check and gets hashed as that file's truth.
+func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
+	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	for _, name := range []string{
+		"TOK_Godot_4_5_1_v1_0_1.zip",
+		"TOK_Godot_4_5_1_v1_0_1.unitypackage",
+		"TOK_Godot_4_5_1_v1_0_1",
+		"TOK_Godot_4_5_1_v1_0_1(1).zip",
+		"TOK_Godot_4_5_1_v1.0.1.zip",      // version rendered with dots
+		"TOK_Godot_4_5_1_v1_0_1.zip.part", // an interrupted browser download
+		"TOK_Godot_4_5_1_v9_9_9.zip",      // a different version entirely
+		"OTHER_Godot_4_5_1_v1_0_1.zip",    // a different file
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			// Migrate's view: the file sits flat at the root.
+			if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			moved, err := Migrate(root, []Wanted{w})
+			if err != nil {
+				t.Fatal(err)
+			}
+			migrateMatched := len(moved) == 1
+
+			// Locate's view: the same file already sits in the layout.
+			layout := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(layout, w.FileToken), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(layout, w.FileToken, name), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, locateMatched := Locate(layout, w)
+
+			if migrateMatched != locateMatched {
+				t.Errorf("Migrate matched=%v but Locate matched=%v for %q; one key, two answers",
+					migrateMatched, locateMatched, name)
+			}
+		})
+	}
+}

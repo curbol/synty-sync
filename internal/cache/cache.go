@@ -399,8 +399,10 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
 			continue
 		}
-		base := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		if normalizeName(base) == want {
+		// The raw name, exactly as Migrate keys it. normalizeName already drops one
+		// extension, so trimming one here first would make these two matchers disagree
+		// on every name carrying a second dot.
+		if normalizeName(e.Name()) == want {
 			return RelPath(w.FileToken, e.Name()), true
 		}
 	}

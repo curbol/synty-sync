@@ -1543,3 +1543,42 @@ func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
 		t.Errorf("owning packs diverged:\n  in-scope %+v\n  carried  %+v", in, out)
 	}
 }
+
+// The trailer check keys on the leading bytes, not the filename. The name comes from
+// a signed URL, a Content-Disposition, or a file someone placed by hand, and the
+// cache deliberately matches a wanted file under any extension or none — so an
+// extension check leaves unexamined exactly the names the cache is most willing to
+// adopt, and a truncated archive wearing one of them is hashed as the file's truth.
+func TestTruncatedArchiveIsRefusedWithoutAZipExtension(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Same truncated archive, no extension. normalizeName drops extensions, so the
+	// adopt scan matches this exactly as it would the .zip.
+	cut := truncatedPackageBytes("POLYGON_Pirate_Godot_4_5_1_v1_0_1")
+	if err := os.WriteFile(filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1"), cut, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	for _, d := range rep.Adopted {
+		if d.FileID == 2282645 {
+			t.Error("a truncated archive with no .zip on it was adopted as the pack's content")
+		}
+	}
+	if len(warnContaining(rep.Warnings, "end-of-central-directory")) == 0 {
+		t.Errorf("truncation not reported: %v", rep.Warnings)
+	}
+	lf, _ := lockfile.Load(lockPath)
+	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+	if f.SizeBytes == int64(len(cut)) {
+		t.Error("the lockfile recorded the truncated size as the file's truth")
+	}
+}
