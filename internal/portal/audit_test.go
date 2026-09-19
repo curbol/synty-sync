@@ -743,3 +743,139 @@ func TestAStructLiteralClientWorksLikeOneFromNew(t *testing.T) {
 		t.Errorf("request path %q doubled the separator; the trailing slash was not trimmed", gotPath)
 	}
 }
+
+// A download's header phase has no other bound. Resolve cannot take a context
+// deadline — that would cap a multi-gigabyte transfer — and the stall guard is only
+// installed once the headers arrive, so the response-header timeout is the whole of
+// what stands between a sync and an indefinite hang. This used to be set by the
+// caller in main, which left every other way of building a Client (the struct
+// literal the tests use, New with a nil client) unbounded while the doc comment
+// claimed otherwise.
+func TestResolveDoesNotHangWaitingForHeaders(t *testing.T) {
+	// A bare listener rather than an httptest server: httptest's Close waits for every
+	// connection to go idle, and the whole point here is one that never does.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Handshake completed, request readable, and then nothing — no status line,
+			// no headers — until the test is over.
+			go func() { <-release; conn.Close() }()
+		}
+	}()
+
+	// A struct literal with no HTTP client of its own, which is the shape that was
+	// unbounded. The timeout is short so the test does not wait out a real one.
+	c := &Client{BaseURL: "http://" + ln.Addr().String(), CustomerID: "1", Limits: Limits{HeaderTimeout: 150 * time.Millisecond}}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Resolve(context.Background(), model.FileEntry{
+			FileToken: "TOK", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1",
+		})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Resolve returned no error against a server that never sent headers")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Resolve hung waiting for response headers; nothing bounds that phase")
+	}
+}
+
+// The same bound reaches a client New builds, so the CLI is covered without main
+// having to know that a download cannot carry a deadline.
+func TestNewBuildsAClientThatBoundsTheHeaderPhase(t *testing.T) {
+	c := New(nil, "https://example.invalid", "1", "x=y")
+	tr, ok := c.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("New gave the client a %T transport, which carries no header bound", c.HTTP.Transport)
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Error("New's client has no ResponseHeaderTimeout; a download's header phase is unbounded")
+	}
+	if tr.ResponseHeaderTimeout != defaultHeaderTimeout {
+		t.Errorf("ResponseHeaderTimeout = %v, want the package default %v", tr.ResponseHeaderTimeout, defaultHeaderTimeout)
+	}
+}
+
+// retryAfter reads both header forms. Only delta-seconds was covered, and the
+// HTTP-date form is the one a real rate limit commonly uses — misreading it as
+// "no wait requested" drops back to a backoff measured in hundreds of milliseconds
+// and burns the whole attempt budget inside the window the store asked for.
+func TestRetryAfterReadsBothForms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		ok   bool
+		want func(time.Duration) bool
+	}{
+		{"delta seconds", "30", true, func(d time.Duration) bool { return d == 30*time.Second }},
+		{"zero", "0", true, func(d time.Duration) bool { return d == 0 }},
+		{"negative is not a wait", "-5", false, nil},
+		{"padded", "  12  ", true, func(d time.Duration) bool { return d == 12*time.Second }},
+		{"absent", "", false, nil},
+		{"garbage", "soon", false, nil},
+		{
+			name: "http-date in the future",
+			in:   time.Now().Add(45 * time.Second).UTC().Format(http.TimeFormat),
+			ok:   true,
+			// Second-granularity format plus the clock moving between the two calls.
+			want: func(d time.Duration) bool { return d > 40*time.Second && d <= 45*time.Second },
+		},
+		{
+			// A date already gone by means "now", not a negative wait that would make
+			// the select fire instantly forever.
+			name: "http-date in the past",
+			in:   time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat),
+			ok:   true,
+			want: func(d time.Duration) bool { return d == 0 },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := retryAfter(tc.in)
+			if ok != tc.ok {
+				t.Fatalf("retryAfter(%q) ok = %v, want %v", tc.in, ok, tc.ok)
+			}
+			if ok && !tc.want(got) {
+				t.Errorf("retryAfter(%q) = %v", tc.in, got)
+			}
+		})
+	}
+}
+
+// The download link is found by its shape, not by position. The store's own
+// stylesheet spaces several anchors in an actions block, so taking whichever comes
+// first hands back a neighbouring action whose href carries no download id — and
+// that is a hard parse error, so one template change fails every row of every pack
+// and the run aborts on the first one. Against every committed fixture the block
+// holds exactly one anchor, which makes the selector look like dead weight.
+func TestDownloadLinkIsFoundBehindAnotherAction(t *testing.T) {
+	html := []byte(`<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>POLYGON_Pirate_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
+	  <div class='sky-pilot-actions'>
+	    <a href='/products/polygon-pirate'>Preview</a>
+	    <a href='/apps/downloads/downloads/4242?x=1'>Download</a>
+	  </div>
+	</div>`)
+	files, _, err := ParseItemPage(html, "polygon-pirate-pack")
+	if err != nil {
+		t.Fatalf("a non-download anchor ahead of the download link broke parsing: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("parsed %d files, want 1: %+v", len(files), files)
+	}
+	if files[0].FileID != 4242 {
+		t.Errorf("fileId = %d, want 4242 (the download anchor, not its neighbour)", files[0].FileID)
+	}
+}

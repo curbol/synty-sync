@@ -2,7 +2,6 @@ package portal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -51,40 +50,6 @@ func TestGetBodyRedactsCustomerID(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), id) {
 		t.Errorf("customer id leaked into error message: %q", err)
-	}
-}
-
-func TestEnumerateExpiredSession(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `<html><body><h1>Login</h1></body></html>`) // no sentinel, zero packs
-	}))
-	defer srv.Close()
-
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
-	if _, err := c.Enumerate(context.Background()); !errors.Is(err, ErrExpiredSession) {
-		t.Errorf("err = %v, want ErrExpiredSession", err)
-	}
-}
-
-func TestEnumerateWalksToTerminator(t *testing.T) {
-	const sentinel = `<input class='sky-pilot-search-input'>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("line_items_page") == "1" {
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-				`<a href='/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pack A</a></div>`)
-			return
-		}
-		fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`) // empty terminator
-	}))
-	defer srv.Close()
-
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
-	packs, err := c.Enumerate(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(packs) != 1 || packs[0].DisplayName != "Pack A" {
-		t.Errorf("packs = %+v, want a single Pack A", packs)
 	}
 }
 

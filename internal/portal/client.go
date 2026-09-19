@@ -86,10 +86,12 @@ type Client struct {
 	Limits     Limits
 }
 
-// New returns a Client for baseURL. A nil httpClient means http.DefaultClient.
+// New returns a Client for baseURL. A nil httpClient gets one carrying the
+// response-header timeout a download's header phase depends on; a supplied one is
+// used as given, and owns that bound itself.
 func New(httpClient *http.Client, baseURL, customerID, cookie string) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Transport: boundedTransport(defaultHeaderTimeout)}
 	}
 	return &Client{
 		HTTP:       httpClient,
@@ -109,11 +111,28 @@ func (c *Client) base() string {
 
 // httpClient is the client requests go through, so a zero-value Client is usable
 // rather than a nil-pointer panic on its first use.
+//
+// The fallback is not http.DefaultClient: its transport has no response-header
+// timeout, and that is the only bound on a download's header phase. Resolve cannot
+// use a context deadline there (it would cap a multi-gigabyte transfer) and the
+// stall guard only starts once the headers arrive, so a struct-literal Client
+// against a server that answers the handshake and then goes quiet would hang for
+// good. Built per call rather than cached because the zero value has to work; a
+// caller that minds the allocation passes its own client, which New always does.
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return &http.Client{Transport: boundedTransport(c.limits().HeaderTimeout)}
+}
+
+// boundedTransport clones the default transport — so proxy settings from the
+// environment still apply — and gives it a response-header timeout. There is no
+// whole-request timeout: asset downloads are large.
+func boundedTransport(headerTimeout time.Duration) *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = headerTimeout
+	return tr
 }
 
 func (c *Client) ua() string {
@@ -144,9 +163,8 @@ type Limits struct {
 	Attempts int
 	// Backoff is the first wait between attempts; each later one doubles it.
 	Backoff time.Duration
-	// PageTimeout bounds one attempt end to end. The client sets no whole-request
-	// timeout (file downloads are large) and only a response-header timeout, which a
-	// server can satisfy and then stall the body forever.
+	// PageTimeout bounds one attempt end to end. It covers page fetches only: a
+	// download carries no whole-request deadline, since a pack runs to gigabytes.
 	PageTimeout time.Duration
 	// MaxPageBytes bounds the read: a library page is HTML, never megabytes.
 	MaxPageBytes int64
@@ -154,14 +172,22 @@ type Limits struct {
 	// gigabytes, so a deadline on the whole transfer would kill a legitimately slow
 	// one; this bounds how long the server may deliver nothing at all.
 	StallTimeout time.Duration
+	// HeaderTimeout bounds the wait for response headers. It is the only thing
+	// standing between a download and an unbounded hang: Resolve cannot take a
+	// deadline (that would cap the transfer) and the stall guard is not installed
+	// until the headers arrive, so a server that completes TLS and then says nothing
+	// blocks forever without it. Applied to the transport New builds; a caller that
+	// supplies its own http.Client owns this bound itself.
+	HeaderTimeout time.Duration
 }
 
 const (
-	defaultAttempts     = 4
-	defaultBackoff      = 500 * time.Millisecond
-	defaultPageTimeout  = 60 * time.Second
-	defaultMaxPageBytes = int64(8 << 20)
-	defaultStallTimeout = 2 * time.Minute
+	defaultAttempts      = 4
+	defaultBackoff       = 500 * time.Millisecond
+	defaultPageTimeout   = 60 * time.Second
+	defaultMaxPageBytes  = int64(8 << 20)
+	defaultStallTimeout  = 2 * time.Minute
+	defaultHeaderTimeout = 60 * time.Second
 )
 
 // limits fills in whatever the caller left zero.
@@ -181,6 +207,9 @@ func (c *Client) limits() Limits {
 	}
 	if l.StallTimeout <= 0 {
 		l.StallTimeout = defaultStallTimeout
+	}
+	if l.HeaderTimeout <= 0 {
+		l.HeaderTimeout = defaultHeaderTimeout
 	}
 	return l
 }

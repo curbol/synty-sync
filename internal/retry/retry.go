@@ -29,14 +29,10 @@ func Do(ctx context.Context, attempts int, base time.Duration, fn func() error) 
 	var requested time.Duration
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
-			wait := requested
-			if wait <= 0 {
-				wait = backoff(base, i)
-			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(wait):
+			case <-time.After(nextDelay(requested, base, i)):
 			}
 		}
 		requested = 0
@@ -50,11 +46,21 @@ func Do(ctx context.Context, attempts int, base time.Duration, fn func() error) 
 		}
 		var d *delayed
 		if errors.As(err, &d) {
-			requested = min(d.d, MaxDelay)
+			requested = d.d
 		}
 		lastErr = err
 	}
 	return lastErr
+}
+
+// nextDelay is how long to wait before attempt i (1-based after the first): the delay
+// an After-marked error asked for, capped, or exponential backoff when it asked for
+// nothing usable. Separate from Do so the cap is checkable without waiting one out.
+func nextDelay(requested, base time.Duration, i int) time.Duration {
+	if requested > 0 {
+		return min(requested, MaxDelay)
+	}
+	return backoff(base, i)
 }
 
 // backoff doubles with each attempt and adds up to as much again at random. Callers

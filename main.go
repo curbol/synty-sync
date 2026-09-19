@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -216,14 +215,13 @@ func sessionSource(cfg config.Config, override string) string {
 // decides which id and which cookie reach the client would ship untested.
 var storeBaseURL = "https://syntystore.com"
 
-// newPortalClient builds the store client. There is no whole-request timeout (asset
-// downloads are large), but a response-header timeout so a stalled connection fails
-// instead of hanging forever. The transport is cloned from the default so proxy
-// settings from the environment still apply.
+// newPortalClient builds the store client. The transport policy — no whole-request
+// timeout because asset downloads are large, but a response-header timeout so a
+// stalled connection fails instead of hanging forever — belongs to portal, which is
+// the layer that knows a download cannot take a deadline, so a nil client here gets
+// it rather than this one reproducing it.
 func newPortalClient(customerID, cookie string) *portal.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = 60 * time.Second
-	return portal.New(&http.Client{Transport: tr}, storeBaseURL, customerID, cookie)
+	return portal.New(nil, storeBaseURL, customerID, cookie)
 }
 
 // runSyncOrStatus loads the manifest and lockfile, runs the diff (downloading unless
