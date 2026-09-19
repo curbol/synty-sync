@@ -6,8 +6,10 @@ package lockfile
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
+
+	"github.com/curbol/synty-sync/internal/atomicfile"
 )
 
 // Lockfile is the on-disk record. customerId is deliberately absent (account PII).
@@ -75,37 +77,8 @@ func Save(path string, lf Lockfile) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".synty-lock-*")
-	if err != nil {
+	return atomicfile.Write(path, ".synty-lock-*", func(w io.Writer) error {
+		_, err := w.Write(raw)
 		return err
-	}
-	tmpName := tmp.Name()
-	// CreateTemp makes the file owner-only, and the mode survives the rename. This
-	// file is committed and travels with the consuming project, so inheriting 0600
-	// would quietly narrow it for anyone else who checks the project out.
-	if err := tmp.Chmod(committedFileMode(path)); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
-}
-
-// committedFileMode is the mode a rewritten committed file keeps: whatever it already
-// had, or a readable default when it is being created. os.CreateTemp opens at 0600 and
-// the rename carries that through, which would narrow a file the project shares.
-func committedFileMode(path string) os.FileMode {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.Mode().Perm()
-	}
-	return 0o644
+	})
 }

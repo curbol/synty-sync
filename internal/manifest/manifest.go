@@ -8,12 +8,14 @@ package manifest
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/curbol/synty-sync/internal/atomicfile"
 	"github.com/curbol/synty-sync/internal/model"
 )
 
@@ -112,29 +114,9 @@ func Save(path string, m Manifest) error {
 	// in place would reorder their slice behind their back.
 	m.Packs = append([]Entry(nil), m.Packs...)
 	sort.Slice(m.Packs, func(i, j int) bool { return m.Packs[i].Slug < m.Packs[j].Slug })
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".synty-sync-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	// CreateTemp makes the file owner-only, and the mode survives the rename. This
-	// file is committed and travels with the consuming project, so inheriting 0600
-	// would quietly narrow it for anyone else who checks the project out.
-	if err := tmp.Chmod(committedFileMode(path)); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := toml.NewEncoder(tmp).Encode(m); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, ".synty-sync-*", func(w io.Writer) error {
+		return toml.NewEncoder(w).Encode(m)
+	})
 }
 
 // Reconcile rebuilds the manifest against the currently-owned packs: existing
@@ -169,14 +151,4 @@ func (m *Manifest) SetEnabled(enabled map[string]bool) {
 	for i := range m.Packs {
 		m.Packs[i].Enabled = enabled[m.Packs[i].Slug]
 	}
-}
-
-// committedFileMode is the mode a rewritten committed file keeps: whatever it already
-// had, or a readable default when it is being created. os.CreateTemp opens at 0600 and
-// the rename carries that through, which would narrow a file the project shares.
-func committedFileMode(path string) os.FileMode {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.Mode().Perm()
-	}
-	return 0o644
 }
