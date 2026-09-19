@@ -47,6 +47,14 @@ func safeName(kind, name string) error {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("unsafe %s %q", kind, name)
 	}
+	// tempPrefix is a reserved namespace, not just a convention: Migrate, Locate and
+	// the adopt scan all skip it, and SweepTemps deletes anything wearing it once it is
+	// old enough. A portal-supplied name carrying it would commit to a real cache path
+	// that the next day's sweep removes and no scan can ever take back, so the file
+	// re-downloads on every run forever.
+	if strings.HasPrefix(name, tempPrefix) {
+		return fmt.Errorf("unsafe %s %q (%q is reserved for in-flight downloads)", kind, name, tempPrefix)
+	}
 	return nil
 }
 
@@ -312,13 +320,36 @@ type MigrateResult struct {
 var collisionSuffix = regexp.MustCompile(`\(\d+\)`)
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
-// normalizeName strips a (N) collision suffix and all non-alphanumerics and
+// normalizeKey strips a (N) collision suffix and all non-alphanumerics and
 // lowercases, so "INTERFACE_..._Source_Sprites_v3" and the item-page-derived
 // "INTERFACE_..._SourceSprites_v3" compare equal.
-func normalizeName(s string) string {
-	s = strings.TrimSuffix(s, filepath.Ext(s))
+func normalizeKey(s string) string {
 	s = collisionSuffix.ReplaceAllString(s, "")
 	return nonAlnum.ReplaceAllString(strings.ToLower(s), "")
+}
+
+// normalizeName is normalizeKey for a name that came off the disk, which carries an
+// extension the wanted-file key does not. Only a real filename goes through here:
+// filepath.Ext takes everything after the last dot anywhere in the string, so running
+// it over "<token>_<variant>_<version>" would truncate the key at the first version
+// rendered with a dot — dropping "v1.0.1" to "v1.0", and "v1.0" onto the genuinely
+// different "v1", which would fold one version's bytes in as another's and record that
+// sha as the file's truth.
+func normalizeName(s string) string {
+	return normalizeKey(strings.TrimSuffix(s, filepath.Ext(s)))
+}
+
+// preferredMatch reports whether name should displace best as the flat file standing
+// in for a wanted one. Several names can normalize onto a single wanted file: the
+// "(N)" suffix normalizeKey strips is exactly what a second copy of one download is
+// named. ReadDir is sorted, and "(" sorts before ".", so the collision copy comes back
+// ahead of the canonical name for no reason but its punctuation. Prefer the name that
+// needed the least normalizing, so the choice follows the file rather than the order.
+func preferredMatch(best, name string) bool {
+	if best == "" {
+		return true
+	}
+	return collisionSuffix.FindStringIndex(name) == nil && collisionSuffix.FindStringIndex(best) != nil
 }
 
 // Migrate folds pre-existing flat files at the library root into the file-identity
@@ -340,8 +371,27 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 		if safeName("file token", w.FileToken) != nil {
 			continue
 		}
-		key := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
-		byNorm[key] = w
+		byNorm[normalizeKey(w.FileToken+"_"+w.Variant+"_"+w.Version)] = w
+	}
+	// One flat file per wanted file, decided before anything moves. Folding in every
+	// name that matches would leave the copies the lockfile does not record sitting in
+	// the layout for good: nothing prunes them (the syncer only knows the path it
+	// recorded) and nothing sweeps them (they carry no temp prefix). It would also hand
+	// the caller two results for one fileId, letting ReadDir's order pick which copy
+	// gets hashed and recorded — the decision Locate already refuses to let punctuation
+	// make.
+	pick := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
+			continue
+		}
+		key := normalizeName(e.Name())
+		if _, ok := byNorm[key]; !ok {
+			continue
+		}
+		if preferredMatch(pick[key], e.Name()) {
+			pick[key] = e.Name()
+		}
 	}
 	var results []MigrateResult
 	for _, e := range entries {
@@ -352,8 +402,9 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
 			continue
 		}
-		w, ok := byNorm[normalizeName(e.Name())]
-		if !ok {
+		key := normalizeName(e.Name())
+		w, ok := byNorm[key]
+		if !ok || pick[key] != e.Name() {
 			continue
 		}
 		rel := RelPath(w.FileToken, e.Name())
@@ -391,13 +442,9 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	want := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
-	// Several names can normalize onto one wanted file: Migrate folds every flat entry
-	// that matches, and the "(N)" suffix normalizeName strips is exactly what a second
-	// copy of one download is named. ReadDir is sorted, and "(" sorts before ".", so the
-	// collision copy came back ahead of the canonical name for no reason but its
-	// punctuation. Prefer the name that needed the least normalizing, so the choice
-	// follows the file rather than the sort order.
+	want := normalizeKey(w.FileToken + "_" + w.Variant + "_" + w.Version)
+	// Several names can normalize onto one wanted file, so both matchers resolve that
+	// the same way, through preferredMatch.
 	best := ""
 	for _, e := range entries {
 		// An abandoned download temp is skipped outright: a partial transfer can carry
@@ -412,7 +459,7 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 		if normalizeName(e.Name()) != want {
 			continue
 		}
-		if best == "" || collisionSuffix.FindStringIndex(e.Name()) == nil && collisionSuffix.FindStringIndex(best) != nil {
+		if preferredMatch(best, e.Name()) {
 			best = e.Name()
 		}
 	}

@@ -276,17 +276,31 @@ func TestStoreCommitsAReadableFile(t *testing.T) {
 // check and gets hashed as that file's truth.
 func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
-	for _, name := range []string{
-		"TOK_Godot_4_5_1_v1_0_1.zip",
-		"TOK_Godot_4_5_1_v1_0_1.unitypackage",
-		"TOK_Godot_4_5_1_v1_0_1",
-		"TOK_Godot_4_5_1_v1_0_1(1).zip",
-		"TOK_Godot_4_5_1_v1.0.1.zip",      // version rendered with dots
-		"TOK_Godot_4_5_1_v1_0_1.zip.part", // an interrupted browser download
-		"TOK_Godot_4_5_1_v9_9_9.zip",      // a different version entirely
-		"OTHER_Godot_4_5_1_v1_0_1.zip",    // a different file
+	// A dotted version is what made the key's own extension-stripping visible: it used
+	// to run filepath.Ext over "<token>_<variant>_<version>", which takes everything
+	// after the last dot anywhere, so the key lost its tail while the disk name kept
+	// its own. Both rows below fail without normalizeKey — the first by missing a file
+	// that is right there, the second by matching one that is a different version.
+	dotted := Wanted{FileID: 8, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1.0.1"}
+	truncating := Wanted{FileID: 9, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1.0"}
+	for _, tc := range []struct {
+		name   string
+		wanted Wanted
+		want   bool
+	}{
+		{"TOK_Godot_4_5_1_v1_0_1.zip", w, true},
+		{"TOK_Godot_4_5_1_v1_0_1.unitypackage", w, true},
+		{"TOK_Godot_4_5_1_v1_0_1", w, true},
+		{"TOK_Godot_4_5_1_v1_0_1(1).zip", w, true},
+		{"TOK_Godot_4_5_1_v1.0.1.zip", w, true},       // version rendered with dots
+		{"TOK_Godot_4_5_1_v1_0_1.zip.part", w, false}, // an interrupted browser download
+		{"TOK_Godot_4_5_1_v9_9_9.zip", w, false},      // a different version entirely
+		{"OTHER_Godot_4_5_1_v1_0_1.zip", w, false},    // a different file
+		{"TOK_Godot_4_5_1_v1.0.1.zip", dotted, true},  // the key keeps its own dots
+		{"TOK_Godot_4_5_1_v1.zip", truncating, false}, // v1 is not v1.0
 	} {
-		t.Run(name, func(t *testing.T) {
+		name, w := tc.name, tc.wanted
+		t.Run(name+"/"+w.Version, func(t *testing.T) {
 			root := t.TempDir()
 			// Migrate's view: the file sits flat at the root.
 			if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
@@ -311,6 +325,12 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if migrateMatched != locateMatched {
 				t.Errorf("Migrate matched=%v but Locate matched=%v for %q; one key, two answers",
 					migrateMatched, locateMatched, name)
+			}
+			// Agreement alone is not the property: two matchers that both stopped
+			// matching would agree perfectly while every pack on disk re-downloaded.
+			if migrateMatched != tc.want {
+				t.Errorf("matched=%v, want %v for %q against version %q",
+					migrateMatched, tc.want, name, w.Version)
 			}
 		})
 	}
@@ -399,5 +419,66 @@ func TestLocatePrefersTheCanonicalNameOverACollisionCopy(t *testing.T) {
 				t.Errorf("Locate returned %q, want the canonical %q", rel, canonical)
 			}
 		})
+	}
+}
+
+// Migrate used to fold in every flat name that matched a wanted file, so a library
+// holding both "pack.zip" and the "pack(1).zip" that a re-download leaves behind moved
+// both into the layout. The copy the lockfile does not record is then stranded for
+// good — the syncer prunes only the path it recorded, and SweepTemps skips anything
+// without the temp prefix — and the caller, which keys results by fileId, had two to
+// choose from and took whichever ReadDir yielded last. That is the same coin-flip
+// Locate refuses to let "(" sorting before "." decide.
+func TestMigrateFoldsOneCopyOfACollisionPairAndLeavesTheOther(t *testing.T) {
+	root := t.TempDir()
+	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	const canonical = "TOK_Godot_4_5_1_v1_0_1.zip"
+	const collision = "TOK_Godot_4_5_1_v1_0_1(1).zip"
+	for _, n := range []string{canonical, collision} {
+		if err := os.WriteFile(filepath.Join(root, n), []byte("bytes of "+n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	moved, err := Migrate(root, []Wanted{w})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 1 {
+		t.Fatalf("Migrate returned %d results for one wanted file: %+v", len(moved), moved)
+	}
+	if moved[0].From != canonical {
+		t.Errorf("folded in %q; the canonical name should win over a (N) copy", moved[0].From)
+	}
+	if moved[0].RelPath != RelPath(w.FileToken, canonical) {
+		t.Errorf("relPath = %q, want %q", moved[0].RelPath, RelPath(w.FileToken, canonical))
+	}
+
+	layout, err := os.ReadDir(filepath.Join(root, w.FileToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layout) != 1 {
+		t.Errorf("layout holds %d files, want 1; the unrecorded copy is stranded there", len(layout))
+	}
+	// The one left behind stays flat, where the user can see it and delete it.
+	if _, err := os.Stat(filepath.Join(root, collision)); err != nil {
+		t.Errorf("the collision copy should be left flat at the root, not moved: %v", err)
+	}
+}
+
+// The filename comes from a signed URL or a Content-Disposition, so the store picks it.
+// safeName rejected path components but not the prefix the cache reserves for in-flight
+// downloads: a file committed as ".synty-dl-*" is deleted by the next day's SweepTemps,
+// skipped by Migrate, Locate and the adopt scan, and so re-downloaded on every run for
+// as long as the user owns it.
+func TestStoreRefusesAFilenameWearingTheTempPrefix(t *testing.T) {
+	root := t.TempDir()
+	_, err := Store(root, "TOK", tempPrefix+"pack.zip", strings.NewReader("x"))
+	if err == nil {
+		t.Fatal("Store accepted a filename in the reserved temp namespace")
+	}
+	if !strings.Contains(err.Error(), tempPrefix) {
+		t.Errorf("error %q does not name the reserved prefix", err)
 	}
 }
