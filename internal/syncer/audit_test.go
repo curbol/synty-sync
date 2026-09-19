@@ -1762,3 +1762,39 @@ func TestDeselectedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
 		})
 	}
 }
+
+// A flat file that Migrate moves and adopt then refuses is sitting in the layout, where
+// the scan that follows finds it again. adoptAll carries a `refused` set so it is not
+// turned away twice and the same reason printed twice for one file — a comment naming a
+// bug that happened, with nothing behind it until now.
+func TestARefusedFlatFileIsReportedOnce(t *testing.T) {
+	srv := newServer(t, serverOpts{downloadName: func(fileID string) (string, bool) {
+		if fileID == "2344711" {
+			return "GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip", true
+		}
+		return "", false
+	}})
+	lib := t.TempDir()
+	// Flat at the library root, under the name the wanted file normalizes onto, so
+	// Migrate folds it in and adopt then has to look at the bytes.
+	planted := filepath.Join(lib, "GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip")
+	if err := os.WriteFile(planted, []byte("<!doctype html><title>Log in</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refusals := 0
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "not adopting") && strings.Contains(w, "GENERIC_Particle_FX") {
+			refusals++
+		}
+	}
+	if refusals != 1 {
+		t.Errorf("the same refused file was reported %d times:\n%s", refusals, strings.Join(rep.Warnings, "\n"))
+	}
+}

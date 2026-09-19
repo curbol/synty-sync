@@ -482,3 +482,35 @@ func TestStoreRefusesAFilenameWearingTheTempPrefix(t *testing.T) {
 		t.Errorf("error %q does not name the reserved prefix", err)
 	}
 }
+
+// Hash is what adoption writes into the lockfile as a file's permanent truth, and what
+// VerifyDeep compares against on every full verify afterwards. Until now it was only
+// asserted to return without an error, so a digest computed over the wrong stream —
+// the head, a re-opened handle, anything — would have been recorded as that file's sha
+// and then agreed with itself forever.
+func TestHashAgreesWithWhatStoreRecorded(t *testing.T) {
+	root := t.TempDir()
+	body := strings.Repeat("some package bytes ", 1000)
+
+	pending, err := Store(root, "TOK", "pack.zip", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pending.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	sha, size, err := Hash(root, pending.RelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != pending.SHA256 {
+		t.Errorf("Hash = %s, Store recorded %s; the two disagree about the same bytes", sha, pending.SHA256)
+	}
+	if size != pending.Size || size != int64(len(body)) {
+		t.Errorf("Hash size = %d, Store recorded %d, body is %d", size, pending.Size, len(body))
+	}
+	if !VerifyDeep(root, pending.RelPath, sha) {
+		t.Error("VerifyDeep rejects the digest Hash just produced")
+	}
+}
