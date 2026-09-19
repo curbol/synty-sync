@@ -392,6 +392,13 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 		return "", false
 	}
 	want := normalizeName(w.FileToken + "_" + w.Variant + "_" + w.Version)
+	// Several names can normalize onto one wanted file: Migrate folds every flat entry
+	// that matches, and the "(N)" suffix normalizeName strips is exactly what a second
+	// copy of one download is named. ReadDir is sorted, and "(" sorts before ".", so the
+	// collision copy came back ahead of the canonical name for no reason but its
+	// punctuation. Prefer the name that needed the least normalizing, so the choice
+	// follows the file rather than the sort order.
+	best := ""
 	for _, e := range entries {
 		// An abandoned download temp is skipped outright: a partial transfer can carry
 		// enough of the name to normalize onto a wanted file, and adopting it would
@@ -402,9 +409,15 @@ func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
 		// The raw name, exactly as Migrate keys it. normalizeName already drops one
 		// extension, so trimming one here first would make these two matchers disagree
 		// on every name carrying a second dot.
-		if normalizeName(e.Name()) == want {
-			return RelPath(w.FileToken, e.Name()), true
+		if normalizeName(e.Name()) != want {
+			continue
+		}
+		if best == "" || collisionSuffix.FindStringIndex(e.Name()) == nil && collisionSuffix.FindStringIndex(best) != nil {
+			best = e.Name()
 		}
 	}
-	return "", false
+	if best == "" {
+		return "", false
+	}
+	return RelPath(w.FileToken, best), true
 }

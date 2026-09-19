@@ -56,13 +56,7 @@ func TestStoreRejectsUnsafePathComponents(t *testing.T) {
 
 func TestStoreAndVerify(t *testing.T) {
 	lib := t.TempDir()
-	p, err := Store(lib, "POLYGON_Pirate", "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip", strings.NewReader("hello"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	p := storeCommitted(t, lib, "POLYGON_Pirate", "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip", "hello")
 	if p.RelPath != "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip" {
 		t.Errorf("relPath = %q", p.RelPath)
 	}
@@ -250,13 +244,7 @@ func TestSweepTempsRemovesAbandonedDownloadsButSparesFreshOnes(t *testing.T) {
 
 func TestVerifyCatchesTruncationWithoutHashing(t *testing.T) {
 	lib := t.TempDir()
-	p, err := Store(lib, "TOKEN", "pack.zip", strings.NewReader("the whole body"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	p := storeCommitted(t, lib, "TOKEN", "pack.zip", "the whole body")
 	if !Verify(lib, p.RelPath, p.Size) {
 		t.Fatal("Verify rejected an intact file")
 	}
@@ -270,13 +258,7 @@ func TestVerifyCatchesTruncationWithoutHashing(t *testing.T) {
 
 func TestVerifyDeepCatchesCorruptionThatKeptTheSize(t *testing.T) {
 	lib := t.TempDir()
-	p, err := Store(lib, "TOKEN", "pack.zip", strings.NewReader("original"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	p := storeCommitted(t, lib, "TOKEN", "pack.zip", "original")
 	if !VerifyDeep(lib, p.RelPath, p.SHA256) {
 		t.Fatal("VerifyDeep rejected an intact file")
 	}

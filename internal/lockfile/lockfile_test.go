@@ -1,9 +1,7 @@
 package lockfile
 
 import (
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -50,31 +48,6 @@ func TestRoundTrip(t *testing.T) {
 	got := out.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
 	if got.FileID != 2282645 || got.SHA256 != "abc" || !got.Tracked {
 		t.Errorf("round-trip lost data: %+v", got)
-	}
-}
-
-func TestStableFormatting(t *testing.T) {
-	dir := t.TempDir()
-	p1 := filepath.Join(dir, "a.json")
-	p2 := filepath.Join(dir, "b.json")
-	if err := Save(p1, sample()); err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(p2, sample()); err != nil {
-		t.Fatal(err)
-	}
-	b1, _ := os.ReadFile(p1)
-	b2, _ := os.ReadFile(p2)
-	if string(b1) != string(b2) {
-		t.Error("two saves of identical data differ")
-	}
-	// Keys are sorted: animation pack appears before polygon pack.
-	s := string(b1)
-	if strings.Index(s, "animation-base-locomotion") > strings.Index(s, "polygon-pirate-pack") {
-		t.Error("pack keys not sorted")
-	}
-	if !strings.HasSuffix(s, "}\n") {
-		t.Error("missing trailing newline")
 	}
 }
 

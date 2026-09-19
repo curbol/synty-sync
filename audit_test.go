@@ -255,7 +255,7 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
 
-			token := waitForSelectPage(t, addr)
+			token := waitForSelectPage(t, addr, nil)
 			resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": tc.post, "csrf": {token}})
 			if err != nil {
 				t.Fatal(err)
@@ -291,12 +291,22 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 	}
 }
 
-// waitForSelectPage blocks until the page is being served and returns the token its
-// form carries, which is what separates a submission from the rendered page from one
-// any other tab could forge.
-func waitForSelectPage(t *testing.T, addr string) string {
+// formTokenRe reads the per-invocation token out of the rendered page. It is what
+// separates a submission from the page synty-sync served from one any other tab could
+// forge, so a test that posts a selection has to go and get it.
+var formTokenRe = regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`)
+
+// waitForSelectPage blocks until the page is being served and returns its form token.
+// done, when non-nil, is the channel run's error arrives on: a run that failed before
+// serving says why, which beats polling out on a page that was never coming.
+func waitForSelectPage(t *testing.T, addr string, done <-chan error) string {
 	t.Helper()
-	for i := 0; i < 100; i++ {
+	for range 200 {
+		select {
+		case err := <-done:
+			t.Fatalf("run returned before serving the page: %v", err)
+		default:
+		}
 		resp, err := http.Get("http://" + addr + "/")
 		if err != nil {
 			time.Sleep(10 * time.Millisecond)
@@ -304,7 +314,7 @@ func waitForSelectPage(t *testing.T, addr string) string {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		m := regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`).FindSubmatch(body)
+		m := formTokenRe.FindSubmatch(body)
 		if m == nil {
 			t.Fatal("the select page carries no form token")
 		}
@@ -733,15 +743,7 @@ func TestSelectRefusesToRewriteTheManifestFromAnEmptyLibrary(t *testing.T) {
 // to creating one in the working directory rather than erroring the way the commands
 // that only read a manifest do.
 func TestResolveManifestPathLetsSelectStartAProject(t *testing.T) {
-	dir := t.TempDir()
-	restore, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chdir(restore) })
+	t.Chdir(t.TempDir())
 
 	got, err := resolveManifestPath("", "select")
 	if err != nil {
@@ -937,29 +939,7 @@ func TestRunSelectServesOnTheAddressItWasGiven(t *testing.T) {
 	// Submit the one pack the page offered, which is what proves the listener run
 	// bound is the one web.Serve is answering on.
 	base := "http://" + addr
-	var token string
-	for i := 0; i < 200 && token == ""; i++ {
-		// run returning early means it failed before serving; its error says why, which
-		// beats timing out on a page that is never coming.
-		select {
-		case err := <-done:
-			t.Fatalf("run returned before serving the page: %v", err)
-		default:
-		}
-		resp, err := http.Get(base + "/")
-		if err != nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(string(body)); m != nil {
-			token = m[1]
-		}
-	}
-	if token == "" {
-		t.Fatal("the selection page never came up on --addr")
-	}
+	token := waitForSelectPage(t, addr, done)
 	resp, err := http.PostForm(base+"/save", url.Values{
 		"pack": {"polygon-pirate-pack"},
 		"csrf": {token},

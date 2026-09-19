@@ -490,12 +490,3 @@ func pickGeckoProfile(cands []geckoProfile) string {
 	})
 	return cands[0].path
 }
-
-// locateGeckoCookieDB finds the best cookies.sqlite under a single Gecko profile base.
-func locateGeckoCookieDB(base string) (string, error) {
-	cands, err := geckoCandidates(base)
-	if err != nil {
-		return "", err
-	}
-	return pickGeckoProfile(cands), nil
-}

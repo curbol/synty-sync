@@ -105,4 +105,13 @@ func TestSaveIsByteStableAcrossRuns(t *testing.T) {
 	if string(ab) != string(bb) {
 		t.Errorf("two saves of one record differ:\n%s\n---\n%s", ab, bb)
 	}
+	// What makes them stable: encoding/json sorts map keys, and Save appends the
+	// newline. A slice written without sorting, or a dropped newline, churns the file.
+	out := string(ab)
+	if strings.Index(out, "animation-base-locomotion") > strings.Index(out, "polygon-pirate-pack") {
+		t.Error("pack keys are not sorted; every run would reorder the file")
+	}
+	if !strings.HasSuffix(out, "}\n") {
+		t.Error("no trailing newline; every run would rewrite the last line")
+	}
 }

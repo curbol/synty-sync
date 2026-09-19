@@ -69,9 +69,22 @@ func TestGeckoCookieHeaderReadsUncheckpointedWrites(t *testing.T) {
 	}
 }
 
+// pickUnder is the composition FromBrowser uses: candidates from a base, then a pick
+// across them. Calling it here rather than a per-base wrapper keeps these guards on the
+// path production takes, since ranking per base is the thing FromBrowser deliberately
+// does not do.
+func pickUnder(t *testing.T, base string) (string, error) {
+	t.Helper()
+	cands, err := geckoCandidates(base)
+	if err != nil {
+		return "", err
+	}
+	return pickGeckoProfile(cands), nil
+}
+
 // Gecko profile folders are named inconsistently across installs, so the pick has
 // to prefer default+release, then any default, then the most recently used.
-func TestLocateGeckoCookieDBPrefersDefaultRelease(t *testing.T) {
+func TestGeckoProfilePickPrefersDefaultRelease(t *testing.T) {
 	base := t.TempDir()
 	mkProfile := func(name string, age time.Duration) string {
 		dir := filepath.Join(base, name)
@@ -92,7 +105,7 @@ func TestLocateGeckoCookieDBPrefersDefaultRelease(t *testing.T) {
 	plainDefault := mkProfile("aaa.Default", time.Hour)
 	want := mkProfile("bbb.Default (release)", 2*time.Hour)
 
-	got, err := locateGeckoCookieDB(base)
+	got, err := pickUnder(t, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +117,7 @@ func TestLocateGeckoCookieDBPrefersDefaultRelease(t *testing.T) {
 	if err := os.RemoveAll(filepath.Dir(want)); err != nil {
 		t.Fatal(err)
 	}
-	got, err = locateGeckoCookieDB(base)
+	got, err = pickUnder(t, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +126,8 @@ func TestLocateGeckoCookieDBPrefersDefaultRelease(t *testing.T) {
 	}
 }
 
-func TestLocateGeckoCookieDBWithNoProfiles(t *testing.T) {
-	if _, err := locateGeckoCookieDB(t.TempDir()); err == nil {
+func TestGeckoProfilePickWithNoProfiles(t *testing.T) {
+	if _, err := pickUnder(t, t.TempDir()); err == nil {
 		t.Error("expected an error when no profile holds a cookies.sqlite")
 	}
 }

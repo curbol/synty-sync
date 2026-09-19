@@ -10,6 +10,21 @@ import (
 	"time"
 )
 
+// storeCommitted writes body into the layout and commits it, which seven tests need
+// before they can assert anything about a cached file. Store deliberately stops at a
+// temp file, so every one of them otherwise repeats the same two error checks.
+func storeCommitted(t *testing.T, root, token, filename, body string) *Pending {
+	t.Helper()
+	p, err := Store(root, token, filename, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // A download that dies mid-stream must not leave its partial temp file behind.
 func TestStoreCleansUpAfterFailedCopy(t *testing.T) {
 	root := t.TempDir()
@@ -77,13 +92,7 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 // ordinary case.
 func TestCachePathsAcceptOrdinaryRelativePaths(t *testing.T) {
 	root := t.TempDir()
-	p, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("bytes"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	p := storeCommitted(t, root, "TOKEN", "pack.zip", "bytes")
 	rel := p.RelPath
 	if !Verify(root, rel, p.Size) || !VerifyDeep(root, rel, p.SHA256) {
 		t.Errorf("a stored file at %q is not visible to Verify/VerifyDeep", rel)
@@ -246,13 +255,7 @@ func TestMigrateOnAMissingRoot(t *testing.T) {
 // configurable, so it can sit on a volume more than one account reads.
 func TestStoreCommitsAReadableFile(t *testing.T) {
 	root := t.TempDir()
-	p, err := Store(root, "T", "x.zip", strings.NewReader("PK\x03\x04data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	storeCommitted(t, root, "T", "x.zip", "PK\x03\x04data")
 	fi, err := os.Stat(filepath.Join(root, "T", "x.zip"))
 	if err != nil {
 		t.Fatal(err)
@@ -308,6 +311,92 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if migrateMatched != locateMatched {
 				t.Errorf("Migrate matched=%v but Locate matched=%v for %q; one key, two answers",
 					migrateMatched, locateMatched, name)
+			}
+		})
+	}
+}
+
+// Tail reads from the end, and until now nothing read a file bigger than the window it
+// asks for: every archive the suite builds is a ~150-byte zip against the 64KiB the
+// end-of-central-directory search wants, so size-n was always 0 and only the clamp ran.
+// The seek is what the trailer check rests on. Reading the head instead would reject
+// every genuine multi-megabyte pack's EOCD, which stops adoption silently and
+// re-downloads gigabytes; worse in the other direction, a truncated pack whose first
+// 64KiB happens to hold the signature would be hashed as that file's truth.
+func TestTailReadsTheEndOfAFileLargerThanTheWindow(t *testing.T) {
+	root := t.TempDir()
+	const marker, decoy = "THE-REAL-TRAILER", "NOT-THE-TRAILER"
+	body := append([]byte(decoy), make([]byte, 96<<10)...)
+	body = append(body, marker...)
+
+	p := storeCommitted(t, root, "T", "big.bin", string(body))
+
+	const window = 1024
+	tail, err := Tail(root, p.RelPath, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) != window {
+		t.Errorf("Tail returned %d bytes, want the %d it was asked for", len(tail), window)
+	}
+	if !strings.HasSuffix(string(tail), marker) {
+		t.Errorf("Tail did not return the end of the file; last bytes were %q", tail[max(len(tail)-len(marker), 0):])
+	}
+	if strings.Contains(string(tail), decoy) {
+		t.Error("Tail returned the head of the file; the seek offset is wrong")
+	}
+}
+
+// Head is Tail's twin and reads the other end, so the same file pins both.
+func TestHeadReadsTheStartOfAFileLargerThanTheWindow(t *testing.T) {
+	root := t.TempDir()
+	const marker = "PK\x03\x04THE-REAL-HEAD"
+	body := append([]byte(marker), make([]byte, 96<<10)...)
+
+	p := storeCommitted(t, root, "T", "big.bin", string(body))
+
+	const window = 512
+	head, err := Head(root, p.RelPath, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(head) != window {
+		t.Errorf("Head returned %d bytes, want the %d it was asked for", len(head), window)
+	}
+	if !strings.HasPrefix(string(head), marker) {
+		t.Errorf("Head did not return the start of the file, got %q", head[:min(len(head), len(marker))])
+	}
+}
+
+// Two names in the layout can normalize onto one wanted file: Migrate folds every
+// matching flat entry, and "(1)" is exactly what a second copy of one download is
+// called. ReadDir is sorted and "(" sorts before ".", so the collision copy used to win
+// on punctuation alone, and the adopted bytes were whichever name sorted first rather
+// than the canonical one.
+func TestLocatePrefersTheCanonicalNameOverACollisionCopy(t *testing.T) {
+	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	const canonical = "TOK_Godot_4_5_1_v1_0_1.zip"
+	const collision = "TOK_Godot_4_5_1_v1_0_1(1).zip"
+	// Written in both orders: a tie-break that follows creation order rather than the
+	// name passes one of these by luck.
+	for _, order := range [][]string{{canonical, collision}, {collision, canonical}} {
+		t.Run(order[0]+" first", func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, w.FileToken)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range order {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rel, ok := Locate(root, w)
+			if !ok {
+				t.Fatal("Locate found neither copy")
+			}
+			if rel != RelPath(w.FileToken, canonical) {
+				t.Errorf("Locate returned %q, want the canonical %q", rel, canonical)
 			}
 		})
 	}
