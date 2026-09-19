@@ -48,9 +48,12 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `portal` — the Sky Pilot Shopify portal client. `client.go` does HTTP (retry with
   backoff on 5xx/transient; fail-fast on 4xx), the `Enumerate` / `ItemFiles` / `Resolve`
   calls, and the response-level download guard; `parse.go` parses library-list and item
-  pages with goquery. Retry counts, the per-attempt deadline and the page-size bound live
-  on the client's `Limits` field, not in package vars. Parsing is deliberately strict: a
-  non-empty page yielding zero files is a loud error, not a silent skip.
+  pages with goquery. Retry counts, the per-attempt deadline, the page-size bound and the
+  response-header timeout live on the client's `Limits` field, not in package vars; the
+  header bound is included because a download cannot take a whole-request deadline and the
+  stall guard only starts once the headers arrive, so nothing else covers that phase.
+  Parsing is deliberately strict: a non-empty page yielding zero files is a loud error, not
+  a silent skip, except when every row's variant is unrecognized (see Key invariants).
   `ErrExpiredSession` distinguishes an expired session from an empty library,
   `ErrNotAPackage` a download that answered with a document, and `ErrStalled` a body that
   stopped arriving. Downloads carry no whole-request deadline (a pack is gigabytes); the
@@ -118,8 +121,13 @@ Layered `internal/` packages, each with a package doc comment stating its contra
   file that already had a verified copy keeps its record when the *update* fails, at the
   version those bytes actually are — otherwise the cache holds them with nothing recording
   them, and an out-of-scope owner of the same `fileId` diverges from an in-scope one.
-- **Strict parsing.** A non-empty page that parses to zero files is an error; each tracked
-  file must yield a `fileId` and a version.
+- **Strict parsing, with one deliberate exception.** A non-empty page that parses to zero
+  files is an error; each tracked file must yield a `fileId` and a version. The exception is
+  a page whose every row carries a variant keyword this build does not recognize: a future
+  Synty engine, not broken markup. `ParseItemPage` returns those labels in `unknown` rather
+  than failing, and `syncer.fetchAll` drops the pack so its prior record is carried forward
+  whole and names the label in a warning. Failing there would take the whole mirror down over
+  one new engine; rebuilding the pack from the empty list would erase everything it holds.
 - **No PII in the repo.** The customer id, emails, cookies, and session captures
   (`config.toml`, `*.curl`, `cookies.txt`) live in the config dir outside this repo. The
   project manifest and lockfile (`synty-sync.toml`, `synty-sync.lock.json`) belong with

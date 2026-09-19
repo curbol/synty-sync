@@ -81,7 +81,7 @@ func TestLoadReportsAConfigItCannotRead(t *testing.T) {
 
 // The documented precedence is --config › $SYNTY_CONFIG_DIR › $XDG_CONFIG_HOME ›
 // ~/.config. TestResolveDir walks the rungs one at a time with everything above each
-// one cleared, so it says which rung is *reachable* but nothing about which wins — an
+// one cleared, so it says which rung is *reachable* but nothing about which wins: an
 // implementation that consulted XDG_CONFIG_HOME before SYNTY_CONFIG_DIR, or the
 // environment before the flag, passes it unchanged. Order is the whole contract of
 // this function: getting it wrong points the tool at a config dir the user is not

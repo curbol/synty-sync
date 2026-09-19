@@ -160,8 +160,8 @@ func run(args []string) error {
 	lockPath := manifest.LockPath(manifestPath)
 
 	// Before the user config is even looked at: list reads one JSON file beside the
-	// manifest and nothing else, so a stray key in config.toml — which Load rejects
-	// outright — has no business stopping it.
+	// manifest and nothing else, so a stray key in config.toml, which Load rejects
+	// outright, has no business stopping it.
 	if cmd == "list" {
 		return list(stdout, lockPath)
 	}
@@ -223,9 +223,9 @@ func sessionSource(cfg config.Config, override string) string {
 // decides which id and which cookie reach the client would ship untested.
 var storeBaseURL = "https://syntystore.com"
 
-// newPortalClient builds the store client. The transport policy — no whole-request
+// newPortalClient builds the store client. The transport policy (no whole-request
 // timeout because asset downloads are large, but a response-header timeout so a
-// stalled connection fails instead of hanging forever — belongs to portal, which is
+// stalled connection fails instead of hanging forever) belongs to portal, which is
 // the layer that knows a download cannot take a deadline, so a nil client here gets
 // it rather than this one reproducing it.
 func newPortalClient(customerID, cookie string) *portal.Client {

@@ -541,7 +541,7 @@ func TestExecutableMagicPerPlatform(t *testing.T) {
 }
 
 // An asset request to api.github.com is answered with a 302 to a CDN host whose query
-// carries a signature — a live bearer credential for a private release asset.
+// carries a signature: a live bearer credential for a private release asset.
 // net/http reports a failure on a redirected request against the last URL it tried,
 // stripping only the userinfo password, so the signature rides into the error text
 // and out to stderr unless the query is dropped.
@@ -576,7 +576,7 @@ func TestDownloadErrorAfterARedirectDropsTheSignature(t *testing.T) {
 }
 
 // GitHub answers 404 rather than 403 for a private repo the caller cannot see, so a
-// token that simply lacks access to this repo produces "no releases found" — which is
+// token that simply lacks access to this repo produces "no releases found", which is
 // false, and leaves the user with nothing to check. Both branches have to point
 // somewhere.
 func TestNotFoundAlwaysSaysSomethingAboutTheToken(t *testing.T) {

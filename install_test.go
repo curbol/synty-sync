@@ -57,7 +57,7 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 	// mid-write rather than skip the test.
 	label := platformLabel(t)
 	mux := http.NewServeMux()
-	// The repo is private, so every one of these routes is a 404 without the token —
+	// The repo is private, so every one of these routes is a 404 without the token,
 	// exactly as github.com behaves. A stub that answered anyway would let the
 	// installer lose its auth entirely (an empty AUTH_CONF, a mktemp change, a call to
 	// ensure_auth_config from a subshell) and still pass every test here, while every
@@ -407,7 +407,7 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 	// matches it outright, and install.sh unzips that path. Zipping "dist/$bin" instead
 	// of cd-ing in first keeps this archive name intact while making every entry
 	// "dist/synty-sync", which breaks the update and the install for every user with
-	// nothing here to notice — so pin the whole command, not just its first argument.
+	// nothing here to notice, so pin the whole command, not just its first argument.
 	const template = `(cd dist && zip "synty-sync-${VERSION}-${label}.zip" "$bin"`
 	if !strings.Contains(string(raw), template) {
 		t.Errorf("release.yml no longer builds the asset with %s; both readers want a bare %q entry at the zip root",

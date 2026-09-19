@@ -15,8 +15,8 @@ import (
 )
 
 // proveNothingLanded confirms a rejected submission did not reach Serve. Rather than
-// waiting a fixed window for nothing to arrive — which passes just as readily because
-// the scheduler was slow — it sends one legitimate submission afterwards and checks
+// waiting a fixed window for nothing to arrive, which passes just as readily because
+// the scheduler was slow. It sends one legitimate submission afterwards and checks
 // that what Serve returns is *that* one. A forged set that had landed would have
 // unblocked Serve first and be what comes back.
 func proveNothingLanded(t *testing.T, base string, done chan map[string]bool, want map[string]bool) {

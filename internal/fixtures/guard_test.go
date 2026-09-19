@@ -31,7 +31,7 @@ var (
 	phoneRe    = regexp.MustCompile(`(?i)["']phone["']\s*:\s*["']([^"']*)["']`)
 	nameJSONRe = regexp.MustCompile(`(?i)["'](?:first_?name|last_?name)["']\s*:\s*["']([^"']*)["']`)
 	// Every context the customer id turns up in; an order id never does. Which
-	// contexts those are is not a judgement call —
+	// contexts those are is not a judgement call:
 	// TestEveryCustomerIDOccurrenceIsCovered checks this set against every occurrence
 	// in the committed captures, so a shape nothing here matches fails the build
 	// rather than passing quietly. A captured page carries the URL forms
@@ -232,7 +232,7 @@ func maps(m map[string]string) []string {
 // appears. Without it the pattern list is a guess about the corpus, and it was wrong:
 // four script-blob spellings accounted for 55 of 414 occurrences and no pattern
 // touched any of them. That is only harmless while some *other* occurrence in the
-// same file is covered — a capture whose id appears in those shapes alone would
+// same file is covered; a capture whose id appears in those shapes alone would
 // commit a real customer id with every check green.
 //
 // This runs against the placeholder, not against real PII: the scrub map replaces

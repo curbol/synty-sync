@@ -254,8 +254,8 @@ func TestEndToEndSync(t *testing.T) {
 	}
 	// The pack is Unity-only and the filter is Godot+source, so the warning has to be
 	// the "nothing matches the filter" one. Matching on the pack name alone would be
-	// satisfied by any warning that happened to mention it — an unrecognized variant,
-	// an archived file, a refused adoption — each of which means something else.
+	// satisfied by any warning that happened to mention it: an unrecognized variant,
+	// an archived file, a refused adoption, each of which means something else.
 	if len(warnContaining(rep.Warnings, "no downloadable variant for \"Elven Warriors")) == 0 {
 		t.Errorf("expected the nothing-matches-the-filter warning for Elven Warriors, got %v", rep.Warnings)
 	}
@@ -333,7 +333,7 @@ func TestCacheMissingRedownloads(t *testing.T) {
 
 // Both adoption paths: a Synty-named zip sitting flat at the library root (folded
 // into the layout first) and one already in the <fileToken>/ layout that no lockfile
-// records — the state a lost or degraded lockfile leaves against a populated cache.
+// records: the state a lost or degraded lockfile leaves against a populated cache.
 // They differ only in where the file starts out, so the rest of the scenario is
 // shared: the file is taken rather than re-downloaded, its own bytes are what end up
 // recorded, and nothing rewrote them on the way.
@@ -408,7 +408,7 @@ func TestExistingFilesAreAdoptedRatherThanReDownloaded(t *testing.T) {
 			if !f.Tracked || f.CachePath == "" {
 				t.Fatalf("adopted entry not tracked: %+v", f)
 			}
-			// The adopted bytes are what the record names — a download would have
+			// The adopted bytes are what the record names; a download would have
 			// replaced them with the fixture's.
 			got, err := os.ReadFile(filepath.Join(lib, filepath.FromSlash(f.CachePath)))
 			if err != nil {

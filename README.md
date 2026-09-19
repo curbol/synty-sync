@@ -105,6 +105,8 @@ synty-sync list     # print the current lockfile
 Useful flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml`
 walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurrency <n>`,
 `--customer <id>`, `--config <dir>` (user config dir; default `~/.config/synty-sync`).
+`list` takes only `--manifest`: it reads the lockfile beside it and no user config.
+Run `synty-sync --help` for which flags each subcommand accepts.
 
 ## Browsing what you have
 

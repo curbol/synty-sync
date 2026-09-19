@@ -221,7 +221,7 @@ func seedPirateLockfile(t *testing.T, srv *httptest.Server, lib, lockPath string
 }
 
 // A pack whose every row carries a variant this build does not know is a Synty
-// engine we have not shipped support for, not broken markup — the parser skips such
+// engine we have not shipped support for, not broken markup: the parser skips such
 // rows by design and hands back their labels. Failing the run would take the whole
 // mirror down over one future engine; rebuilding the pack from the resulting empty
 // list would erase every entry it holds. Neither is acceptable, so the pack is
@@ -1260,7 +1260,7 @@ func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
 	}
 }
 
-// A file the store archives keeps its lockfile entry — the pack still owns it — so
+// A file the store archives keeps its lockfile entry (the pack still owns it), so
 // it never reaches orphanedRecords, but the entry is rebuilt untracked and its cache
 // path and sha go with it. The bytes stay on disk, and nothing can take them back:
 // an archived file is never selected, so it is never an adopt candidate, and the
@@ -1374,7 +1374,7 @@ func TestABodyThatIsNotAPackageIsRefusedEvenWhenTheTypeSaysItIs(t *testing.T) {
 
 // A lockfile can hold one fileId under two packs at two versions (a hand merge, or a
 // pack that left and came back). Which record wins decides between Unchanged and a
-// multi-gigabyte refetch, and the data cannot say which is right — so the only thing
+// multi-gigabyte refetch, and the data cannot say which is right, so the only thing
 // that matters is that two runs over the same file agree. Both halves of the rule
 // are load-bearing: a tracked record beats an untracked one, and slug order breaks
 // the remaining tie instead of Go's map iteration.
@@ -1428,7 +1428,7 @@ func TestIndexByFileIDPicksTheSameRecordEveryTime(t *testing.T) {
 
 // status must not move a user's files. The adopt scan itself is read-only and runs
 // for status on purpose, but the flat-file migration ahead of it renames, so it is
-// gated on DryRun — a guard whose absence would make "show me what would change"
+// gated on DryRun, a guard whose absence would make "show me what would change"
 // change something.
 func TestStatusDoesNotMigrateFlatFiles(t *testing.T) {
 	srv := newServer(t, serverOpts{
@@ -1490,7 +1490,7 @@ func TestPacksInScopeCountsWhatTheRunRead(t *testing.T) {
 // with it; a pack the run did not fetch has no live page to rebuild from, and if the
 // carried entry keeps its old key while being repointed at the new bytes, the
 // committed lockfile ends up telling a consumer that a Godot 4.5.1 file lives at a
-// path holding Godot 4.6 content — one fileId filed under two engines.
+// path holding Godot 4.6 content: one fileId filed under two engines.
 func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
 	lib := t.TempDir()
 	lockPath := filepath.Join(t.TempDir(), "lock.json")
@@ -1546,7 +1546,7 @@ func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
 
 // The trailer check keys on the leading bytes, not the filename. The name comes from
 // a signed URL, a Content-Disposition, or a file someone placed by hand, and the
-// cache deliberately matches a wanted file under any extension or none — so an
+// cache deliberately matches a wanted file under any extension or none, so an
 // extension check leaves unexamined exactly the names the cache is most willing to
 // adopt, and a truncated archive wearing one of them is hashed as the file's truth.
 func TestTruncatedArchiveIsRefusedWithoutAZipExtension(t *testing.T) {
@@ -1586,7 +1586,7 @@ func TestTruncatedArchiveIsRefusedWithoutAZipExtension(t *testing.T) {
 // Selection is opt-in, and the allowlist has to narrow what the run *fetches*, not
 // just what it records. TestPackSelectedLimitsToAllowlist asserts the diff and the
 // lockfile, both of which would still come out right if filterPacks ran after
-// fetchAll — leaving the run reading item pages for every pack the user owns and
+// fetchAll, leaving the run reading item pages for every pack the user owns and
 // declined, a request per pack against the store on every sync.
 func TestADisabledPacksItemPageIsNeverRequested(t *testing.T) {
 	var fetched int32

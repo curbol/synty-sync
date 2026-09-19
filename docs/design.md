@@ -80,9 +80,9 @@ synty-sync version  # print the installed version.
 ```
 
 Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
-from cwd), `--config <dir>` (user config dir), `--cookies <curl|file>` (override session
-source), `--only <pack-glob>`, `--dry-run` (alias of `status` semantics on `sync`),
-`--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the `select` page's address,
+from cwd), `--config <dir>` (user config dir; not a `list` flag, since `list` reads no
+user config), `--cookies <curl|file>` (override session source), `--only <pack-glob>`,
+`--dry-run` (alias of `status` semantics on `sync`), `--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the `select` page's address,
 default 8787). Subcommands take no positional arguments, so a stray one is an error rather
 than silently swallowing the flags after it.
 
@@ -225,7 +225,12 @@ Three checks stand between a response and the lockfile:
 Both rejections are permanent: no number of retries turns a login page into a pack. The
 same sniff runs on adoption, which is the one path into the lockfile that never consults
 `classify` — a cache written before these guards existed can hold error pages under exactly
-the right names.
+the right names. Adoption adds one check a fresh download does not need: a file whose leading
+bytes say it is a zip must carry its end-of-central-directory record, because a copy that
+stopped part way still begins with an archive's magic, and adopting it records its own short
+bytes as the file's truth. That is keyed on the bytes rather than the extension: the filename
+comes from a signed URL or from whoever placed the file, and the adopt scan matches a wanted
+file under any extension or none.
 
 The cache filename comes from the final signed-CloudFront URL path basename (the signed URL
 sets `Content-Disposition` to a bare "attachment"). The portal's label size is rounded (e.g.

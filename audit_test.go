@@ -716,7 +716,7 @@ func TestResolveManifestPathLetsSelectStartAProject(t *testing.T) {
 // that does not is a parse error rather than accepted and quietly ignored. Its own
 // comment names the failure: a shared flag set let `select --dry-run` serve the page
 // and rewrite the committed manifest, which is the opposite of what the flag says.
-// Nothing tested it — collapsing those conditionals into one unconditional set left
+// Nothing tested it: collapsing those conditionals into one unconditional set left
 // the whole suite green.
 //
 // Parsing is all this drives: fs.Parse fails before any config dir, manifest or

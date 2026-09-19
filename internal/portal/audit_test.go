@@ -745,7 +745,7 @@ func TestAStructLiteralClientWorksLikeOneFromNew(t *testing.T) {
 }
 
 // A download's header phase has no other bound. Resolve cannot take a context
-// deadline — that would cap a multi-gigabyte transfer — and the stall guard is only
+// deadline (that would cap a multi-gigabyte transfer), and the stall guard is only
 // installed once the headers arrive, so the response-header timeout is the whole of
 // what stands between a sync and an indefinite hang. This used to be set by the
 // caller in main, which left every other way of building a Client (the struct
@@ -767,8 +767,8 @@ func TestResolveDoesNotHangWaitingForHeaders(t *testing.T) {
 			if err != nil {
 				return
 			}
-			// Handshake completed, request readable, and then nothing — no status line,
-			// no headers — until the test is over.
+			// Handshake completed, request readable, and then nothing: no status line,
+			// no headers, until the test is over.
 			go func() { <-release; conn.Close() }()
 		}
 	}()
@@ -810,7 +810,7 @@ func TestNewBuildsAClientThatBoundsTheHeaderPhase(t *testing.T) {
 }
 
 // retryAfter reads both header forms. Only delta-seconds was covered, and the
-// HTTP-date form is the one a real rate limit commonly uses — misreading it as
+// HTTP-date form is the one a real rate limit commonly uses, and misreading it as
 // "no wait requested" drops back to a backoff measured in hundreds of milliseconds
 // and burns the whole attempt budget inside the window the store asked for.
 func TestRetryAfterReadsBothForms(t *testing.T) {
@@ -856,7 +856,7 @@ func TestRetryAfterReadsBothForms(t *testing.T) {
 
 // The download link is found by its shape, not by position. The store's own
 // stylesheet spaces several anchors in an actions block, so taking whichever comes
-// first hands back a neighbouring action whose href carries no download id — and
+// first hands back a neighbouring action whose href carries no download id, and
 // that is a hard parse error, so one template change fails every row of every pack
 // and the run aborts on the first one. Against every committed fixture the block
 // holds exactly one anchor, which makes the selector look like dead weight.

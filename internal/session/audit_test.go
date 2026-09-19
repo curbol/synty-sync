@@ -308,8 +308,8 @@ func TestMistypedBrowserNamesTheOnesThatWork(t *testing.T) {
 
 // Two hosts can set the same cookie name, and only one value can go in the header.
 // The right one is always the most specific host: the apex over the domain-wide
-// ".syntystore.com" form, and either over a subdomain. Deciding by anything else —
-// alphabetical host order, or position in a file — sends a value the store did not
+// ".syntystore.com" form, and either over a subdomain. Deciding by anything else,
+// alphabetical host order or position in a file, sends a value the store did not
 // set for the apex, and the run reports an expired session against a login the user
 // just completed.
 func TestTheMostSpecificHostWinsACookieName(t *testing.T) {
@@ -349,7 +349,7 @@ func TestTheMostSpecificHostWinsACookieName(t *testing.T) {
 // the ~/.config/zen Zen now writes, or a native ~/.mozilla/firefox beside the snap
 // that replaced it. Choosing the first base that holds any profile hands back the
 // dead one purely because it is listed first, and its cookies are real but months
-// old — so the run reports an expired session and the live profile is never opened.
+// old, so the run reports an expired session and the live profile is never opened.
 // Every base's profiles have to be ranked together.
 func TestALiveProfileBeatsALeftoverInAnEarlierBase(t *testing.T) {
 	bases := browserBases(runtime.GOOS, "zen")

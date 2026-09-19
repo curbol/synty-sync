@@ -262,8 +262,8 @@ func TestStoreCommitsAReadableFile(t *testing.T) {
 	}
 }
 
-// Migrate and Locate are two halves of one question — is this file on disk the one
-// we want — and they have to answer it the same way. Migrate keys on the raw name;
+// Migrate and Locate are two halves of one question (is this file on disk the one
+// we want), and they have to answer it the same way. Migrate keys on the raw name;
 // Locate used to trim an extension before calling normalizeName, which trims one
 // itself, so the two disagreed on every name carrying a second dot. Both directions
 // cost something real: a name Migrate matches and Locate does not folds into the

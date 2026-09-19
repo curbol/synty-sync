@@ -34,7 +34,7 @@ func FromCookiesTxt(content string) (string, error) {
 	// How specific the host was that set the value currently in pairs, so a less
 	// specific one later in the file cannot overwrite it. A cookies.txt has no
 	// meaningful order, so file position must not decide which of two hosts setting
-	// the same name wins — the same rule the sqlite reader applies with its ORDER BY.
+	// the same name wins; the same rule the sqlite reader applies with its ORDER BY.
 	from := map[string]int{}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
@@ -216,9 +216,9 @@ func FromBrowser(name string) (string, error) {
 		return "", fmt.Errorf("no known %s profile location on %s (set SYNTY_BROWSER_PROFILE)", name, runtime.GOOS)
 	}
 	// Every base is collected before any is chosen. Taking the first base that holds
-	// a profile would let a layout left behind by an upgrade — a ~/.zen beside the
+	// a profile would let a layout left behind by an upgrade (a ~/.zen beside the
 	// ~/.config/zen the browser actually writes, or a native profile beside the snap
-	// that replaced it — win over the live one purely for being listed first, and the
+	// that replaced it) win over the live one purely for being listed first, and the
 	// run would report an expired session against cookies that are simply months old.
 	var errs []error
 	var cands []geckoProfile
@@ -261,7 +261,7 @@ func readSQLiteCookies(dbPath string) (string, error) {
 	// Scan in increasing order of specificity, so the last write into the map for a
 	// given name is the most specific host that set it: a subdomain first, then the
 	// domain-wide ".syntystore.com", then the apex itself. Ordering by host alone
-	// would decide that alphabetically — every subdomain sorting after "syntystore"
+	// would decide that alphabetically: every subdomain sorting after "syntystore"
 	// (www, for one) would beat the apex and send the wrong value, which arrives as an
 	// expired session against cookies the user just refreshed.
 	rows, err := db.Query(

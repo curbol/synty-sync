@@ -419,7 +419,7 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 			if len(files) == 0 {
 				// The page parsed; every file on it is for an engine this build does not
 				// know. That is a future Synty variant, not breakage, and the parser
-				// deliberately skips such rows rather than failing — so the run must not
+				// deliberately skips such rows rather than failing, so the run must not
 				// fail either. Dropping the pack leaves its prior record to be carried
 				// forward whole, which is the only outcome that loses nothing.
 				mu.Lock()
@@ -639,12 +639,12 @@ var zipMagic = []byte("PK\x03\x04")
 // wholeArchive reports whether a file that opens as a zip carries the trailer only a
 // complete one has. The head sniff cannot see this: a copy that stopped part way still
 // begins with an archive's magic, and adopting it records its own short bytes as the
-// file's truth — after which every Verify compares those bytes against themselves and
+// file's truth, after which every Verify compares those bytes against themselves and
 // finds them intact forever.
 //
 // Keyed on the leading bytes rather than the extension. The name comes from a signed
 // URL, a Content-Disposition, or a file someone placed by hand, so an archive can
-// arrive with no .zip on it at all — and the cache deliberately matches a wanted file
+// arrive with no .zip on it at all, and the cache deliberately matches a wanted file
 // under any extension or none, which is exactly the set an extension check would
 // leave unexamined. A container this cannot read (.unitypackage) has no decidable
 // answer without decompressing and is passed through.
@@ -740,7 +740,7 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, opts Options, f mo
 }
 
 // permanentDownloadFailure reports a download error a retry cannot fix: a body that
-// is not a package however many times it is fetched, or a 4xx — except the three that
+// is not a package however many times it is fetched, or a 4xx, except the three that
 // are about timing rather than the request being wrong. 403 is an expired CloudFront
 // signature that a fresh Resolve re-signs, 429 a rate limit that backing off clears,
 // and 408 the server saying the request did not finish in time. Only 403 is specific
@@ -913,7 +913,7 @@ func sortedKeys(files map[string]lockfile.File) []string {
 
 // archivedRecords names every file the prior lockfile tracked that this run's pages
 // now label archived. The store still lists it, so the pack keeps its entry and the
-// file never reaches orphanedRecords — but the entry is rebuilt untracked, taking its
+// file never reaches orphanedRecords, but the entry is rebuilt untracked, taking its
 // cache path and sha with it while the bytes stay on disk. Nothing can take them back
 // either: an archived file is never selected, so it is never an adopt candidate, and
 // the adopt scan keys on the version the page now reports. Said once, on the run that

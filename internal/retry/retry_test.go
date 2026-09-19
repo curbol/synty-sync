@@ -85,8 +85,8 @@ func TestDoHonorsContextCancellation(t *testing.T) {
 }
 
 // MaxDelay is what keeps a server's Retry-After from parking a run. A store that
-// answers a rate limit with an implausible wait — a stray "86400", a date a year out
-// — would otherwise leave sync sitting in time.After with no output for the rest of
+// answers a rate limit with an implausible wait (a stray "86400", a date a year out)
+// would otherwise leave sync sitting in time.After with no output for the rest of
 // the day. Checked through nextDelay rather than Do, so the cap can be asserted
 // without waiting one out.
 func TestNextDelay(t *testing.T) {

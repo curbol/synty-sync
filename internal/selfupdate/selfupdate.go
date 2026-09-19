@@ -302,7 +302,7 @@ func replaceBinary(newPath, exe string) error {
 // withoutQuery strips the query string from the URL a transport error quotes back.
 // An asset request to api.github.com is answered with a redirect to a CDN host whose
 // query carries a signature, and net/http reports a failure on a redirected request
-// against the *last* URL it tried — stripping only the userinfo password, never the
+// against the *last* URL it tried, stripping only the userinfo password, never the
 // query. A reset or TLS failure on that hop would otherwise print a live bearer
 // credential for a private release asset to stderr.
 func withoutQuery(err error) error {

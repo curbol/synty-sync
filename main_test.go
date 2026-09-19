@@ -29,7 +29,7 @@ func TestRunHelp(t *testing.T) {
 
 func TestRunListEmpty(t *testing.T) {
 	// list reads only the lockfile beside the manifest (none here -> empty): no
-	// network, no session, and no user config — which is why it takes no -config flag.
+	// network, no session, and no user config, which is why it takes no -config flag.
 	// An explicit --manifest is honored without the file existing.
 	tmp := t.TempDir()
 	if err := run([]string{"list", "-manifest", filepath.Join(tmp, "synty-sync.toml")}); err != nil {

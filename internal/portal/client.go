@@ -126,8 +126,8 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Transport: boundedTransport(c.limits().HeaderTimeout)}
 }
 
-// boundedTransport clones the default transport — so proxy settings from the
-// environment still apply — and gives it a response-header timeout. There is no
+// boundedTransport clones the default transport (so proxy settings from the
+// environment still apply) and gives it a response-header timeout. There is no
 // whole-request timeout: asset downloads are large.
 func boundedTransport(headerTimeout time.Duration) *http.Transport {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
