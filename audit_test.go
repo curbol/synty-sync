@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -707,5 +709,146 @@ func TestResolveManifestPathLetsSelectStartAProject(t *testing.T) {
 	}
 	if _, err := resolveManifestPath("", "sync"); err == nil {
 		t.Error("sync with no manifest anywhere reported success")
+	}
+}
+
+// registerFlags binds only the flags that mean something for a subcommand, so one
+// that does not is a parse error rather than accepted and quietly ignored. Its own
+// comment names the failure: a shared flag set let `select --dry-run` serve the page
+// and rewrite the committed manifest, which is the opposite of what the flag says.
+// Nothing tested it — collapsing those conditionals into one unconditional set left
+// the whole suite green.
+//
+// Parsing is all this drives: fs.Parse fails before any config dir, manifest or
+// network is touched, so no case here can reach a real file.
+func TestEachSubcommandTakesOnlyItsOwnFlags(t *testing.T) {
+	// Every flag the CLI defines, and which subcommands may have it.
+	matrix := map[string][]string{
+		"manifest":    {"select", "status", "sync", "list"},
+		"config":      {"select", "status", "sync"},
+		"cookies":     {"select", "status", "sync"},
+		"customer":    {"select", "status", "sync"},
+		"library":     {"status", "sync"},
+		"only":        {"status", "sync"},
+		"concurrency": {"status", "sync"},
+		"dry-run":     {"sync"},
+		"addr":        {"select"},
+	}
+	// A value that parses for every flag type, so a rejection is always about scope.
+	value := map[string]string{"concurrency": "2", "dry-run": ""}
+
+	for flagName, allowed := range matrix {
+		for _, cmd := range []string{"select", "status", "sync", "list", "update"} {
+			args := []string{"-" + flagName}
+			if v, ok := value[flagName]; ok {
+				if v != "" {
+					args = append(args, v)
+				}
+			} else {
+				args = append(args, "x")
+			}
+
+			fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			registerFlags(fs, cmd)
+			err := fs.Parse(args)
+
+			if slices.Contains(allowed, cmd) {
+				if err != nil {
+					t.Errorf("%s does not accept -%s, but usage lists it: %v", cmd, flagName, err)
+				}
+				continue
+			}
+			if err == nil {
+				t.Errorf("%s accepted -%s; a flag that means nothing for a subcommand must be a parse error, "+
+					"not silently ignored", cmd, flagName)
+			}
+		}
+	}
+
+	// And the help text says the same thing, so the two cannot drift: a flag listed
+	// for a subcommand it cannot take sends the user to a parse error.
+	var help strings.Builder
+	prev := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	usage()
+	w.Close()
+	os.Stderr = prev
+	if _, err := io.Copy(&help, r); err != nil {
+		t.Fatal(err)
+	}
+	for flagName, allowed := range matrix {
+		line := findUsageLine(help.String(), "-"+flagName+" ")
+		if line == "" {
+			t.Errorf("usage() does not document -%s", flagName)
+			continue
+		}
+		heading := usageHeadingFor(help.String(), line)
+		for _, cmd := range allowed {
+			if !strings.Contains(heading, cmd) {
+				t.Errorf("usage() lists -%s under %q, which omits %s", flagName, heading, cmd)
+			}
+		}
+		for _, cmd := range []string{"select", "status", "sync", "list"} {
+			if !slices.Contains(allowed, cmd) && strings.Contains(heading, cmd) {
+				t.Errorf("usage() lists -%s under %q, but %s does not accept it", flagName, heading, cmd)
+			}
+		}
+	}
+}
+
+// findUsageLine returns the usage line introducing a flag, or "".
+func findUsageLine(help, flag string) string {
+	for _, line := range strings.Split(help, "\n") {
+		if strings.Contains(line, flag) && strings.HasPrefix(strings.TrimSpace(line), "-") {
+			return line
+		}
+	}
+	return ""
+}
+
+// usageHeadingFor returns the subcommand-list heading a flag line sits under: the
+// nearest preceding line indented less than the flag's own.
+func usageHeadingFor(help, flagLine string) string {
+	lines := strings.Split(help, "\n")
+	at := slices.Index(lines, flagLine)
+	if at < 0 {
+		return ""
+	}
+	indent := func(s string) int { return len(s) - len(strings.TrimLeft(s, " ")) }
+	for i := at - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" && indent(lines[i]) < indent(flagLine) {
+			return strings.TrimSpace(lines[i])
+		}
+	}
+	return ""
+}
+
+// list opens one JSON file beside the manifest. It used to resolve and parse the
+// user config first, and Load rejects an unknown key outright, so a typo in
+// config.toml broke a subcommand that never reads it.
+func TestListDoesNotNeedAReadableUserConfig(t *testing.T) {
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"),
+		[]byte("customer_id = \"1\"\nnot_a_real_key = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNTY_CONFIG_DIR", cfgDir)
+
+	// The config really is broken, so this test cannot pass by the file being ignored.
+	if _, err := config.Load(cfgDir); err == nil {
+		t.Fatal("this config was meant to be rejected; the test proves nothing as written")
+	}
+
+	project := t.TempDir()
+	prev := stdout
+	stdout = io.Discard
+	defer func() { stdout = prev }()
+	if err := run([]string{"list", "-manifest", filepath.Join(project, "synty-sync.toml")}); err != nil {
+		t.Errorf("list failed over a user config it never reads: %v", err)
 	}
 }

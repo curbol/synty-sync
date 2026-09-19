@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +13,35 @@ import (
 
 	"github.com/curbol/synty-sync/internal/model"
 )
+
+// proveNothingLanded confirms a rejected submission did not reach Serve. Rather than
+// waiting a fixed window for nothing to arrive — which passes just as readily because
+// the scheduler was slow — it sends one legitimate submission afterwards and checks
+// that what Serve returns is *that* one. A forged set that had landed would have
+// unblocked Serve first and be what comes back.
+func proveNothingLanded(t *testing.T, base string, done chan map[string]bool, want map[string]bool) {
+	t.Helper()
+	form := url.Values{"csrf": {formToken(t, base)}}
+	for slug := range want {
+		form.Add("pack", slug)
+	}
+	resp, err := http.PostForm(base+"/save", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the legitimate submission returned %d; this check cannot tell us anything", resp.StatusCode)
+	}
+	select {
+	case got := <-done:
+		if !maps.Equal(got, want) {
+			t.Errorf("Serve returned %v, want %v: a submission it should have refused is what landed", got, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve never returned after a legitimate submission")
+	}
+}
 
 // serving starts a selection page on an ephemeral port and hands back its base URL
 // and the channel Serve's result arrives on.
@@ -58,11 +88,9 @@ func TestSaveRejectsAFormItDidNotRender(t *testing.T) {
 		})
 	}
 
-	select {
-	case chosen := <-done:
-		t.Errorf("a forged submission unblocked Serve with %v; the committed allowlist would be rewritten", chosen)
-	case <-time.After(300 * time.Millisecond):
-	}
+	// Neither forgery reached Serve: the selection it returns is the honest one sent
+	// after them, not "other".
+	proveNothingLanded(t, base, done, map[string]bool{"current": true})
 }
 
 // The token must not be reachable from the query string: a link would then stand in
@@ -80,11 +108,7 @@ func TestSaveIgnoresATokenFromTheQueryString(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("POST /save returned %d for a query-string token, want 403", resp.StatusCode)
 	}
-	select {
-	case chosen := <-done:
-		t.Errorf("a query-string token unblocked Serve with %v", chosen)
-	case <-time.After(300 * time.Millisecond):
-	}
+	proveNothingLanded(t, base, done, map[string]bool{"current": true})
 }
 
 // A page that points its own name at 127.0.0.1 reaches this server with that name in

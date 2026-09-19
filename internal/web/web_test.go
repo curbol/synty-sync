@@ -125,17 +125,7 @@ func get(t *testing.T, u string) string {
 // localhost too. Without a method guard, any page the user visits while `select` is
 // open can fire a GET at it, submit an empty form, and disable every pack.
 func TestSaveRejectsNonPost(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	ln := listen(t)
-	base := "http://" + ln.Addr().String()
-	done := make(chan map[string]bool, 1)
-	go func() {
-		chosen, _ := Serve(ctx, ln, []model.Pack{{Slug: "a", DisplayName: "A"}}, map[string]bool{"a": true})
-		done <- chosen
-	}()
-	waitUp(t, base)
+	base, done := serving(t, []model.Pack{{Slug: "a", DisplayName: "A"}}, map[string]bool{"a": true})
 
 	resp, err := http.Get(base + "/save")
 	if err != nil {
@@ -170,17 +160,7 @@ func TestSaveIgnoresUnknownSlugs(t *testing.T) {
 		{"a stale slug alongside a real one", []string{"current", "long-gone"}, map[string]bool{"current": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			ln := listen(t)
-			base := "http://" + ln.Addr().String()
-			done := make(chan map[string]bool, 1)
-			go func() {
-				chosen, _ := Serve(ctx, ln, packs, map[string]bool{"current": true})
-				done <- chosen
-			}()
-			waitUp(t, base)
+			base, done := serving(t, packs, map[string]bool{"current": true})
 
 			resp, err := http.PostForm(base+"/save", url.Values{
 				"pack": tc.post,

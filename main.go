@@ -67,13 +67,18 @@ type cliFlags struct {
 // opposite of what the flag says.
 func registerFlags(fs *flag.FlagSet, cmd string) *cliFlags {
 	var f cliFlags
-	needsConfigDir := cmd != "update"
+	needsManifest := cmd != "update"
+	// list reads the lockfile beside the manifest and never opens the user config, so
+	// it does not take the flag that points at one.
+	needsConfigDir := needsManifest && cmd != "list"
 	needsSession := cmd == "select" || cmd == "status" || cmd == "sync"
 	syncs := cmd == "status" || cmd == "sync"
 
+	if needsManifest {
+		fs.StringVar(&f.manifestFlag, "manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
+	}
 	if needsConfigDir {
 		fs.StringVar(&f.cfgDir, "config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
-		fs.StringVar(&f.manifestFlag, "manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
 	}
 	if needsSession {
 		fs.StringVar(&f.cookies, "cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
@@ -148,22 +153,25 @@ func run(args []string) error {
 		return fmt.Errorf("%s takes no positional arguments (got %q); to limit packs use --only %s", cmd, fs.Arg(0), fs.Arg(0))
 	}
 
-	authDir := config.ResolveDir(*cfgDir)
-	cfg, err := config.Load(authDir)
-	if err != nil {
-		return err
-	}
-	cfg = applyFlags(cfg, *library, *customer, *concurrency)
-
 	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
 	if err != nil {
 		return err
 	}
 	lockPath := manifest.LockPath(manifestPath)
 
+	// Before the user config is even looked at: list reads one JSON file beside the
+	// manifest and nothing else, so a stray key in config.toml — which Load rejects
+	// outright — has no business stopping it.
 	if cmd == "list" {
 		return list(stdout, lockPath)
 	}
+
+	authDir := config.ResolveDir(*cfgDir)
+	cfg, err := config.Load(authDir)
+	if err != nil {
+		return err
+	}
+	cfg = applyFlags(cfg, *library, *customer, *concurrency)
 
 	if cfg.CustomerID == "" {
 		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
@@ -465,8 +473,8 @@ usage:
 flags (a subcommand accepts only the ones listed for it):
   select status sync list
     -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
-    -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
   select status sync
+    -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
     -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
     -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
   status sync
