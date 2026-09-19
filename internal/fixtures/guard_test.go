@@ -30,17 +30,25 @@ var (
 	// capture that spells the field differently still gets checked.
 	phoneRe    = regexp.MustCompile(`(?i)["']phone["']\s*:\s*["']([^"']*)["']`)
 	nameJSONRe = regexp.MustCompile(`(?i)["'](?:first_?name|last_?name)["']\s*:\s*["']([^"']*)["']`)
-	// Customer id appears in these contexts only; an order id never does. The
-	// storefront also emits it as a bare JSON number, which no URL pattern covers.
-	// A captured page carries these URLs percent-encoded inside query strings and
-	// backslash-escaped inside inline JSON as well as plain, so the separator is a
-	// class: anchoring on a literal "/" would leave those two spellings unchecked.
+	// Every context the customer id turns up in; an order id never does. Which
+	// contexts those are is not a judgement call —
+	// TestEveryCustomerIDOccurrenceIsCovered checks this set against every occurrence
+	// in the committed captures, so a shape nothing here matches fails the build
+	// rather than passing quietly. A captured page carries the URL forms
+	// percent-encoded inside query strings and backslash-escaped inside inline JSON as
+	// well as plain, so the separator is a class: anchoring on a literal "/" would
+	// leave those two spellings unchecked. The script blobs matter as much as the
+	// URLs: a page reached by a URL that does not carry the id has these as its only
+	// occurrences.
 	custIDRes = []*regexp.Regexp{
 		regexp.MustCompile(`logged_in_customer_id(?:=|%3D)(\d+)`),
 		regexp.MustCompile(sep + `apps` + sep + `downloads` + sep + `customers` + sep + `(\d+)`),
 		regexp.MustCompile(sep + `apps` + sep + `downloads` + sep + `orders` + sep + `(\d+)`),
 		regexp.MustCompile(`"id":"(\d+)","email"`),
-		regexp.MustCompile(`(?i)["']customer_?id["']\s*:\s*["']?(\d+)`),
+		// customerId / customer_id / cid, quoted or bare, assigned with ":" or "=":
+		// Shopify's __st blob uses "cid", StoreCreditInit and _RSConfig assign bare
+		// properties, and one inline object uses an unquoted key with a colon.
+		regexp.MustCompile(`(?i)["']?c(?:ustomer_?)?id["']?\s*[:=]\s*["']?(\d+)`),
 	}
 	okEmailDom = "example.com"
 	okPhone    = "+10000000000"
@@ -92,6 +100,13 @@ func TestGuardCatchesASyntheticLeak(t *testing.T) {
 		"customer id percent-encoded": `%2Fapps%2Fdownloads%2Forders%2F9988776655443`,
 		"customer id json-escaped":    `\/apps\/downloads\/orders\/9988776655443`,
 		"customer id json":            `"customer_id": "9988776655443"`,
+		// The script-blob spellings. A page reached by a URL that does not carry the id
+		// has only these, so a pattern set that covers the URL forms alone would let
+		// such a capture through with the build green.
+		"customer id shopify __st":    `{"a":1,"cid":9988776655443};`,
+		"customer id bare assignment": `window.StoreCreditInit.customer_id = '9988776655443';`,
+		"customer id unquoted key":    `{ email: 'x@example.com', customer_id: '9988776655443', }`,
+		"customer id camel property":  `_RSConfig.customerId = 9988776655443;`,
 		"name":                        `{"first_name":"Realperson"}`,
 	}
 	for name, content := range cases {
@@ -210,4 +225,49 @@ func maps(m map[string]string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// The other half of "the guard actually works". TestGuardCatchesASyntheticLeak
+// proves each pattern fires; this proves the set covers everywhere the id actually
+// appears. Without it the pattern list is a guess about the corpus, and it was wrong:
+// four script-blob spellings accounted for 55 of 414 occurrences and no pattern
+// touched any of them. That is only harmless while some *other* occurrence in the
+// same file is covered — a capture whose id appears in those shapes alone would
+// commit a real customer id with every check green.
+//
+// This runs against the placeholder, not against real PII: the scrub map replaces
+// every occurrence at once, so where the placeholder lands is exactly where a missed
+// scrub would have left the real value.
+func TestEveryCustomerIDOccurrenceIsCovered(t *testing.T) {
+	for name, body := range readFixtures(t) {
+		// Offsets the pattern set claims, as [start, end) of each captured id.
+		var covered [][2]int
+		for _, re := range custIDRes {
+			for _, m := range re.FindAllStringSubmatchIndex(body, -1) {
+				covered = append(covered, [2]int{m[2], m[3]})
+			}
+		}
+		for at := 0; ; {
+			i := strings.Index(body[at:], okCustomer)
+			if i < 0 {
+				break
+			}
+			at += i
+			seen := false
+			for _, c := range covered {
+				if c[0] <= at && at < c[1] {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				lo := max(at-60, 0)
+				hi := min(at+len(okCustomer)+20, len(body))
+				t.Errorf("%s: the customer id at offset %d is in a context no custIDRes pattern checks; "+
+					"a real id here would not fail the build. Context: …%s…",
+					name, at, strings.Join(strings.Fields(body[lo:hi]), " "))
+			}
+			at += len(okCustomer)
+		}
+	}
 }
