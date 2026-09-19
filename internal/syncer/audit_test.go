@@ -28,14 +28,41 @@ func TestRateLimitIsRetryable(t *testing.T) {
 	}{
 		{http.StatusNotFound, true},
 		{http.StatusUnauthorized, true},
+		{http.StatusGone, true},
 		{http.StatusForbidden, false},       // expired signature; a fresh Resolve re-signs
 		{http.StatusTooManyRequests, false}, // rate limit; backing off clears it
+		{http.StatusRequestTimeout, false},  // the server says the request did not finish in time
 		{http.StatusInternalServerError, false},
 	} {
 		err := &portal.StatusError{Status: tc.status, Op: "download T|Godot"}
 		if got := permanentDownloadFailure(err); got != tc.permanent {
 			t.Errorf("status %d: permanent = %v, want %v", tc.status, got, tc.permanent)
 		}
+	}
+}
+
+// Gone is the one cause no re-run can clear, and it is excluded from the exit status
+// for exactly that reason. Counting a 410 as actionable would make every future sync
+// exit non-zero over a file the store will never serve again; missing a 5xx would hide
+// a failure a re-run could fix.
+func TestOnlyAPulledFileCountsAsGone(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		gone   bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusGone, true},
+		{http.StatusForbidden, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+	} {
+		err := &portal.StatusError{Status: tc.status, Op: "download T|Godot"}
+		if got := goneFromTheStore(err); got != tc.gone {
+			t.Errorf("status %d: gone = %v, want %v", tc.status, got, tc.gone)
+		}
+	}
+	if goneFromTheStore(errors.New("a transport error carries no status")) {
+		t.Error("an error with no status must not read as gone")
 	}
 }
 
@@ -865,6 +892,66 @@ func TestFailedUpdateKeepsOwningPacksInAgreement(t *testing.T) {
 	out := after.Packs["polygon-dungeon-pack"].Files[key]
 	if in.Tracked != out.Tracked || in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
 		t.Errorf("owning packs diverged after a failed update:\n  in-scope %+v\n  carried  %+v", in, out)
+	}
+}
+
+// The failed update again, with the store renaming the variant on the same fileId as
+// it bumps the version. The entry keeps the bytes the last run verified, so it has to
+// keep the variant those bytes are: rebuilding it under the live page's new engine
+// label leaves the in-scope owner naming Godot 4.5.1 content as a 4.6.0 build, and the
+// carried owner filing the same fileId under the old key. Nothing heals it while the
+// download keeps failing, and a file the store has pulled never downloads again.
+func TestFailedUpdateOnARenamedVariantKeepsTheBytesUnderTheirOwnName(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	variant, version := "Godot_4_5_1", "v1_0_0"
+	broken := false
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1", "4": // Pirate and Dungeon both bundle fileId 999
+				return itemPage("GENERIC_Particle_FX", variant, version, 999), true
+			}
+			return "", false
+		},
+		downloadStatus: func(fileID string) (int, bool) {
+			if broken && fileID == "999" {
+				return http.StatusInternalServerError, true
+			}
+			return 0, false
+		},
+	})
+
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+	const oldKey = "GENERIC_Particle_FX|Godot_4_5_1"
+	before := lf.Packs["polygon-pirate-pack"].Files[oldKey]
+	if !before.Tracked {
+		t.Fatal("seed produced no tracked bundled file")
+	}
+
+	variant, version, broken = "Godot_4_6_0", "v2_0_0", true
+	only := runOpts(lib, false)
+	only.Attempts, only.Backoff = 1, 0
+	only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+		t.Fatalf("a failed update aborted the run: %v", err)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := after.Packs["polygon-pirate-pack"].Files[oldKey]
+	out := after.Packs["polygon-dungeon-pack"].Files[oldKey]
+	if in.FileID != 999 {
+		t.Fatalf("the in-scope owner moved the entry off %q: %+v", oldKey, after.Packs["polygon-pirate-pack"].Files)
+	}
+	if in.Variant != before.Variant || in.Version != before.Version {
+		t.Errorf("the entry names %s %s, but the recorded sha is the %s %s bytes",
+			in.Variant, in.Version, before.Variant, before.Version)
+	}
+	if in.Variant != out.Variant || in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
+		t.Errorf("owning packs diverged after a failed update on a renamed variant:\n  in-scope %+v\n  carried  %+v", in, out)
 	}
 }
 

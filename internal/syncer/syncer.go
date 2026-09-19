@@ -849,14 +849,26 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				FileID:         f.FileID,
 				AdvertisedSize: f.SizeBytes,
 			}
+			key := f.Key()
 			if selected {
 				if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
-					// The resolved version travels with the bytes, the same way it does for
-					// a carried pack: the sha below belongs to whichever version was
-					// actually resolved, so recording this page's label against it would
-					// name one version over another version's content.
+					// The resolved version and variant travel with the bytes, the same way
+					// they do for a carried pack: the sha below belongs to whichever
+					// version was actually resolved, so recording this page's labels
+					// against it would name one version, under one engine, over another's
+					// content. Only a failed update on a renamed variant makes these differ
+					// from the live page, and that is exactly the case where the page is
+					// describing bytes this run did not get.
 					if r.version != "" {
 						entry.Version = r.version
+					}
+					// The key is half variant, so an entry kept at the prior variant has to
+					// keep the prior key with it, or this owner files the old engine's bytes
+					// under the new engine's name while the packs the run did not fetch
+					// carry the old one.
+					if r.variant != "" && r.variant != entry.Variant {
+						entry.Variant = r.variant
+						key = model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(r.variant)}.Key()
 					}
 					entry.Tracked = true
 					entry.CachePath = r.cachePath
@@ -872,7 +884,7 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				// does not mutate the committed lockfile, so this report copy is
 				// informational only.
 			}
-			lp.Files[f.Key()] = entry
+			lp.Files[key] = entry
 		}
 		report.NewLockfile.Packs[pf.pack.Slug] = lp
 	}

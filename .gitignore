@@ -14,3 +14,10 @@ synty-sync.lock.json
 
 # Built binary.
 /synty-sync
+
+# Raw portal captures and the real->fake scrub map they are scrubbed through are
+# account PII. cmd/scrubfixtures reads both from here by default.
+.longrun/
+
+# Release build output (release.yml writes it; a local run of the same loop would too).
+dist/
