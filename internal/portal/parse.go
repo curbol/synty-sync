@@ -4,6 +4,7 @@ package portal
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -113,7 +114,7 @@ func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unkno
 		// Every owned pack's item page carries at least an icon row, so zero rows
 		// means the markup moved, not that the pack is empty. Failing here keeps a
 		// selector change from rewriting the pack's lockfile entry as empty.
-		return nil, nil, fmt.Errorf("item page for %q: no file rows found", packSlug)
+		return nil, nil, errors.New("no file rows found")
 	}
 	var parseErr error
 	versioned := 0
@@ -177,7 +178,7 @@ func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unkno
 		// The zero-rows guard above only covers the row selector. If the file-heading
 		// class moves, every row parses to an empty label and is skipped as an icon
 		// row, and this pack would silently rebuild its lockfile entry as empty.
-		return nil, nil, fmt.Errorf("item page for %q: %d rows, none carrying a version label", packSlug, rows.Length())
+		return nil, nil, fmt.Errorf("%d rows, none carrying a version label", rows.Length())
 	}
 	return files, unknown, nil
 }

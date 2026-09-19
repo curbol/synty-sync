@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -75,8 +76,9 @@ func documentMediaType(header string) (string, bool) {
 const shopParam = "synty-store.myshopify.com"
 
 // Client talks to the Sky Pilot portal with an authenticated cookie. New fills in the
-// two fields a zero value gets wrong; a struct literal is fine too, since every
-// request normalizes them anyway.
+// one field a zero value gets wrong; a struct literal is fine too, since every request
+// normalizes it anyway. A Client is used through a pointer and builds its own transport
+// once, so it must not be copied after first use.
 type Client struct {
 	HTTP       *http.Client
 	BaseURL    string // e.g. https://syntystore.com (no trailing slash)
@@ -84,15 +86,17 @@ type Client struct {
 	Cookie     string
 	UserAgent  string
 	Limits     Limits
+
+	// own is the client built for a caller that supplied none, cached so that every
+	// request shares one connection pool rather than handshaking afresh.
+	ownOnce sync.Once
+	own     *http.Client
 }
 
-// New returns a Client for baseURL. A nil httpClient gets one carrying the
-// response-header timeout a download's header phase depends on; a supplied one is
-// used as given, and owns that bound itself.
+// New returns a Client for baseURL. A nil httpClient means this Client builds its own
+// on first use, carrying Limits.HeaderTimeout; a supplied one is used as given and owns
+// that bound itself.
 func New(httpClient *http.Client, baseURL, customerID, cookie string) *Client {
-	if httpClient == nil {
-		httpClient = &http.Client{Transport: boundedTransport(defaultHeaderTimeout)}
-	}
 	return &Client{
 		HTTP:       httpClient,
 		BaseURL:    strings.TrimRight(baseURL, "/"),
@@ -115,15 +119,22 @@ func (c *Client) base() string {
 // The fallback is not http.DefaultClient: its transport has no response-header
 // timeout, and that is the only bound on a download's header phase. Resolve cannot
 // use a context deadline there (it would cap a multi-gigabyte transfer) and the
-// stall guard only starts once the headers arrive, so a struct-literal Client
-// against a server that answers the handshake and then goes quiet would hang for
-// good. Built per call rather than cached because the zero value has to work; a
-// caller that minds the allocation passes its own client, which New always does.
+// stall guard only starts once the headers arrive, so a Client against a server that
+// answers the handshake and then goes quiet would hang for good.
+//
+// Built once, not per call: a transport per request means a fresh TLS handshake every
+// time and one idle connection stranded per transport, which is what drainClose and
+// the connection-reuse guard exist to avoid. Building it here rather than in New is
+// what makes Limits.HeaderTimeout mean something: New cannot read a Limits the caller
+// sets afterwards, and pre-filling HTTP there left the field with no reader at all.
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Transport: boundedTransport(c.limits().HeaderTimeout)}
+	c.ownOnce.Do(func() {
+		c.own = &http.Client{Transport: boundedTransport(c.limits().HeaderTimeout)}
+	})
+	return c.own
 }
 
 // boundedTransport clones the default transport (so proxy settings from the
@@ -176,8 +187,9 @@ type Limits struct {
 	// standing between a download and an unbounded hang: Resolve cannot take a
 	// deadline (that would cap the transfer) and the stall guard is not installed
 	// until the headers arrive, so a server that completes TLS and then says nothing
-	// blocks forever without it. Applied to the transport New builds; a caller that
-	// supplies its own http.Client owns this bound itself.
+	// blocks forever without it. Applied to the transport the Client builds for itself,
+	// read once on the first request; a caller that supplies its own http.Client owns
+	// this bound itself.
 	HeaderTimeout time.Duration
 }
 
@@ -400,7 +412,18 @@ func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) (files []model.
 	if err != nil {
 		return nil, nil, err
 	}
-	return ParseItemPage(body, pack.Slug)
+	files, unknown, err = ParseItemPage(body, pack.Slug)
+	if err != nil {
+		// A session that expires between the enumeration walk and these fetches serves
+		// a logout shell, which carries none of the selectors the parser needs and so
+		// arrives here as "the markup moved". They are the same bytes to the parser and
+		// a different thing to do about it, and only the sentinel tells them apart.
+		if ok, sentinelErr := HasLibrarySentinel(body); sentinelErr == nil && !ok {
+			return nil, nil, ErrExpiredSession
+		}
+		return nil, nil, err
+	}
+	return files, unknown, nil
 }
 
 // Resolve issues the download request, follows the 302 to the signed CDN URL, checks

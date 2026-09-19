@@ -8,8 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -249,7 +252,9 @@ func TestGetBodyRetriesRequestTimeout(t *testing.T) {
 // An oversized page must error rather than truncate: a silently shortened library
 // page parses as a valid short page and quietly ends enumeration early.
 func TestGetBodyRejectsOversizedPage(t *testing.T) {
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
 		fmt.Fprint(w, strings.Repeat("x", 4096))
 	}))
 	defer srv.Close()
@@ -257,6 +262,96 @@ func TestGetBodyRejectsOversizedPage(t *testing.T) {
 	c := &Client{Limits: Limits{Backoff: time.Millisecond, MaxPageBytes: 1024}, HTTP: http.DefaultClient, BaseURL: srv.URL}
 	if _, err := c.getBody(context.Background(), srv.URL); err == nil {
 		t.Error("a page past the size bound must error, not truncate")
+	}
+	// The bound is half the point; the other half is that it is permanent. Without the
+	// retry.Stop the error is retried, and an oversized page is fetched in full once per
+	// attempt for a verdict the first read already reached.
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("the server was hit %d times, want 1: a page past the bound must not be retried", got)
+	}
+}
+
+// A session that expires mid-run serves the logout shell to the item pages, which
+// carries none of the parser's selectors. Read as changed markup it sends the user
+// looking for a selector that moved; the actionable answer is to refresh the session,
+// and only the logged-in sentinel separates the two.
+func TestItemFilesReportsAnExpiredSessionRatherThanChangedMarkup(t *testing.T) {
+	shell, err := os.ReadFile(filepath.Join("..", "..", "testdata", "portal", "library_logout_shell.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(shell)
+	}))
+	defer srv.Close()
+
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "1"}
+	_, _, err = c.ItemFiles(context.Background(), model.Pack{Slug: "p", ItemURL: "/item/1"})
+	if !errors.Is(err, ErrExpiredSession) {
+		t.Errorf("ItemFiles on a logout shell = %v, want ErrExpiredSession", err)
+	}
+}
+
+// Changed markup is still changed markup: an authenticated page the parser cannot read
+// must stay an error, or a selector change rebuilds the pack's lockfile entry as empty.
+func TestItemFilesStillFailsOnChangedMarkupWhileLoggedIn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<div><input class='sky-pilot-search-input'><div class='renamed-row'>x</div></div>`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "1"}
+	_, _, err := c.ItemFiles(context.Background(), model.Pack{Slug: "p", ItemURL: "/item/1"})
+	if err == nil {
+		t.Fatal("an unreadable item page must error")
+	}
+	if errors.Is(err, ErrExpiredSession) {
+		t.Errorf("a logged-in page read as an expired session: %v", err)
+	}
+}
+
+// The store is a Shopify app proxy: without the shop parameter it does not serve the
+// portal at all. Nothing bound it to any of the three requests, so dropping it from one
+// left the whole offline suite green and every real run broken.
+func TestEveryRequestCarriesTheShopParameter(t *testing.T) {
+	var mu sync.Mutex
+	shops := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		shops[r.URL.Path] = r.URL.Query().Get("shop")
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/downloads/downloads/") {
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write([]byte("PK\x03\x04payload"))
+			return
+		}
+		fmt.Fprint(w, `<div><input class='sky-pilot-search-input'></div>`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "1"}
+	if _, err := c.Enumerate(context.Background()); err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	// ItemFiles fails to parse this stub, which is fine: the request still happened.
+	_, _, _ = c.ItemFiles(context.Background(), model.Pack{Slug: "p", ItemURL: "/item/1"})
+	body, _, err := c.Resolve(context.Background(), model.FileEntry{
+		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/9/x.zip",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(shops) != 3 {
+		t.Fatalf("saw %d distinct request paths, want the library page, the item page and the download: %v", len(shops), shops)
+	}
+	for path, shop := range shops {
+		if shop != shopParam {
+			t.Errorf("%s carried shop=%q, want %q", path, shop, shopParam)
+		}
 	}
 }
 
@@ -302,14 +397,26 @@ func TestEnumerateEmptyLibrary(t *testing.T) {
 	}
 }
 
-// New supplies the two things a zero-value Client gets wrong.
+// New supplies the thing a zero-value Client gets wrong, and leaves the transport to
+// the first request so Limits set after New still reach it.
 func TestNewNormalizesTheClient(t *testing.T) {
 	c := New(nil, "https://syntystore.com/", "42", "a=b")
-	if c.HTTP == nil {
-		t.Error("HTTP left nil; a zero-value client panics on first use")
-	}
 	if c.BaseURL != "https://syntystore.com" {
 		t.Errorf("BaseURL = %q, want the trailing slash trimmed (URLs are concatenated)", c.BaseURL)
+	}
+	if got := c.httpClient(); got == nil {
+		t.Error("httpClient returned nil; a client from New panics on first use")
+	}
+}
+
+// The client a Client builds for itself is built once. A transport per request pays a
+// fresh TLS handshake every time and strands an idle connection per transport, which
+// is the pooling drainClose and TestGetBodyReusesConnectionAcrossRetries protect.
+func TestAClientBuildsItsOwnTransportOnce(t *testing.T) {
+	c := New(nil, "https://example.invalid", "1", "x=y")
+	first, second := c.httpClient(), c.httpClient()
+	if first != second {
+		t.Error("httpClient built a second client; every request would get its own connection pool")
 	}
 }
 
@@ -794,18 +901,31 @@ func TestResolveDoesNotHangWaitingForHeaders(t *testing.T) {
 }
 
 // The same bound reaches a client New builds, so the CLI is covered without main
-// having to know that a download cannot carry a deadline.
+// having to know that a download cannot carry a deadline. Limits.HeaderTimeout is the
+// knob, and it used to have no reader on this path at all: New pre-filled HTTP with a
+// transport carrying the package default, so a caller setting the field got the default
+// anyway while the field's own doc said otherwise.
 func TestNewBuildsAClientThatBoundsTheHeaderPhase(t *testing.T) {
-	c := New(nil, "https://example.invalid", "1", "x=y")
-	tr, ok := c.HTTP.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("New gave the client a %T transport, which carries no header bound", c.HTTP.Transport)
-	}
-	if tr.ResponseHeaderTimeout <= 0 {
-		t.Error("New's client has no ResponseHeaderTimeout; a download's header phase is unbounded")
-	}
-	if tr.ResponseHeaderTimeout != defaultHeaderTimeout {
-		t.Errorf("ResponseHeaderTimeout = %v, want the package default %v", tr.ResponseHeaderTimeout, defaultHeaderTimeout)
+	for _, tc := range []struct {
+		name string
+		set  time.Duration
+		want time.Duration
+	}{
+		{"default", 0, defaultHeaderTimeout},
+		{"caller's own", 5 * time.Second, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(nil, "https://example.invalid", "1", "x=y")
+			c.Limits.HeaderTimeout = tc.set
+			tr, ok := c.httpClient().Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("the client got a %T transport, which carries no header bound", c.httpClient().Transport)
+			}
+			if tr.ResponseHeaderTimeout != tc.want {
+				t.Errorf("ResponseHeaderTimeout = %v, want %v; a download's header phase has no other bound",
+					tr.ResponseHeaderTimeout, tc.want)
+			}
+		})
 	}
 }
 

@@ -135,11 +135,7 @@ func TestSaveRejectsNonPost(t *testing.T) {
 	if resp.StatusCode == http.StatusOK {
 		t.Errorf("GET /save returned %d; a drive-by request must not submit a selection", resp.StatusCode)
 	}
-	select {
-	case chosen := <-done:
-		t.Errorf("GET /save unblocked Serve with %v; the caller would disable every pack", chosen)
-	case <-time.After(300 * time.Millisecond):
-	}
+	proveNothingLanded(t, base, done, map[string]bool{"a": true})
 }
 
 // A tab left open from an earlier run posts the slugs it was rendered with. Those

@@ -76,19 +76,28 @@ func TestSyncAbortsOnExpiredSessionWithoutTouchingLockfile(t *testing.T) {
 // silently drops every flag after it. `sync <pack> --dry-run` would then perform a
 // real sync: full delta downloaded, committed lockfile rewritten.
 func TestStrayArgumentIsRejected(t *testing.T) {
-	for _, args := range [][]string{
-		{"sync", "polygon-city", "--dry-run"},
-		{"status", "somepack"},
-		{"list", "extra"},
-		{"update", "v1", "v2"},
+	for _, tc := range []struct {
+		args []string
+		// hintsOnly is whether the message may suggest --only: a subcommand that does
+		// not bind the flag must not send the user into "flag provided but not defined".
+		hintsOnly bool
+	}{
+		{args: []string{"sync", "polygon-city", "--dry-run"}, hintsOnly: true},
+		{args: []string{"status", "somepack"}, hintsOnly: true},
+		{args: []string{"list", "extra"}},
+		{args: []string{"select", "extra"}},
+		{args: []string{"update", "v1", "v2"}},
 	} {
-		err := run(args)
+		err := run(tc.args)
 		if err == nil {
-			t.Errorf("%v: accepted a stray positional argument", args)
+			t.Errorf("%v: accepted a stray positional argument", tc.args)
 			continue
 		}
 		if !strings.Contains(err.Error(), "argument") {
-			t.Errorf("%v: err = %v, want it to explain the stray argument", args, err)
+			t.Errorf("%v: err = %v, want it to explain the stray argument", tc.args, err)
+		}
+		if got := strings.Contains(err.Error(), "--only"); got != tc.hintsOnly {
+			t.Errorf("%v: mentions --only = %v, want %v: %v", tc.args, got, tc.hintsOnly, err)
 		}
 	}
 }
@@ -412,6 +421,22 @@ func TestApplyFlagsIsTheLastLayer(t *testing.T) {
 	unchanged := applyFlags(base, "", "", 0)
 	if unchanged != base {
 		t.Errorf("empty flags changed the config: %+v, want %+v", unchanged, base)
+	}
+
+	// --cookies is applied by resolveCookie rather than applyFlags, and needs the same
+	// treatment for the same reason: a quoted "~/session.curl" arrives with the tilde
+	// intact, and a session source resolving to a directory named "~" is reported as a
+	// missing file rather than as the path the user typed.
+	curl := filepath.Join(home, "session.curl")
+	if err := os.WriteFile(curl, []byte(`curl 'https://syntystore.com' -H 'Cookie: sid=abc'`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := resolveCookie(config.Config{SessionSource: "firefox"}, "~/session.curl")
+	if err != nil {
+		t.Fatalf("resolveCookie with a tilde path: %v", err)
+	}
+	if cookie != "sid=abc" {
+		t.Errorf("cookie = %q, want the one in %s", cookie, curl)
 	}
 }
 

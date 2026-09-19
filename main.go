@@ -61,6 +61,11 @@ type cliFlags struct {
 	addr         string
 }
 
+// takesOnly reports whether cmd accepts --only. It is a function rather than a line
+// inside registerFlags because the stray-positional error suggests the flag, and a
+// subcommand told to use one it does not bind sends the user into a parse error.
+func takesOnly(cmd string) bool { return cmd == "status" || cmd == "sync" }
+
 // registerFlags binds the flags that mean something for cmd, so one that does not
 // becomes a parse error rather than being accepted and ignored. A shared set let
 // `select --dry-run` serve the page and rewrite the committed manifest, which is the
@@ -72,7 +77,7 @@ func registerFlags(fs *flag.FlagSet, cmd string) *cliFlags {
 	// it does not take the flag that points at one.
 	needsConfigDir := needsManifest && cmd != "list"
 	needsSession := cmd == "select" || cmd == "status" || cmd == "sync"
-	syncs := cmd == "status" || cmd == "sync"
+	syncs := takesOnly(cmd)
 
 	if needsManifest {
 		fs.StringVar(&f.manifestFlag, "manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
@@ -150,7 +155,11 @@ func run(args []string) error {
 		return selfupdate.Run(ctx, version, fs.Arg(0))
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("%s takes no positional arguments (got %q); to limit packs use --only %s", cmd, fs.Arg(0), fs.Arg(0))
+		err := fmt.Errorf("%s takes no positional arguments (got %q)", cmd, fs.Arg(0))
+		if takesOnly(cmd) {
+			return fmt.Errorf("%w; to limit packs use --only %s", err, fs.Arg(0))
+		}
+		return err
 	}
 
 	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
