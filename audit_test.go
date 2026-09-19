@@ -450,6 +450,15 @@ func (e runEnv) args(cmd string, extra ...string) []string {
 	}, extra...)
 }
 
+// selectArgs is args without the status/sync-only flags, which select does not bind
+// and therefore rejects. Keeping them separate is the point of registerFlags.
+func (e runEnv) selectArgs(extra ...string) []string {
+	return append([]string{"select",
+		"-config", e.configDir, "-manifest", e.manifestPath,
+		"-cookies", e.cookiesPath, "-customer", "1234567890",
+	}, extra...)
+}
+
 // serveStore points every subcommand at srv for the duration of a test. run builds
 // its own client, so this is the only way in.
 func serveStore(t *testing.T, h http.Handler) {
@@ -516,22 +525,33 @@ func TestRunWithoutACustomerIDStopsBeforeTheStore(t *testing.T) {
 }
 
 // An expired session has to keep its sentinel all the way out of run, where the exit
-// status and the "log in again" hint are decided.
+// status and the "log in again" hint are decided. Both subcommands that reach the
+// store have their own explainSession wrap, so both are checked: select's is the one
+// nothing else exercises, and a %v there would read as a plain error at the top while
+// the user is told nothing about logging in.
 func TestRunSurfacesTheExpiredSessionSentinel(t *testing.T) {
-	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `<html><body><h1>Login</h1></body></html>`) // no logged-in sentinel
-	}))
-	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+	for _, cmd := range []string{"sync", "select"} {
+		t.Run(cmd, func(t *testing.T) {
+			serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, `<html><body><h1>Login</h1></body></html>`) // no logged-in sentinel
+			}))
+			e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 
-	err := run(e.args("sync"))
-	if !errors.Is(err, portal.ErrExpiredSession) {
-		t.Fatalf("err = %v, want ErrExpiredSession to survive run", err)
-	}
-	if !strings.Contains(err.Error(), e.cookiesPath) {
-		t.Errorf("the error does not name the cookie source that failed: %v", err)
-	}
-	if _, statErr := os.Stat(e.lockPath); !os.IsNotExist(statErr) {
-		t.Errorf("a lockfile was written on an expired session")
+			args := e.args(cmd)
+			if cmd == "select" {
+				args = e.selectArgs("-addr", "127.0.0.1:0")
+			}
+			err := run(args)
+			if !errors.Is(err, portal.ErrExpiredSession) {
+				t.Fatalf("err = %v, want ErrExpiredSession to survive run", err)
+			}
+			if !strings.Contains(err.Error(), e.cookiesPath) {
+				t.Errorf("the error does not name the cookie source that failed: %v", err)
+			}
+			if _, statErr := os.Stat(e.lockPath); !os.IsNotExist(statErr) {
+				t.Errorf("a lockfile was written on an expired session")
+			}
+		})
 	}
 }
 
@@ -850,5 +870,132 @@ func TestListDoesNotNeedAReadableUserConfig(t *testing.T) {
 	defer func() { stdout = prev }()
 	if err := run([]string{"list", "-manifest", filepath.Join(project, "synty-sync.toml")}); err != nil {
 		t.Errorf("list failed over a user config it never reads: %v", err)
+	}
+}
+
+// The select branch in run is four things nothing else exercises: the --addr default,
+// the net.Listen error wrap, the listener reaching web.Serve, and the explainSession
+// wrap on the way out. Entering at selectPacks skips all of it, so a bad bind string
+// or a lost sentinel would ship with the suite green.
+func TestRunSelectServesOnTheAddressItWasGiven(t *testing.T) {
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// One owned pack on page 1, then the authenticated terminator. Serving the same
+		// page for every page number is a paginator that never advances, which Enumerate
+		// rightly refuses.
+		if r.URL.Query().Get("line_items_page") == "1" {
+			fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'>
+			  <a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>POLYGON - Pirate Pack</a></div>`)
+			return
+		}
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	// An ephemeral port, so the test never contends for the 8787 default.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	prevStdout := stdout
+	stdout = &out
+	defer func() { stdout = prevStdout }()
+
+	done := make(chan error, 1)
+	go func() { done <- run(e.selectArgs("-addr", addr)) }()
+
+	// Submit the one pack the page offered, which is what proves the listener run
+	// bound is the one web.Serve is answering on.
+	base := "http://" + addr
+	var token string
+	for i := 0; i < 200 && token == ""; i++ {
+		// run returning early means it failed before serving; its error says why, which
+		// beats timing out on a page that is never coming.
+		select {
+		case err := <-done:
+			t.Fatalf("run returned before serving the page: %v", err)
+		default:
+		}
+		resp, err := http.Get(base + "/")
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(string(body)); m != nil {
+			token = m[1]
+		}
+	}
+	if token == "" {
+		t.Fatal("the selection page never came up on --addr")
+	}
+	resp, err := http.PostForm(base+"/save", url.Values{
+		"pack": {"polygon-pirate-pack"},
+		"csrf": {token},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("select: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after the selection was submitted")
+	}
+	// The committed manifest holds what was chosen, and run said where it wrote it.
+	man, err := manifest.Load(e.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !man.EnabledSet()["polygon-pirate-pack"] {
+		t.Errorf("the chosen pack is not enabled in %s: %+v", e.manifestPath, man.Packs)
+	}
+	if !strings.Contains(out.String(), e.manifestPath) {
+		t.Errorf("run did not report where it saved:\n%s", out.String())
+	}
+}
+
+// An address already in use has to come back naming it, not as a bare syscall error:
+// 8787 is the default and something else holding it is the likeliest way select fails.
+func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	err = run(e.selectArgs("-addr", held.Addr().String()))
+	if err == nil {
+		t.Fatal("select bound an address another listener already holds")
+	}
+	if !strings.Contains(err.Error(), held.Addr().String()) {
+		t.Errorf("error does not name the address it could not bind: %v", err)
+	}
+	// And it stopped there. A bind error that fell through to the rest of select would
+	// enumerate the library and rewrite the committed manifest with no page ever shown.
+	if _, statErr := os.Stat(e.manifestPath); statErr != nil {
+		t.Fatal(statErr)
+	}
+	body, err := os.ReadFile(e.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "[[pack]]") {
+		t.Errorf("select rewrote the manifest after failing to bind:\n%s", body)
 	}
 }

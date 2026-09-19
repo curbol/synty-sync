@@ -1,8 +1,6 @@
 package session
 
 import (
-	"database/sql"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,28 +54,16 @@ func TestFromCurlMissing(t *testing.T) {
 	}
 }
 
+// Every syntystore.com cookie is forwarded and nothing else is, on Firefox's real
+// table rather than a three-column stand-in: the query reads named columns, so a
+// stand-in schema stops representing the thing under test the moment it reads one
+// more of them.
 func TestReadSQLiteCookies(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "cookies.sqlite")
-	db, err := sql.Open("sqlite", "file:"+dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT)`); err != nil {
-		t.Fatal(err)
-	}
-	rows := [][3]string{
-		{".syntystore.com", "_shopify_essential", "ABC"},
-		{"syntystore.com", "localization", "US"},
-		{".other.com", "junk", "XX"},
-	}
-	for _, r := range rows {
-		if _, err := db.Exec(`INSERT INTO moz_cookies VALUES (?,?,?)`, r[0], r[1], r[2]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db.Close()
-
+	dbPath := newCookieDB(t, false,
+		[3]string{".syntystore.com", "_shopify_essential", "ABC"},
+		[3]string{"syntystore.com", "localization", "US"},
+		[3]string{".other.com", "junk", "XX"},
+	)
 	got, err := readSQLiteCookies(dbPath)
 	if err != nil {
 		t.Fatal(err)
