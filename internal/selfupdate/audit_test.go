@@ -602,3 +602,61 @@ func TestNotFoundAlwaysSaysSomethingAboutTheToken(t *testing.T) {
 		})
 	}
 }
+
+// This is the one request in the update path that carries an Authorization header, and
+// the only error site that relayed a response body verbatim and unbounded. GitHub
+// answers an incident with a full HTML page, and so do captive portals and intercepting
+// proxies — which is where relaying the body stops being merely noisy, since some of
+// them echo the request back. Only GitHub's own JSON travels now; anything else is
+// reported as the status it arrived with.
+func TestFetchReleaseDoesNotRelayANonJSONErrorBody(t *testing.T) {
+	const page = "<html><head><title>502 Bad Gateway</title></head><body>" +
+		"proxy-secret-echo Authorization: Bearer hunter2</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, page+strings.Repeat(" padding", 5000))
+	}))
+	defer srv.Close()
+
+	apiWas := releasesAPIURL
+	releasesAPIURL = srv.URL + "/"
+	defer func() { releasesAPIURL = apiWas }()
+
+	_, err := fetchRelease(context.Background(), "", "")
+	if err == nil {
+		t.Fatal("a 502 produced no error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "hunter2") || strings.Contains(msg, "<html>") {
+		t.Errorf("the error relayed an intermediary's page:\n%s", msg)
+	}
+	if len(msg) > 200 {
+		t.Errorf("error is %d bytes; an unbounded body reached it:\n%s", len(msg), msg)
+	}
+	if !strings.Contains(msg, "502") {
+		t.Errorf("error does not name the status: %s", msg)
+	}
+}
+
+// The real GitHub message is what makes a 422 or a rate-limit readable, so bounding the
+// body must not throw it away.
+func TestFetchReleaseKeepsGitHubsOwnJSONMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com"}`)
+	}))
+	defer srv.Close()
+
+	apiWas := releasesAPIURL
+	releasesAPIURL = srv.URL + "/"
+	defer func() { releasesAPIURL = apiWas }()
+
+	_, err := fetchRelease(context.Background(), "", "")
+	if err == nil {
+		t.Fatal("a 403 produced no error")
+	}
+	if !strings.Contains(err.Error(), "API rate limit exceeded") {
+		t.Errorf("GitHub's own message was dropped: %s", err)
+	}
+}

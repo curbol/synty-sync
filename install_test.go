@@ -307,6 +307,21 @@ func TestInstallerAcceptsEveryCredentialSource(t *testing.T) {
 		{name: "GITHUB_TOKEN", env: []string{"GITHUB_TOKEN=" + stubToken}},
 		{name: "GH_TOKEN", env: []string{"GH_TOKEN=" + stubToken}},
 		{name: "gh auth token", ghToken: stubToken},
+		// Presence is not order. With one credential available per case, swapping the
+		// operands of ${GITHUB_TOKEN:-${GH_TOKEN:-}} or consulting gh first leaves every
+		// row above green, while a machine where gh is logged in to a personal account
+		// and GITHUB_TOKEN is the one scoped to this repo silently picks the wrong
+		// credential and reports the asset as missing from the release.
+		{
+			name:    "GITHUB_TOKEN wins over GH_TOKEN and the gh CLI",
+			env:     []string{"GITHUB_TOKEN=" + stubToken, "GH_TOKEN=wrong-gh-token"},
+			ghToken: "wrong-cli-token",
+		},
+		{
+			name:    "GH_TOKEN wins over the gh CLI",
+			env:     []string{"GH_TOKEN=" + stubToken},
+			ghToken: "wrong-cli-token",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -626,5 +641,67 @@ func TestInstallerKeepsTheTokenOutOfArgvAndLeavesNoConfigBehind(t *testing.T) {
 	}
 	if strings.Contains(string(sh), `-H "$hdr"`) || strings.Contains(string(sh), "Authorization: token $token") {
 		t.Error("install.sh passes the Authorization header on curl's command line")
+	}
+}
+
+// Everything else release.yml asserts about itself is pinned somewhere — the action's
+// commit sha, the -X target, the asset name, the platform labels — but the three facts
+// that decide whether a tag can ship untested code had no reader at all. Dropping
+// "needs: test", inlining the checks instead of calling ci.yml, or hard-coding a Go
+// version beside go-version-file all leave the whole suite green, and the next tag
+// publishes binaries that never ran -race or the cross-compile step.
+func TestReleaseRunsTheSameGateAMergeDoes(t *testing.T) {
+	release, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	ci, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+
+	// The gate is CI itself, called, not a second copy of the checks that can drift.
+	if !strings.Contains(string(release), "uses: ./.github/workflows/ci.yml") {
+		t.Error("release.yml no longer calls ci.yml as its gate")
+	}
+	if !strings.Contains(string(ci), "workflow_call:") {
+		t.Error("ci.yml no longer accepts workflow_call, so release.yml cannot use it as its gate")
+	}
+	// And the publishing job waits on it.
+	publishes := regexp.MustCompile(`(?s)\n  release:\n(.*?)(\n  \w|\z)`).FindSubmatch(release)
+	if publishes == nil {
+		t.Fatal("no release job found in release.yml")
+	}
+	if !strings.Contains(string(publishes[1]), "needs: test") {
+		t.Error("the release job no longer waits on the test job; a tag could publish untested code")
+	}
+	if regexp.MustCompile(`continue-on-error:\s*true`).Match(release) {
+		t.Error("release.yml has a continue-on-error, which can let a failed gate through")
+	}
+
+	// go.mod is the single source of the toolchain version in both files.
+	bare := regexp.MustCompile(`go-version:\s`)
+	for name, raw := range map[string][]byte{"release.yml": release, "ci.yml": ci} {
+		if bare.Match(raw) {
+			t.Errorf("%s pins a go-version directly; go-version-file: go.mod is the source", name)
+		}
+		if !strings.Contains(string(raw), "go-version-file: go.mod") {
+			t.Errorf("%s no longer reads the Go version from go.mod", name)
+		}
+	}
+
+	// Write is granted to the one job that publishes, never at workflow level, where
+	// every job including the gate would inherit it.
+	for name, raw := range map[string][]byte{"release.yml": release, "ci.yml": ci} {
+		head, _, _ := strings.Cut(string(raw), "\njobs:")
+		if !strings.Contains(head, "permissions:\n  contents: read") {
+			t.Errorf("%s does not default to contents: read above its jobs", name)
+		}
+		if strings.Contains(head, "contents: write") {
+			t.Errorf("%s grants contents: write at workflow level; only the release job needs it", name)
+		}
+	}
+	if strings.Contains(string(ci), "contents: write") {
+		t.Error("ci.yml grants contents: write; it only ever reads the repo")
 	}
 }

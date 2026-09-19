@@ -580,17 +580,12 @@ func TestResolveAcceptsPackageContentTypes(t *testing.T) {
 // would resolve a fresh signed URL never runs.
 func TestResolveTimesOutOnStalledBody(t *testing.T) {
 	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/files/") {
-			w.Header().Set("Content-Type", "application/zip")
-			w.Write([]byte("PK\x03\x04partial"))
-			w.(http.Flusher).Flush()
-			<-release
-			return
-		}
-		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
-	}))
-	defer func() { close(release); srv.Close() }()
+	srv := downloadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("PK\x03\x04partial"))
+		w.(http.Flusher).Flush()
+		<-release
+	})
+	defer close(release)
 
 	c := &Client{
 		HTTP:    srv.Client(),
@@ -620,19 +615,13 @@ func TestResolveTimesOutOnStalledBody(t *testing.T) {
 // A body that keeps delivering must not be cut off by the stall bound, however long
 // the whole transfer takes: the window is silence, not total time.
 func TestResolveDoesNotCutOffASlowButLiveBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/files/") {
-			w.Header().Set("Content-Type", "application/zip")
-			for i := 0; i < 8; i++ {
-				w.Write([]byte("PK\x03\x04"))
-				w.(http.Flusher).Flush()
-				time.Sleep(20 * time.Millisecond)
-			}
-			return
+	srv := downloadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 8; i++ {
+			w.Write([]byte("PK\x03\x04"))
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
 		}
-		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
-	}))
-	defer srv.Close()
+	})
 
 	c := &Client{
 		HTTP:    srv.Client(),
@@ -753,17 +742,11 @@ func TestEnumerateErrorsRatherThanTruncatingAnEndlessPaginator(t *testing.T) {
 // would tell the user their transfer stalled.
 func TestCancelledDownloadIsNotReportedAsAStall(t *testing.T) {
 	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/files/") {
-			w.Header().Set("Content-Type", "application/zip")
-			w.Write([]byte("PK\x03\x04"))
-			w.(http.Flusher).Flush()
-			<-release
-			return
-		}
-		http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
-	}))
-	defer srv.Close()
+	srv := downloadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("PK\x03\x04"))
+		w.(http.Flusher).Flush()
+		<-release
+	})
 	defer close(release)
 
 	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL, Limits: Limits{StallTimeout: 30 * time.Second}}
@@ -997,5 +980,68 @@ func TestDownloadLinkIsFoundBehindAnotherAction(t *testing.T) {
 	}
 	if files[0].FileID != 4242 {
 		t.Errorf("fileId = %d, want 4242 (the download anchor, not its neighbour)", files[0].FileID)
+	}
+}
+
+// downloadServer stands up the two legs Resolve walks: the download href, which
+// redirects, and the signed URL it lands on, which serves the archive. Only the second
+// leg differs between these tests, so serve owns that and the two things that decide
+// whether Resolve takes the success path at all — the redirect and the package
+// Content-Type — are stated once instead of hand-copied into every test that needs a
+// live transfer.
+func downloadServer(t *testing.T, serve func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/files/") {
+			http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		serve(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// PageTimeout bounds one page attempt end to end; a download must never take it, since
+// a pack runs to gigabytes and no deadline can be both generous enough for a slow line
+// and tight enough to be worth having. The stall guard is what covers a transfer, and
+// it measures silence rather than duration. Nothing pinned this: every other Resolve
+// test leaves PageTimeout at its 60-second default and finishes in milliseconds, so
+// wrapping Resolve's context in a page deadline — the obvious way to "fix" the
+// asymmetry with getBody — keeps the whole suite green while every large pack dies
+// partway and re-resolves into the same wall on each retry.
+func TestResolveIsNotBoundByThePageDeadline(t *testing.T) {
+	const chunks = 10
+	srv := downloadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("PK\x03\x04"))
+		w.(http.Flusher).Flush()
+		for i := 0; i < chunks; i++ {
+			time.Sleep(20 * time.Millisecond)
+			w.Write([]byte("0123456789"))
+			w.(http.Flusher).Flush()
+		}
+	})
+
+	// The transfer takes roughly 200ms of steady delivery against a 50ms page deadline.
+	c := &Client{
+		HTTP:    srv.Client(),
+		BaseURL: srv.URL,
+		Limits:  Limits{PageTimeout: 50 * time.Millisecond, StallTimeout: 2 * time.Second},
+	}
+	body, _, err := c.Resolve(context.Background(), model.FileEntry{
+		FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	defer body.Close()
+
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("reading the body: %v — a page deadline is cutting the transfer off", err)
+	}
+	if want := 4 + chunks*10; len(got) != want {
+		t.Errorf("read %d bytes, want %d; the transfer was truncated", len(got), want)
 	}
 }

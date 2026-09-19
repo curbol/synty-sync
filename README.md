@@ -134,7 +134,8 @@ enabled = true
 packs that project draws from. Newly-bought packs appear disabled on the next `select`, so
 buying a pack never silently downloads it. `sync` and `status` only act on enabled packs;
 with nothing enabled they do nothing and remind you to run `select`. You can also hand-edit
-`synty-sync.toml` instead of using the web page.
+`synty-sync.toml` instead of using the web page. Note that `select` rewrites the file from
+scratch, so any comments you add to it are lost the next time you run it.
 
 ## What it does
 

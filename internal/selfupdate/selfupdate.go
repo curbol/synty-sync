@@ -146,8 +146,17 @@ func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 		return nil, fmt.Errorf("no releases found%s", hint)
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Bounded, and only GitHub's own JSON is relayed. A 502 during an incident, a
+		// captive portal, or a TLS-intercepting proxy all answer with a full HTML page,
+		// and this is the one request in the function that carried an Authorization
+		// header, so an intermediary echoing the request back is not something to print.
+		// The status alone is what is left, which is what the download path already does.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBytes))
+		msg := resp.Status
+		if json.Valid(body) {
+			msg = strings.TrimSpace(string(body))
+		}
+		return nil, fmt.Errorf("GitHub API %d: %s", resp.StatusCode, msg)
 	}
 	var r release
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
@@ -253,6 +262,10 @@ var executableMagic = map[string][][]byte{
 	"darwin":  {{0xcf, 0xfa, 0xed, 0xfe}, {0xce, 0xfa, 0xed, 0xfe}, {0xca, 0xfe, 0xba, 0xbe}},
 	"windows": {[]byte("MZ")},
 }
+
+// maxAPIErrorBytes bounds the error body the API is allowed to hand back. GitHub's own
+// {"message": …} is a line or two; anything at this size is not from GitHub.
+const maxAPIErrorBytes = 4 << 10
 
 func checkExecutable(path string) error {
 	f, err := os.Open(path)

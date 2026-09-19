@@ -15,7 +15,8 @@
 variant_includes = ["Godot_*", "SourceFiles"]
 
 # Pack selection. `synty-sync select` manages these via a local web page; hand-editing is
-# fine. New packs land disabled (opt-in), so buying a pack never silently downloads it.
+# fine, but select rewrites this file from scratch and any comments you add here go with
+# it. New packs land disabled (opt-in), so buying a pack never silently downloads it.
 # [[pack]]
 #   slug = "polygon-pirate-pack"
 #   name = "POLYGON - Pirate Pack"
