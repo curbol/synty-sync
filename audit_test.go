@@ -1006,6 +1006,28 @@ func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
 // reach, it can only break it: the browser such a bind is aimed at gets 421 while the
 // port stands open to anything that can route to it. Refusing the bind is what keeps
 // the flag from reading as a way to share the page.
+// A bad --addr has to be reported as a bad --addr. The bind is what the user typed
+// wrong, but the session is resolved from the browser's cookie store, so ordering the
+// two the other way answers "0.0.0.0:8787" with whatever is wrong with their Firefox
+// profile — on a headless box or a fresh container, that is the only thing they see.
+func TestSelectReportsABadAddrBeforeReadingTheSession(t *testing.T) {
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+	args := append([]string{"select",
+		"-config", e.configDir, "-manifest", e.manifestPath,
+		// A cookie source that cannot resolve, so whichever step runs first decides
+		// which error comes back.
+		"-cookies", filepath.Join(t.TempDir(), "nonexistent-cookies.txt"), "-customer", "1234567890",
+	}, "-addr", "0.0.0.0:8787")
+
+	err := run(args)
+	if err == nil {
+		t.Fatal("select accepted a non-loopback --addr")
+	}
+	if !strings.Contains(err.Error(), "0.0.0.0:8787") || !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("the error is about the session, not the address the user typed: %v", err)
+	}
+}
+
 func TestSelectRefusesANonLoopbackAddr(t *testing.T) {
 	for _, tc := range []struct {
 		bind string

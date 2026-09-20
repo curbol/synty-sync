@@ -122,9 +122,6 @@ func run(args []string) error {
 	// comes back as an error that main reports once.
 	fs.SetOutput(io.Discard)
 	f := registerFlags(fs, cmd)
-	cfgDir, manifestFlag, cookies := &f.cfgDir, &f.manifestFlag, &f.cookies
-	library, only, customer := &f.library, &f.only, &f.customer
-	concurrency, dryRun, addr := &f.concurrency, &f.dryRun, &f.addr
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
 		usage()
 		return nil
@@ -163,7 +160,7 @@ func run(args []string) error {
 		return err
 	}
 
-	manifestPath, err := resolveManifestPath(*manifestFlag, cmd)
+	manifestPath, err := resolveManifestPath(f.manifestFlag, cmd)
 	if err != nil {
 		return err
 	}
@@ -176,35 +173,44 @@ func run(args []string) error {
 		return list(stdout, lockPath)
 	}
 
-	authDir := config.ResolveDir(*cfgDir)
+	// The listener is bound before the user config and the browser cookie DB are
+	// touched, so a bad --addr is reported as a bad --addr. Resolving the session
+	// first answers "0.0.0.0:8787" with whatever is wrong with the user's browser
+	// profile, which is not what they typed.
+	var ln net.Listener
+	if cmd == "select" {
+		bind := f.addr
+		if bind == "" {
+			bind = selectAddr
+		}
+		var err error
+		if ln, err = listenLocal(bind); err != nil {
+			return err
+		}
+		defer func() { _ = ln.Close() }()
+	}
+
+	authDir := config.ResolveDir(f.cfgDir)
 	cfg, err := config.Load(authDir)
 	if err != nil {
 		return err
 	}
-	cfg = applyFlags(cfg, *library, *customer, *concurrency)
+	cfg = applyFlags(cfg, f.library, f.customer, f.concurrency)
 
 	if cfg.CustomerID == "" {
 		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
 	}
-	src := sessionSource(cfg, *cookies)
-	cookie, err := resolveCookie(cfg, *cookies)
+	src := sessionSource(cfg, f.cookies)
+	cookie, err := resolveCookie(cfg, f.cookies)
 	if err != nil {
 		return err
 	}
 	client := newPortalClient(cfg.CustomerID, cookie)
 
 	if cmd == "select" {
-		bind := *addr
-		if bind == "" {
-			bind = selectAddr
-		}
-		ln, err := listenLocal(bind)
-		if err != nil {
-			return err
-		}
 		return explainSession(selectPacks(ctx, client, manifestPath, ln), src)
 	}
-	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, *only, isDryRun(cmd, *dryRun)), src)
+	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, f.only, isDryRun(cmd, f.dryRun)), src)
 }
 
 // explainSession turns the bare expired-session sentinel into something actionable.

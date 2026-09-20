@@ -59,8 +59,11 @@ func documentMediaType(header string) (string, bool) {
 	if header == "" {
 		return "", false
 	}
+	// ParseMediaType reports a malformed *parameter* alongside the media type it did
+	// read, and that type is a perfectly good verdict: "text/html; charset" is still a
+	// document. Only a header it could make nothing of is not one.
 	mt, _, err := mime.ParseMediaType(header)
-	if err != nil {
+	if err != nil && mt == "" {
 		return header, false
 	}
 	mt = strings.ToLower(mt)

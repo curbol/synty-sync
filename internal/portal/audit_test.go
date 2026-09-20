@@ -574,6 +574,10 @@ func TestResolveRefusesADocumentBody(t *testing.T) {
 		{"a CDN error document", "application/xml", "<Error><Code>AccessDenied</Code></Error>"},
 		{"a JSON error", "application/json", `{"error":"forbidden"}`},
 		{"a plain-text notice", "text/plain", "Access denied"},
+		// The type parses; only the parameter is malformed. Discarding the type
+		// because an error came back with it lets a login page past this guard and
+		// leaves the body sniff, one layer down, to do the whole job alone.
+		{"a login page with a broken charset parameter", "text/html; charset", "<!doctype html><title>Log in</title>"},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

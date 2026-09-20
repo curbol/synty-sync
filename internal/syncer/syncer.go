@@ -252,8 +252,15 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// another, at two versions, in a committed file — and no failure happened here, so
 	// nothing else would ever say so.
 	deselectedByID := map[int]live{}
+	// The portal's rounded label, for every fileId this run read a page for. It
+	// refreshes on every run and describes the store's listing rather than the bytes,
+	// so it travels to the owners the run did not fetch whatever the verdict was:
+	// without it one fileId carries two different advertisedSize values under two
+	// owners in a committed file, for the same version and the same sha.
+	advertisedByID := map[int]int64{}
 	for _, pf := range packFiles {
 		for _, f := range pf.files {
+			advertisedByID[f.FileID] = f.SizeBytes
 			if !opts.Filter(f.Variant) || f.Archived {
 				deselectedByID[f.FileID] = live{version: f.Version, variant: string(f.Variant)}
 				continue
@@ -361,7 +368,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		}
 	}
 
-	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, deselectedByID, lf)
+	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, deselectedByID, advertisedByID, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
 	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf, report.NewLockfile)...)
 	report.Warnings = append(report.Warnings, unreadable...)
@@ -835,7 +842,7 @@ func keyFor(f lockfile.File, wasVariant, key string) string {
 	return model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(f.Variant)}.Key()
 }
 
-func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID, deselectedByID map[int]live, prev lockfile.Lockfile) {
+func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, resolvedByID map[int]resolved, unresolvedByID, deselectedByID map[int]live, advertisedByID map[int]int64, prev lockfile.Lockfile) {
 	prevByID := indexByFileID(prev)
 	// A run acts only on the packs it fetched: those filtered out (disabled in the
 	// manifest, or outside --only) are never re-fetched, so carry their prior records
@@ -857,6 +864,9 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 		for _, key := range sortedKeys(p.Files) {
 			f := p.Files[key]
 			wasVariant := f.Variant
+			if size, read := advertisedByID[f.FileID]; read {
+				f.AdvertisedSize = size
+			}
 			// The question is whether this fileId was re-resolved on this run, not
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the identity has to travel with them or the carried entry ends
@@ -879,7 +889,15 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 					// for this owner too, and the only way its entry stayed untracked is an
 					// earlier run that failed to fetch it. That is the case that has to
 					// converge.
-					f = applyResolved(f, r, opts.Now, f.DownloadedAt)
+					//
+					// An owner that never held the file has no stamp of its own to keep, so
+					// it takes the one another owner recorded for the same fileId rather
+					// than ending the run tracked with no downloadedAt at all.
+					stamp := f.DownloadedAt
+					if stamp == "" {
+						stamp = prevByID[f.FileID].DownloadedAt
+					}
+					f = applyResolved(f, r, opts.Now, stamp)
 				}
 			}
 			carried.Files[keyFor(f, wasVariant, key)] = f

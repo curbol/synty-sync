@@ -138,11 +138,15 @@ against a reader but says nothing about durability, so a crash can otherwise lea
 full-length file of zeros where the record of every cached byte used to be. Keyed by a stable **pack slug**
 derived from the library-list display name, because the file-label token is *not* stable
 within a pack (one pack's files can read `POLYGON_Pirate`, `POLYGON_Pirate_Pack`, and
-`POLYGON_Pirates_Pack`). Each pack holds a per-**file** map, not per-variant, because a
+`POLYGON_Pirates_Pack`). The slug carries the whole of a pack's identity in both committed
+files, so enumeration refuses a library in which one is empty or two packs share one:
+either shape writes a record that cannot be read back, and a generated discriminator would
+have to rename the pack that held the name first, dropping its enabled flag. Each pack holds a per-**file** map, not per-variant, because a
 single pack can carry two files of the same variant (its own `Godot_4_5_1` plus a bundled
 `GENERIC_Particle_FX Godot_4_5_1`); the file key is `fileToken|variant`. Files are deduped by
 `fileId`, so a file bundled under several packs is stored once and every owning pack's entry
-shares the same `cachePath`. A `sync` rebuilds only the packs it acted on; packs it did not
+shares the same `cachePath`, `version`, `sha256`, `advertisedSize` and `downloadedAt`,
+including the owners a run did not fetch. A `sync` rebuilds only the packs it acted on; packs it did not
 fetch (disabled in the manifest, or outside `--only`) keep their prior records rather than
 being dropped, so the file stays a complete record of what is owned — and a bundled file
 shared with a re-downloaded pack is repointed in lockstep. Every verdict travels to those
@@ -277,9 +281,11 @@ sweep deletes and no scan can take back.
   the last drops the "Your Library" heading but keeps the search box, so the sentinel is a
   reliable per-page marker while the heading is not; a session that expires mid-walk is
   therefore caught rather than read as the terminator, which would silently truncate the
-  library and, through `select`, drop the user's enabled flags. The walk also stops if a
+  library and, through `select`, drop the user's enabled flags. The walk also fails if a
   page adds no packs it has not already seen, so a paginator that clamps an out-of-range
-  page cannot loop forever.
+  page cannot loop forever; it is an error rather than a stop, since the packs gathered so
+  far may be a truncated library and returning them is the outcome the sentinel exists to
+  prevent.
 - **Empty library against a populated lockfile:** refused outright. A read that returns
   nothing is far more often markup that moved than a library someone emptied, and the
   lockfile is committed to someone's project.

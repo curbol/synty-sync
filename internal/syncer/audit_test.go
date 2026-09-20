@@ -1171,6 +1171,110 @@ func TestResolvedBundledFileConvergesAnUntrackedCarriedOwner(t *testing.T) {
 	if in.Tracked != out.Tracked || in.CachePath != out.CachePath || in.SHA256 != out.SHA256 || in.Version != out.Version {
 		t.Errorf("owning packs disagree on fileId 999:\n  in-scope  %+v\n  carried   %+v", in, out)
 	}
+	// An owner that never held the file has no stamp of its own, so it takes the one
+	// recorded for the same fileId rather than ending the run tracked, at a shared
+	// path and sha, with no downloadedAt at all.
+	if out.DownloadedAt == "" || in.DownloadedAt != out.DownloadedAt {
+		t.Errorf("downloadedAt disagrees on fileId 999: in-scope %q vs carried %q", in.DownloadedAt, out.DownloadedAt)
+	}
+}
+
+// advertisedSize is the portal's label, refreshed every run, and it describes the
+// store's listing rather than the bytes, so it has to reach the owners a run did not
+// fetch whatever the verdict was. Rebuilding only the in-scope entry from the live row
+// leaves one fileId carrying two different advertisedSize values under two owners, at
+// one version and one sha, in a committed file.
+func TestAdvertisedSizeReachesAnOwnerTheRunDidNotFetch(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	size := "40 MB"
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1", "4": // Pirate and Dungeon both bundle fileId 999
+				return fmt.Sprintf(`<div class='sky-pilot-list-item'>
+				  <div class='sky-pilot-file-heading'>GENERIC_Particle_FX_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(%s)</span></div>
+				  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/999?x=1'>Download</a></div>
+				</div>`, size), true
+			}
+			return "", false
+		},
+	})
+
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+
+	// The store re-labels the file and Dungeon drops out of scope, so its entry is
+	// carried forward while Pirate is rebuilt from the live row.
+	size = "41 MB"
+	only := runOpts(lib, false)
+	only.PackSelected = func(slug string) bool { return slug != "polygon-dungeon-pack" }
+	if _, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, only); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	in := after.Packs["polygon-pirate-pack"].Files[key]
+	out := after.Packs["polygon-dungeon-pack"].Files[key]
+	if in.AdvertisedSize != out.AdvertisedSize {
+		t.Errorf("one fileId carries two advertised sizes: in-scope %d vs carried %d", in.AdvertisedSize, out.AdvertisedSize)
+	}
+	if in.AdvertisedSize != 41<<20 {
+		t.Errorf("advertisedSize = %d, want the re-labelled 41 MB", in.AdvertisedSize)
+	}
+}
+
+// A fileId whose bytes this run did not re-fetch still has to leave every owner with
+// the same downloadedAt. The in-scope entry is rebuilt with the stamp from whichever
+// prior record held one; an owner that never held the file has none of its own, so
+// taking only its own empty stamp leaves it tracked, at the shared path and sha, with
+// no downloadedAt at all. Only an Unchanged file reaches this: a re-download stamps
+// every owner with the current run's time and agrees by construction.
+func TestUnfetchedBundledFileCarriesOneDownloadedAt(t *testing.T) {
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	const stamp = "2024-01-01T00:00:00Z"
+	file := func(tracked bool, downloadedAt string) lockfile.File {
+		f := lockfile.File{
+			FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_0", FileID: 999,
+		}
+		if tracked {
+			f.Tracked, f.CachePath, f.SHA256, f.DownloadedAt = true, "GENERIC_Particle_FX/p.zip", "sha", downloadedAt
+		}
+		return f
+	}
+	prev := lockfile.Lockfile{Packs: map[string]lockfile.Pack{
+		// Pirate holds the bytes and the stamp; Dungeon is out of scope and never got
+		// the file, which an earlier failed fetch is the ordinary way to reach.
+		"polygon-pirate-pack":  {DisplayName: "P", Files: map[string]lockfile.File{key: file(true, stamp)}},
+		"polygon-dungeon-pack": {DisplayName: "D", Files: map[string]lockfile.File{key: file(false, "")}},
+	}}
+	pf := []packWithFiles{{
+		pack: model.Pack{Slug: "polygon-pirate-pack", DisplayName: "P"},
+		files: []model.FileEntry{{
+			FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_0", FileID: 999,
+		}},
+	}}
+	// Unchanged: resolved from the prior record, so now is false and no fresh stamp
+	// is minted for either owner.
+	resolvedByID := map[int]resolved{999: {
+		cachePath: "GENERIC_Particle_FX/p.zip", sha: "sha", version: "v1_0_0", variant: "Godot_4_5_1",
+	}}
+
+	rep := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
+	buildLockfile(&rep, pf, runOpts(t.TempDir(), false), resolvedByID, nil, nil, nil, prev)
+
+	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
+	out := rep.NewLockfile.Packs["polygon-dungeon-pack"].Files[key]
+	if !in.Tracked || !out.Tracked {
+		t.Fatalf("both owners should hold the resolved file: in=%+v out=%+v", in, out)
+	}
+	if in.DownloadedAt != stamp || out.DownloadedAt != stamp {
+		t.Errorf("downloadedAt disagrees on fileId 999: in-scope %q vs carried %q, want %q",
+			in.DownloadedAt, out.DownloadedAt, stamp)
+	}
 }
 
 // The same convergence for the losing direction: when a run proves a fileId has no
@@ -1195,7 +1299,7 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 		}},
 	}}
 	opts := runOpts(lib, false)
-	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, nil, prev)
+	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, nil, nil, prev)
 
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]

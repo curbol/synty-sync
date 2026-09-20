@@ -25,7 +25,18 @@ func TestStoreSuppliedNamesAreEscaped(t *testing.T) {
 
 	ln := listen(t)
 	base := "http://" + ln.Addr().String()
-	go Serve(context.Background(), ln, packs, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Serve(ctx, ln, packs, nil)
+	}()
+	// Serve outlives the test body otherwise, and a Serve still running is a live
+	// reader of the package's OpenBrowser while the next test swaps it.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	waitUp(t, base)
 
 	body := get(t, base+"/")
@@ -209,10 +220,6 @@ func TestServeReturnsWhenTheContextIsCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	restore := OpenBrowser
-	OpenBrowser = func(string) {}
-	t.Cleanup(func() { OpenBrowser = restore })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {

@@ -88,7 +88,17 @@ latest_version() {
   VERSION=$(curl "${opts[@]}" "${API_BASE}/repos/${REPO}/releases/latest" \
     | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') || true
   VERSION=${VERSION#v}
-  [[ -n "$VERSION" ]] || { err "could not resolve latest version (private repo needs gh auth or GITHUB_TOKEN)"; exit 1; }
+  # GitHub answers 404, not 403, for a private repo the caller cannot see, so an empty
+  # result means either no token or a token without access. Telling someone who already
+  # exported one to export one sends them to check the thing that is not wrong.
+  if [[ -z "$VERSION" ]]; then
+    if [[ -n "$AUTH_CONF" ]]; then
+      err "could not resolve the latest release of ${REPO}; the token found does not have access to it (check GITHUB_TOKEN / GH_TOKEN, or \`gh auth status\`)"
+    else
+      err "could not resolve the latest release of ${REPO}; no GitHub token found, and the repo is private (set GITHUB_TOKEN or run \`gh auth login\`)"
+    fi
+    exit 1
+  fi
   log "latest version: $VERSION"
 }
 

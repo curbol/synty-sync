@@ -84,7 +84,7 @@ func stubReleaseLabeled(t *testing.T, asset []byte, label string, extraAssetFiel
 	// exactly as github.com behaves. A stub that answered anyway would let the
 	// installer lose its auth entirely (an empty AUTH_CONF, a mktemp change, a call to
 	// ensure_auth_config from a subshell) and still pass every test here, while every
-	// real user got "could not resolve latest version".
+	// real user got "could not resolve the latest release".
 	authed := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "token "+stubToken {
@@ -265,15 +265,30 @@ func runInstallerWithGh(t *testing.T, home, ghToken string, env ...string) (stri
 // The ordinary no-token case must say so. auth_header returns non-zero when it finds
 // nothing, and under `set -e` a bare assignment from it killed the script before any
 // of the messages written for this case could print.
+//
+// A token that cannot see the repo is the other half. GitHub answers 404 rather than
+// 403 for a private repo the caller cannot read, so both arrive here as an empty
+// result: telling someone who has already exported a token to export one sends them to
+// check the thing that is not wrong.
 func TestInstallerReportsAnUnreachableRelease(t *testing.T) {
-	home := t.TempDir()
-	out, err := runInstaller(t, home,
-		"SYNTY_INSTALL_API=http://127.0.0.1:1", "SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1")
-	if err == nil {
-		t.Fatalf("the installer succeeded against an unreachable release:\n%s", out)
-	}
-	if !strings.Contains(out, "could not resolve latest version") {
-		t.Errorf("the installer failed with no explanation:\n%s", out)
+	for _, tc := range []struct{ name, ghToken, want, notWant string }{
+		{"no token at all", "", "no GitHub token found", "does not have access"},
+		{"a token without access", "wrong-org-token", "does not have access", "no GitHub token found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			out, err := runInstallerWithGh(t, home, tc.ghToken,
+				"SYNTY_INSTALL_API=http://127.0.0.1:1", "SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1")
+			if err == nil {
+				t.Fatalf("the installer succeeded against an unreachable release:\n%s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the installer did not say %q:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, tc.notWant) {
+				t.Errorf("the installer gave the other case's advice (%q):\n%s", tc.notWant, out)
+			}
+		})
 	}
 }
 
@@ -673,13 +688,31 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 // The release action runs with contents: write, and a tag can be moved without
 // anything here changing, so the third-party step stays pinned to a commit.
 func TestReleaseActionIsPinnedToACommit(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
-	if err != nil {
-		t.Fatalf("read release.yml: %v", err)
-	}
-	pinned := regexp.MustCompile(`uses:\s+softprops/action-gh-release@[0-9a-f]{40}\b`)
-	if !pinned.Match(raw) {
-		t.Error("softprops/action-gh-release is not pinned to a 40-character commit sha")
+	// Every `uses:` in both workflows, rather than the one third-party action that is
+	// there today. Naming it makes the check a note about that action; a second one
+	// added beside it on a floating tag, in the job that already holds contents:write,
+	// would be exactly as dangerous and entirely invisible here.
+	uses := regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:\s+(\S+)`)
+	sha := regexp.MustCompile(`@[0-9a-f]{40}$`)
+	for _, name := range []string{"ci.yml", "release.yml"} {
+		raw, err := os.ReadFile(filepath.Join(".github", "workflows", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		found := uses.FindAllStringSubmatch(string(raw), -1)
+		if len(found) == 0 {
+			t.Errorf("%s has no uses: at all; this guard would pass over an empty file", name)
+		}
+		for _, m := range found {
+			ref := m[1]
+			switch {
+			case strings.HasPrefix(ref, "./"): // this repo's own workflow
+			case strings.HasPrefix(ref, "actions/"): // first-party, versioned by GitHub
+			case sha.MatchString(ref):
+			default:
+				t.Errorf("%s uses %s, which is third-party and not pinned to a 40-character commit sha", name, ref)
+			}
+		}
 	}
 }
 

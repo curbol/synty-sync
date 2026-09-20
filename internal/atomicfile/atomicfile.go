@@ -48,7 +48,23 @@ func Write(path, tempPattern string, write func(io.Writer) error) error {
 		os.Remove(tmpName)
 		return err
 	}
+	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// syncDir flushes the directory entry the rename created. The Sync above makes the
+// new bytes durable; this is what makes the name pointing at them durable, so a crash
+// cannot leave the directory still naming the file this call replaced.
+//
+// Best-effort on purpose: Windows does not hand out a syncable handle for a directory,
+// and a write that genuinely landed must not be reported as failed there.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // modeOf is the mode a rewritten committed file keeps: whatever it already had, or a
