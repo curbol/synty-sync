@@ -363,7 +363,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	buildLockfile(&report, packFiles, opts, resolvedByID, unresolvedByID, deselectedByID, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
-	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf)...)
+	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf, report.NewLockfile)...)
 	report.Warnings = append(report.Warnings, unreadable...)
 	report.Warnings = append(report.Warnings, append(adoptWarnings, pruneWarnings...)...)
 
@@ -894,7 +894,6 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			Files:       map[string]lockfile.File{},
 		}
 		for _, f := range pf.files {
-			selected := opts.Filter(f.Variant) && !f.Archived
 			entry := lockfile.File{
 				FileToken:      f.FileToken,
 				Variant:        string(f.Variant),
@@ -904,16 +903,20 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 			}
 			key := f.Key()
 			wasVariant := entry.Variant
-			if selected {
-				if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
-					entry = applyResolved(entry, r, opts.Now, prevByID[f.FileID].DownloadedAt)
-				}
-				// DryRun selected-but-not-resolved stays Tracked=false here; status
-				// does not mutate the committed lockfile, so this report copy is
-				// informational only.
+			// Keyed on the fileId's outcome for the run, not on this row's own verdict.
+			// Selection is decided once across every owner ("selected anywhere wins"),
+			// and the bytes are one file in one place, so an owner whose row the store
+			// archived still holds the copy the owner beside it just resolved. Reading
+			// this row's own Archived label here instead is what let one owning pack
+			// record the shared path while another recorded nothing for the same fileId.
+			// A fileId no owner selected reaches this untracked at the live identity,
+			// which is where clearTracking leaves the carried owners too.
+			//
+			// DryRun selected-but-not-resolved stays Tracked=false; status does not
+			// mutate the committed lockfile, so this report copy is informational only.
+			if r, ok := resolvedByID[f.FileID]; ok && r.cachePath != "" {
+				entry = applyResolved(entry, r, opts.Now, prevByID[f.FileID].DownloadedAt)
 			}
-			// A file the run declined is already untracked at the live identity here,
-			// which is the same place clearTracking leaves the carried owners.
 			lp.Files[keyFor(entry, wasVariant, key)] = entry
 		}
 		report.NewLockfile.Packs[pf.pack.Slug] = lp
@@ -960,13 +963,26 @@ func sortedKeys(files map[string]lockfile.File) []string {
 // either: an archived file is never selected, so it is never an adopt candidate, and
 // the adopt scan keys on the version the page now reports. Said once, on the run that
 // drops the record, since the run after finds nothing tracked to report.
-func archivedRecords(packFiles []packWithFiles, prev lockfile.Lockfile) []string {
+//
+// A fileId another owner still tracks is not one of these. Archived is a per-row
+// label, so a bundled file can be archived under one order item while another still
+// serves it, and the new record keeps the path under that owner. Claiming the copy is
+// unreferenced there sends someone looking for bytes that nothing lost.
+func archivedRecords(packFiles []packWithFiles, prev, next lockfile.Lockfile) []string {
 	prevByID := indexByFileID(prev)
+	referenced := map[int]bool{}
+	for _, p := range next.Packs {
+		for _, f := range p.Files {
+			if f.Tracked && f.CachePath != "" {
+				referenced[f.FileID] = true
+			}
+		}
+	}
 	seen := map[int]bool{}
 	var w []string
 	for _, pf := range packFiles {
 		for _, f := range pf.files {
-			if !f.Archived || seen[f.FileID] {
+			if !f.Archived || seen[f.FileID] || referenced[f.FileID] {
 				continue
 			}
 			p, ok := prevByID[f.FileID]

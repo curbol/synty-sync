@@ -1798,3 +1798,61 @@ func TestARefusedFlatFileIsReportedOnce(t *testing.T) {
 		t.Errorf("the same refused file was reported %d times:\n%s", refusals, strings.Join(rep.Warnings, "\n"))
 	}
 }
+
+// Archived is a per-row label, so two packs bundling one fileId can disagree about it
+// in a single run while both stay in scope. The rebuild used to read each row's own
+// verdict to decide whether to apply what the run resolved, so the owner whose row the
+// store had archived was written untracked with no path or sha while the owner beside
+// it recorded the shared copy — one fileId, one set of bytes, committed both ways, with
+// no failure behind it for anything else to report. archivedRecords then named that
+// same still-referenced copy as unreferenced.
+func TestDivergentArchivedKeepsInScopeOwnersInAgreement(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	pirateVersion, dungeonVersion := "v1_0_0", "v1_0_0"
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1": // Pirate
+				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", pirateVersion, 999), true
+			case "4": // Dungeon bundles the same fileId
+				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", dungeonVersion, 999), true
+			}
+			return "", false
+		},
+	})
+
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	if !lf.Packs["polygon-pirate-pack"].Files[key].Tracked {
+		t.Fatal("seed produced no tracked bundled file")
+	}
+
+	// The store archives the file under Pirate's order item only. Both packs stay
+	// enabled, so both are rebuilt from live pages on this run.
+	pirateVersion = "v1_0_0_ARCHIVED"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, runOpts(lib, false))
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived := after.Packs["polygon-pirate-pack"].Files[key]
+	live := after.Packs["polygon-dungeon-pack"].Files[key]
+	if !live.Tracked || live.CachePath == "" {
+		t.Fatalf("the owner still serving the file lost its record: %+v", live)
+	}
+	if archived.Tracked != live.Tracked || archived.CachePath != live.CachePath ||
+		archived.SHA256 != live.SHA256 || archived.Version != live.Version ||
+		archived.SizeBytes != live.SizeBytes {
+		t.Errorf("owning packs diverged over one fileId:\n  archived row %+v\n  live row     %+v", archived, live)
+	}
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "unreferenced") {
+			t.Errorf("a copy another owner still records was reported unreferenced: %s", w)
+		}
+	}
+}
