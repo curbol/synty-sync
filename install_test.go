@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/curbol/synty-sync/internal/releaseyml"
 )
 
 // installerZip builds a release archive holding one file named synty-sync with the
@@ -423,35 +425,14 @@ func assertNoStagingLeft(t *testing.T, binDir string) {
 	}
 }
 
-// releasePlatform is one entry of release.yml's platforms list: the pair it builds
-// for and the label the asset carries.
-type releasePlatform struct{ goos, goarch, label string }
-
-var platformEntryRe = regexp.MustCompile(`"([a-z0-9]+)/([a-z0-9]+)/([a-z0-9-]+)"`)
-
 // releasePlatforms reads what the release workflow actually builds. The installer
 // composes the same labels from uname output in its own language, and the workflow
 // is the only place they are really decided.
-func releasePlatforms(t *testing.T) []releasePlatform {
+func releasePlatforms(t *testing.T) []releaseyml.Platform {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	out, err := releaseyml.Platforms(filepath.Join(".github", "workflows", "release.yml"))
 	if err != nil {
-		t.Fatalf("read release.yml: %v", err)
-	}
-	_, rest, ok := strings.Cut(string(raw), "platforms=(")
-	if !ok {
-		t.Fatal("release.yml has no platforms=( ... ) list; this guard no longer reads what the workflow builds")
-	}
-	block, _, ok := strings.Cut(rest, ")")
-	if !ok {
-		t.Fatal("release.yml's platforms list is unterminated")
-	}
-	var out []releasePlatform
-	for _, m := range platformEntryRe.FindAllStringSubmatch(block, -1) {
-		out = append(out, releasePlatform{goos: m[1], goarch: m[2], label: m[3]})
-	}
-	if len(out) == 0 {
-		t.Fatal("no platforms parsed from release.yml")
+		t.Fatal(err)
 	}
 	return out
 }
@@ -484,25 +465,25 @@ func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
 
 	covered := 0
 	for _, p := range releasePlatforms(t) {
-		if p.goos == "windows" {
+		if p.GOOS == "windows" {
 			continue // install.sh refuses Windows by design; the release zip is used directly
 		}
-		un, ok := unameFor[p.goos+"/"+p.goarch]
+		un, ok := unameFor[p.GOOS+"/"+p.GOARCH]
 		if !ok {
-			t.Errorf("release.yml builds %s/%s but this guard does not know its uname output", p.goos, p.goarch)
+			t.Errorf("release.yml builds %s/%s but this guard does not know its uname output", p.GOOS, p.GOARCH)
 			continue
 		}
 		covered++
 		for _, machine := range []string{un[1], alias[un[1]]} {
-			t.Run(p.label+"/"+machine, func(t *testing.T) {
+			t.Run(p.Label+"/"+machine, func(t *testing.T) {
 				out := runInstallerAs(t, unameStub(t, un[0], machine))
 				// The whole line, terminator included: a label that merely starts with
 				// the expected one ("mac-applesilicon" for "mac-apple") names an asset
 				// no release publishes and must not read as a match.
-				want := "INFO: platform: " + p.label + "\n"
+				want := "INFO: platform: " + p.Label + "\n"
 				if !strings.Contains(out, want) {
 					t.Errorf("install.sh reported no %q for uname -s %q -m %q; release.yml publishes %s.zip\n%s",
-						want, un[0], machine, p.label, out)
+						want, un[0], machine, p.Label, out)
 				}
 			})
 		}
@@ -513,8 +494,8 @@ func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
 	// The label this package's own test harness serves has to be the same one, or the
 	// end-to-end installer tests would pass against an asset no release publishes.
 	for _, p := range releasePlatforms(t) {
-		if p.goos == runtime.GOOS && p.goarch == runtime.GOARCH && platformLabel(t) != p.label {
-			t.Errorf("platformLabel = %q, want the %q release.yml publishes for this host", platformLabel(t), p.label)
+		if p.GOOS == runtime.GOOS && p.GOARCH == runtime.GOARCH && platformLabel(t) != p.Label {
+			t.Errorf("platformLabel = %q, want the %q release.yml publishes for this host", platformLabel(t), p.Label)
 		}
 	}
 }

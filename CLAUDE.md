@@ -103,6 +103,10 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 - `atomicfile` — the one way a committed file is replaced: temp in the same directory,
   `Sync`, then rename, keeping the mode the file already had. Used by `lockfile` and
   `manifest`, whose records name bytes that are already on disk.
+- `releaseyml` — parses the platform matrix out of `.github/workflows/release.yml`, the
+  one place the published asset labels are decided. No production caller: it exists so
+  the installer's guard and the updater's guard, which sit in packages that cannot share
+  a test helper, read that list through one parser instead of two copies.
 - `fixtures` + `cmd/scrubfixtures` — regenerate PII-free `testdata/` from git-excluded raw
   captures via an ordered replacement map.
 

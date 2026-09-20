@@ -1,11 +1,10 @@
 package selfupdate
 
 import (
-	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
+
+	"github.com/curbol/synty-sync/internal/releaseyml"
 )
 
 // Every platform's suffix has to match a label in release.yml, and the workflow is
@@ -23,30 +22,30 @@ func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 	built := releasePlatforms(t)
 	published := map[string]bool{}
 	for _, p := range built {
-		published[p.label] = true
+		published[p.Label] = true
 	}
 
 	rel := &release{}
 	for _, p := range built {
-		rel.Assets = append(rel.Assets, asset{Name: "synty-sync-1.0.0-" + p.label + ".zip", URL: "u/" + p.label})
+		rel.Assets = append(rel.Assets, asset{Name: "synty-sync-1.0.0-" + p.Label + ".zip", URL: "u/" + p.Label})
 	}
 
 	// Forward: every platform the workflow builds resolves to that platform's asset.
 	for _, p := range built {
-		t.Run(p.goos+"/"+p.goarch, func(t *testing.T) {
-			label, err := assetSuffix(p.goos, p.goarch)
+		t.Run(p.GOOS+"/"+p.GOARCH, func(t *testing.T) {
+			label, err := assetSuffix(p.GOOS, p.GOARCH)
 			if err != nil {
-				t.Fatalf("release.yml builds %s/%s but the updater has no label for it: %v", p.goos, p.goarch, err)
+				t.Fatalf("release.yml builds %s/%s but the updater has no label for it: %v", p.GOOS, p.GOARCH, err)
 			}
-			if label != p.label {
-				t.Errorf("the updater wants %q, but release.yml publishes %q", label, p.label)
+			if label != p.Label {
+				t.Errorf("the updater wants %q, but release.yml publishes %q", label, p.Label)
 			}
-			url, err := platformAsset(rel, p.goos, p.goarch)
+			url, err := platformAsset(rel, p.GOOS, p.GOARCH)
 			if err != nil {
-				t.Fatalf("release.yml builds %s/%s but the updater cannot find it: %v", p.goos, p.goarch, err)
+				t.Fatalf("release.yml builds %s/%s but the updater cannot find it: %v", p.GOOS, p.GOARCH, err)
 			}
-			if url != "u/"+p.label {
-				t.Errorf("platformAsset = %q, want the %q asset release.yml publishes", url, p.label)
+			if url != "u/"+p.Label {
+				t.Errorf("platformAsset = %q, want the %q asset release.yml publishes", url, p.Label)
 			}
 		})
 	}
@@ -72,32 +71,13 @@ func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 	}
 }
 
-type releasePlatform struct{ goos, goarch, label string }
-
-var platformEntryRe = regexp.MustCompile(`"([a-z0-9]+)/([a-z0-9]+)/([a-z0-9-]+)"`)
-
 // releasePlatforms reads the platforms the release workflow actually builds, so the
 // asset labels have exactly one source of truth.
-func releasePlatforms(t *testing.T) []releasePlatform {
+func releasePlatforms(t *testing.T) []releaseyml.Platform {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	out, err := releaseyml.Platforms(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
 	if err != nil {
-		t.Fatalf("read release.yml: %v", err)
-	}
-	_, rest, ok := strings.Cut(string(raw), "platforms=(")
-	if !ok {
-		t.Fatal("release.yml has no platforms=( ... ) list; this guard no longer reads what the workflow builds")
-	}
-	block, _, ok := strings.Cut(rest, ")")
-	if !ok {
-		t.Fatal("release.yml's platforms list is unterminated")
-	}
-	var out []releasePlatform
-	for _, m := range platformEntryRe.FindAllStringSubmatch(block, -1) {
-		out = append(out, releasePlatform{goos: m[1], goarch: m[2], label: m[3]})
-	}
-	if len(out) == 0 {
-		t.Fatal("no platforms parsed from release.yml")
+		t.Fatal(err)
 	}
 	return out
 }
