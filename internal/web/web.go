@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
@@ -209,7 +210,7 @@ func localRequest(r *http.Request, bound net.Addr) bool {
 	if err != nil || port != boundPort {
 		return false
 	}
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

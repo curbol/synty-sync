@@ -146,13 +146,16 @@ func TestHandlersRefuseAForeignHost(t *testing.T) {
 }
 
 // localhost and a loopback literal are how a browser on this machine actually
-// addresses the page, so neither may be turned away by the Host check.
+// addresses the page, so neither may be turned away by the Host check. Host is
+// case-insensitive and main.loopbackHost already folds case when it vets --addr, so a
+// hostname typed in any case has to reach the page rather than a 421 from the half of
+// the pair that compared it exactly.
 func TestHandlersAcceptTheWaysABrowserAddressesThem(t *testing.T) {
 	packs := []model.Pack{{Slug: "current", DisplayName: "Current"}}
 	base, _ := serving(t, packs, map[string]bool{"current": true})
 	port := base[strings.LastIndex(base, ":")+1:]
 
-	for _, host := range []string{"localhost:" + port, "127.0.0.1:" + port} {
+	for _, host := range []string{"localhost:" + port, "LOCALHOST:" + port, "LocalHost:" + port, "127.0.0.1:" + port} {
 		req, err := http.NewRequest(http.MethodGet, base+"/", nil)
 		if err != nil {
 			t.Fatal(err)
