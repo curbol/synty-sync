@@ -38,6 +38,23 @@ func TestFromCurl(t *testing.T) {
 	}
 }
 
+// Chrome on Windows writes "Copy as cURL" with double-quoted -H arguments, so the
+// single-quoted form every other fixture here uses is only half the shapes a pasted
+// command arrives in.
+func TestFromCurlWithDoubleQuotedHeaders(t *testing.T) {
+	curl := `curl "https://syntystore.com/apps/downloads/orders/1" ^
+  -H "Accept: text/html" ^
+  -H "Cookie: localization=US; _shopify_essential=ABC" ^
+  --compressed`
+	got, err := FromCurl(curl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "localization=US; _shopify_essential=ABC" {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestFromCurlWithQuotedJSONCookie(t *testing.T) {
 	// Single-quoted -H whose Cookie value contains double quotes (Shopify's
 	// _consentik_cookie holds JSON). The whole value, including later cookies,

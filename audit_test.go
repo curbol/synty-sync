@@ -913,7 +913,11 @@ func TestRunSelectServesOnTheAddressItWasGiven(t *testing.T) {
 	}))
 	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 
-	// An ephemeral port, so the test never contends for the 8787 default.
+	// An ephemeral port, so the test never contends for the 8787 default. Binding and
+	// closing to learn the number is a race against anything that grabs it in between,
+	// and it is accepted deliberately: run has to be handed an address rather than a
+	// listener, so there is no way to exercise its --addr path without naming a port.
+	// A fixed one would trade this window for a permanent collision.
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1010,6 +1014,28 @@ func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
 // wrong, but the session is resolved from the browser's cookie store, so ordering the
 // two the other way answers "0.0.0.0:8787" with whatever is wrong with their Firefox
 // profile — on a headless box or a fresh container, that is the only thing they see.
+// variant_includes has no default, so a manifest without it is the state a first-time
+// user is in after `select` creates one. The message has to name the key and show what
+// a value looks like: without this guard the run gets as far as syncer.Run and fails
+// with "Filter is required", which names nothing the user can act on.
+func TestSyncWithoutVariantIncludesSaysWhatToAdd(t *testing.T) {
+	e := newRunEnv(t, "[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n")
+
+	err := run([]string{"status",
+		"-config", e.configDir, "-manifest", e.manifestPath,
+		"-cookies", e.cookiesPath, "-customer", "1234567890",
+		"-library", e.libraryDir,
+	})
+	if err == nil {
+		t.Fatal("status ran against a manifest with no variant_includes")
+	}
+	for _, want := range []string{"variant_includes", e.manifestPath, "Godot_*"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
+
 func TestSelectReportsABadAddrBeforeReadingTheSession(t *testing.T) {
 	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 	args := append([]string{"select",
