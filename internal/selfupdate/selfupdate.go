@@ -172,18 +172,20 @@ func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 // discoverable by asking this. The platform is a parameter rather than read from runtime
 // so every branch can be asserted on one machine.
 func assetSuffix(goos, goarch string) (string, error) {
-	switch goos {
-	case "darwin":
-		if goarch == "arm64" {
-			return "mac-apple", nil
-		}
+	// Keyed on the whole pair so an architecture the release does not build falls to
+	// the error rather than onto a sibling's label. Resolving linux/arm to linux-intel
+	// would pass the magic sniff — an ELF header says nothing about the machine — and
+	// the swap removes the only binary that ran, leaving nothing to retry with.
+	switch goos + "/" + goarch {
+	case "darwin/amd64":
 		return "mac-intel", nil
-	case "linux":
-		if goarch == "arm64" {
-			return "linux-arm64", nil
-		}
+	case "darwin/arm64":
+		return "mac-apple", nil
+	case "linux/amd64":
 		return "linux-intel", nil
-	case "windows":
+	case "linux/arm64":
+		return "linux-arm64", nil
+	case "windows/amd64":
 		return "win", nil
 	}
 	return "", fmt.Errorf("unsupported platform %s/%s", goos, goarch)

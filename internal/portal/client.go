@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -380,6 +381,9 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 			if !ok {
 				return nil, ErrExpiredSession
 			}
+			if err := checkSlugCollisions(all); err != nil {
+				return nil, err
+			}
 			return all, nil // empty library or terminator
 		}
 		added := 0
@@ -398,6 +402,42 @@ func (c *Client) Enumerate(ctx context.Context) ([]model.Pack, error) {
 		}
 	}
 	return nil, fmt.Errorf("library pagination exceeded %d pages", maxLibraryPages)
+}
+
+// checkSlugCollisions refuses a library in which two packs key to one slug. The slug
+// is the pack's identity in both committed files, so a collision does not merely
+// shadow one pack: the lockfile records whichever pack is written last and loses the
+// other's files, and the manifest grows two entries that share a key, where enabling
+// either enables both. Neither is detectable from the file afterwards.
+//
+// Refusing rather than disambiguating is the deliberate choice. A generated
+// discriminator would have to change the slug of both packs, including the one that
+// held the name alone until the second arrived, which silently drops that pack's
+// enabled flag and rebuilds its lockfile record under a key nothing recorded.
+// Declining to write is recoverable; rewriting identity behind the user is not.
+func checkSlugCollisions(packs []model.Pack) error {
+	bySlug := map[string][]model.Pack{}
+	for _, p := range packs {
+		bySlug[p.Slug] = append(bySlug[p.Slug], p)
+	}
+	slugs := make([]string, 0, len(bySlug))
+	for slug, group := range bySlug {
+		if len(group) > 1 {
+			slugs = append(slugs, slug)
+		}
+	}
+	if len(slugs) == 0 {
+		return nil
+	}
+	sort.Strings(slugs)
+	var b strings.Builder
+	b.WriteString("two packs share one slug, which the lockfile and manifest key by:")
+	for _, slug := range slugs {
+		for _, p := range bySlug[slug] {
+			fmt.Fprintf(&b, "\n  %s: %q (order item %d)", slug, p.DisplayName, p.OrderItemID)
+		}
+	}
+	return errors.New(b.String())
 }
 
 // ItemFiles fetches and parses one pack's item page, returning its files and the

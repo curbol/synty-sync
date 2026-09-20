@@ -20,10 +20,6 @@ import (
 // silently drops it from this test too.
 func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 	built := releasePlatforms(t)
-	published := map[string]bool{}
-	for _, p := range built {
-		published[p.Label] = true
-	}
 
 	rel := &release{}
 	for _, p := range built {
@@ -50,18 +46,35 @@ func TestPlatformAssetMatchesTheLabelsReleaseBuilds(t *testing.T) {
 		})
 	}
 
-	// Reverse: every label the updater asks for is one the workflow publishes. This is
+	// Reverse: every platform the updater claims is one the workflow builds. This is
 	// what catches a platform removed from the array, which the forward loop cannot see
 	// because it iterates that same array.
-	for _, goos := range []string{"darwin", "linux", "windows"} {
-		for _, goarch := range []string{"amd64", "arm64"} {
+	//
+	// Keyed on the (GOOS, GOARCH) pair, not on the label. A set of labels answers
+	// "is this string published", which windows/arm64 satisfies through the
+	// windows/amd64 entry, so the updater could claim a platform no release builds and
+	// this loop would agree. The arch list runs past the two the workflow builds for
+	// the same reason: a resolver that reads only GOOS never gets asked about the
+	// architectures it is silently folding together.
+	builds := map[string]string{}
+	for _, p := range built {
+		builds[p.GOOS+"/"+p.GOARCH] = p.Label
+	}
+	for _, goos := range []string{"darwin", "linux", "windows", "freebsd"} {
+		for _, goarch := range []string{"amd64", "arm64", "386", "arm", "riscv64", "ppc64le"} {
 			label, err := assetSuffix(goos, goarch)
 			if err != nil {
 				continue // the updater does not claim this platform
 			}
-			if !published[label] {
-				t.Errorf("the updater resolves %s/%s to %q, which release.yml does not build; "+
-					"`update` on that platform reports no asset for it", goos, goarch, label)
+			want, isBuilt := builds[goos+"/"+goarch]
+			if !isBuilt {
+				t.Errorf("the updater resolves %s/%s to %q, but release.yml does not build that pair; "+
+					"`update` there swaps another architecture's binary over a working one and removes it",
+					goos, goarch, label)
+				continue
+			}
+			if label != want {
+				t.Errorf("the updater resolves %s/%s to %q, but release.yml publishes it as %q", goos, goarch, label, want)
 			}
 		}
 	}

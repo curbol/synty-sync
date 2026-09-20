@@ -77,6 +77,15 @@ func ParseLibraryPage(html []byte) ([]model.Pack, error) {
 			parseErr = fmt.Errorf("library anchor %d (%q) has no order_item url", i, name)
 			return false
 		}
+		// The name is the pack's whole identity: the slug keys its lockfile record and
+		// its manifest entry. An anchor that keeps this class and href while the title
+		// moves out of it still matches the selector, so without this the page parses
+		// to a full list of packs that all key on "" — a non-empty result carrying no
+		// identity, which the zero-pack guards downstream are not looking for.
+		if model.Slug(name) == "" {
+			parseErr = fmt.Errorf("library anchor %d has no usable display name", i)
+			return false
+		}
 		orderID, _ := strconv.Atoi(m[2])
 		orderItemID, _ := strconv.Atoi(m[3])
 		icon, _ := s.Find("img").First().Attr("src")

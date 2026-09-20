@@ -205,6 +205,60 @@ func TestEnumerateExpiredSessionMidWalk(t *testing.T) {
 	}
 }
 
+// An anchor that keeps its class and its order_item href while the title moves out of
+// it still matches the selector, so the page parses to a full list of packs carrying no
+// identity at all. Every zero-pack guard downstream measures length, so none of them
+// sees it: select would reconcile the manifest against slugs that are all "", find
+// nothing enabled, and write the file with the user's whole selection dropped.
+func TestParseLibraryPageRefusesAnAnchorWithNoName(t *testing.T) {
+	html := []byte(`<div class='sky-pilot'><input class='sky-pilot-search-input'>
+	  <a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'><img src='//cdn/x.png'></a></div>`)
+	packs, err := ParseLibraryPage(html)
+	if err == nil {
+		t.Fatalf("an anchor with no display name parsed to %+v, want an error", packs)
+	}
+	if strings.Contains(err.Error(), "/customers/1/") {
+		t.Errorf("error leaks the customer id: %q", err)
+	}
+	if packs != nil {
+		t.Errorf("a failed parse must not return partial packs, got %+v", packs)
+	}
+}
+
+// model.Slug collapses every run of non-alphanumerics, so two display names differing
+// only in punctuation key to one slug. The slug is the pack's identity in both
+// committed files: the lockfile keeps whichever pack is written last and loses the
+// other's files, and the manifest grows two entries sharing a key, where enabling
+// either enables both. Neither is visible in the file afterwards, so the read is
+// refused rather than written.
+func TestEnumerateRefusesTwoPacksOnOneSlug(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("line_items_page") == "1" {
+			fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'>
+			  <a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>POLYGON - Pirate Pack</a>
+			  <a href='/apps/downloads/customers/1/orders/2/order_items/4' class='sky-pilot-list-item'>POLYGON – Pirate Pack</a></div>`)
+			return
+		}
+		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1"}
+	packs, err := c.Enumerate(context.Background())
+	if err == nil {
+		t.Fatalf("two packs on one slug enumerated to %+v, want an error", packs)
+	}
+	if packs != nil {
+		t.Errorf("a refused enumeration must not return partial packs, got %+v", packs)
+	}
+	// Both names, so the user can tell which two packs collided without opening the store.
+	for _, want := range []string{"POLYGON - Pirate Pack", "POLYGON – Pirate Pack", "polygon-pirate-pack"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %q: %q", want, err)
+		}
+	}
+}
+
 // A paginator that clamps an out-of-range page to the last one would otherwise
 // loop forever, re-appending the same packs and hammering the store.
 func TestEnumerateStopsWhenPaginationRepeats(t *testing.T) {
