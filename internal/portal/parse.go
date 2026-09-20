@@ -169,14 +169,14 @@ func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unkno
 		}
 		size, _ := parseSize(sizeText)
 		files = append(files, model.FileEntry{
-			PackSlug:     packSlug,
-			FileToken:    token,
-			Variant:      model.Variant(canonicalVariant(variant)),
-			Version:      version,
-			FileID:       fileID,
-			SizeBytes:    size,
-			DownloadHref: html2href(href),
-			Archived:     strings.Contains(strings.ToUpper(version), "ARCHIVED"),
+			PackSlug:       packSlug,
+			FileToken:      token,
+			Variant:        model.Variant(canonicalVariant(variant)),
+			Version:        version,
+			FileID:         fileID,
+			AdvertisedSize: size,
+			DownloadHref:   html2href(href),
+			Archived:       strings.Contains(strings.ToUpper(version), "ARCHIVED"),
 		})
 		return true
 	})

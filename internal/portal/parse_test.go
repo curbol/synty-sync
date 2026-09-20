@@ -108,8 +108,8 @@ func TestParseItemPirate(t *testing.T) {
 	if godot.Version != "v1_0_1" || godot.FileID != 2282645 {
 		t.Errorf("godot entry = %+v, want version v1_0_1 fileId 2282645", godot)
 	}
-	if godot.SizeBytes <= 0 {
-		t.Errorf("godot size not parsed: %d", godot.SizeBytes)
+	if godot.AdvertisedSize <= 0 {
+		t.Errorf("godot advertised size not parsed: %d", godot.AdvertisedSize)
 	}
 	bundled, ok := findFile(files, "GENERIC_Particle_FX", "Godot_4_5_1")
 	if !ok {

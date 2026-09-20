@@ -70,15 +70,12 @@ func TestResolveReturnsClassifiableStatus(t *testing.T) {
 }
 
 func TestResolveFilenameFromURL(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dl" {
-			http.Redirect(w, r, "/files/pack.zip", http.StatusFound)
-			return
-		}
+	// The signed URL answers with a bare "attachment" carrying no filename, so the
+	// name has to come from the final URL path after the redirect.
+	srv := downloadServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment")
 		w.Write(zipBytes)
-	}))
-	defer srv.Close()
+	})
 
 	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
 	body, name, err := c.Resolve(context.Background(), model.FileEntry{FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/dl"})

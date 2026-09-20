@@ -31,12 +31,14 @@ type FileEntry struct {
 	Variant   Variant
 	Version   string
 	FileID    int
-	// SizeBytes is derived from the rounded portal label, so it is an approximate
-	// display value, not an exact integrity figure (the store shows e.g. "2.6 MB"
-	// for 2,731,401 bytes).
-	SizeBytes    int64
-	DownloadHref string
-	Archived     bool
+	// AdvertisedSize is derived from the rounded portal label, so it is an approximate
+	// display value, not an exact integrity figure (the store shows e.g. "2.6 MB" for
+	// 2,731,401 bytes). It feeds lockfile.File.AdvertisedSize; the exact count that
+	// cache.Verify compares against is lockfile.File.SizeBytes, which is written from
+	// the bytes that landed and never from here.
+	AdvertisedSize int64
+	DownloadHref   string
+	Archived       bool
 }
 
 // Key is the per-file lockfile key, unique within a pack even when a pack carries

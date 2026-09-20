@@ -142,36 +142,6 @@ func TestMigrateDoesNotClobberLayoutCopy(t *testing.T) {
 	}
 }
 
-// Synty serves a Unity pack as .unitypackage and everything else as .zip, and an
-// exporter can upper-case the extension. Migrate matches on the normalized name,
-// which drops the extension, so a filter on one of them silently left the others
-// flat at the root to re-download — gigabytes, with nothing said about it.
-func TestMigrateFoldsAnyExtension(t *testing.T) {
-	for _, name := range []string{
-		"TOK_Godot_4_5_1_v1.zip",
-		"TOK_Godot_4_5_1_v1.ZIP",
-		"TOK_Godot_4_5_1_v1.unitypackage",
-		"TOK_Godot_4_5_1_v1(1).zip",
-	} {
-		t.Run(name, func(t *testing.T) {
-			lib := t.TempDir()
-			if err := os.WriteFile(filepath.Join(lib, name), []byte("BYTES"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(res) != 1 {
-				t.Fatalf("%s was not migrated: %+v", name, res)
-			}
-			if _, err := os.Stat(filepath.Join(lib, filepath.FromSlash(res[0].RelPath))); err != nil {
-				t.Errorf("migrated file missing at %s", res[0].RelPath)
-			}
-		})
-	}
-}
-
 // Migrate no longer filters by extension, which puts abandoned download temps in
 // front of it for the first time. A partial transfer can carry enough of the name to
 // normalize onto a wanted file, and moving one into the layout hands the caller a
@@ -290,6 +260,7 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 	}{
 		{"TOK_Godot_4_5_1_v1_0_1.zip", w, true},
 		{"TOK_Godot_4_5_1_v1_0_1.unitypackage", w, true},
+		{"TOK_Godot_4_5_1_v1_0_1.ZIP", w, true}, // the extension's case is not part of the key
 		{"TOK_Godot_4_5_1_v1_0_1", w, true},
 		{"TOK_Godot_4_5_1_v1_0_1(1).zip", w, true},
 		{"TOK_Godot_4_5_1_v1.0.1.zip", w, true},       // version rendered with dots

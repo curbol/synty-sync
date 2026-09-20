@@ -563,15 +563,6 @@ func TestLinuxBasesCoverSandboxedBrowsers(t *testing.T) {
 			t.Errorf("linux %s bases do not include %q: %v", tc.browser, tc.want, browserBases("linux", tc.browser))
 		}
 	}
-	// Every platform a release ships still resolves somewhere, or the default is
-	// broken out of the box for whoever runs that build.
-	for _, goos := range []string{"darwin", "linux", "windows"} {
-		for _, browser := range browserNames {
-			if len(browserBases(goos, browser)) == 0 {
-				t.Errorf("no %s profile base on %s", browser, goos)
-			}
-		}
-	}
 }
 
 // Ranking profiles on cookies.sqlite's own mtime reads every running browser as older

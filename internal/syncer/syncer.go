@@ -260,7 +260,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	advertisedByID := map[int]int64{}
 	for _, pf := range packFiles {
 		for _, f := range pf.files {
-			advertisedByID[f.FileID] = f.SizeBytes
+			advertisedByID[f.FileID] = f.AdvertisedSize
 			if !opts.Filter(f.Variant) || f.Archived {
 				deselectedByID[f.FileID] = live{version: f.Version, variant: string(f.Variant)}
 				continue
@@ -487,7 +487,7 @@ func download(ctx context.Context, c *portal.Client, opts Options, f model.FileE
 	// "done", which is indistinguishable from a hang, so progress is counted off the
 	// body as it streams rather than announced up front.
 	sink := opts.progressSink()
-	counted := &progressReader{r: body, total: f.SizeBytes, report: func(read, total int64) {
+	counted := &progressReader{r: body, total: f.AdvertisedSize, report: func(read, total int64) {
 		sink(fmt.Sprintf("  %s: %s", f.Key(), progressLine(read, total)))
 	}}
 	pending, err := cache.Store(opts.LibraryRoot, f.FileToken, filename, counted)
@@ -917,7 +917,7 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, reso
 				Variant:        string(f.Variant),
 				Version:        f.Version,
 				FileID:         f.FileID,
-				AdvertisedSize: f.SizeBytes,
+				AdvertisedSize: f.AdvertisedSize,
 			}
 			key := f.Key()
 			wasVariant := entry.Variant

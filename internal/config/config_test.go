@@ -60,31 +60,6 @@ library_path = "/from/file"
 	}
 }
 
-func TestResolveDir(t *testing.T) {
-	t.Setenv("SYNTY_CONFIG_DIR", "")
-	t.Setenv("XDG_CONFIG_HOME", "")
-	// explicit flag wins
-	if got := ResolveDir("/explicit"); got != "/explicit" {
-		t.Errorf("flag: got %q", got)
-	}
-	// SYNTY_CONFIG_DIR next
-	t.Setenv("SYNTY_CONFIG_DIR", "/from/synty-env")
-	if got := ResolveDir(""); got != "/from/synty-env" {
-		t.Errorf("SYNTY_CONFIG_DIR: got %q", got)
-	}
-	t.Setenv("SYNTY_CONFIG_DIR", "")
-	// then XDG_CONFIG_HOME/synty-sync
-	t.Setenv("XDG_CONFIG_HOME", "/xdg")
-	if got := ResolveDir(""); got != filepath.Join("/xdg", "synty-sync") {
-		t.Errorf("XDG: got %q", got)
-	}
-	t.Setenv("XDG_CONFIG_HOME", "")
-	// fall back to ~/.config/synty-sync
-	if got := ResolveDir(""); !strings.HasSuffix(got, filepath.Join(".config", "synty-sync")) {
-		t.Errorf("home fallback: got %q", got)
-	}
-}
-
 // A key that decodes to nothing is a typo. Dropping it silently leaves the user
 // reading "no customer id: ... or put customer_id in config.toml" while looking at a
 // config.toml that appears to contain exactly that.

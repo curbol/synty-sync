@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1317,6 +1318,33 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 // begin with a zip's magic. Adopting a truncated one records its own short bytes as
 // the file's truth, after which every Verify compares those bytes against themselves
 // and finds them intact forever.
+// The trailer check is keyed on the leading bytes, not the extension, and it has a
+// deliberate hole: a container this build cannot read has no decidable answer without
+// decompressing it, so it passes through. Synty ships Unity packs as .unitypackage
+// (a gzipped tar), and every adoption fixture in this suite is a real zip, so a check
+// that started demanding the zip magic before adopting anything would leave the whole
+// suite green while every Unity pack re-downloaded on each run.
+func TestAUnityPackageIsAdoptedWithoutAZipTrailer(t *testing.T) {
+	// gzip magic: not a zip, so the end-of-central-directory search must not apply.
+	body := append([]byte{0x1f, 0x8b, 0x08}, bytes.Repeat([]byte{0xab}, 512)...)
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "POLYGON_Pirate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel := "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v1_0_1.unitypackage"
+	if err := os.WriteFile(filepath.Join(lib, filepath.FromSlash(rel)), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := wholeArchive(lib, rel, body); err != nil {
+		t.Errorf("a container with no zip magic was put through the zip trailer check: %v", err)
+	}
+	if err := adoptable(lib, rel); err != nil {
+		t.Errorf("a Unity pack was refused as unadoptable, so it re-downloads every run: %v", err)
+	}
+}
+
 func TestTruncatedLayoutFileIsNotAdopted(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()
