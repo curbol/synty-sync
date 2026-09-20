@@ -70,22 +70,23 @@ Versionless rows (icons) are skipped. The `variant` token is the filter key
 ## CLI surface
 
 ```
-synty-sync select   # pick which packs to mirror (opens a local web page)
-synty-sync status   # enumerate + diff, print what would change. No downloads.
-synty-sync sync     # status, then download the delta, verify, rewrite the lockfile.
-                    # Exits non-zero if a file it was asked for could not be fetched.
-synty-sync list     # print the current lockfile as a readable table.
-synty-sync update   # self-replace the running binary from the latest GitHub release.
-synty-sync version  # print the installed version.
+synty-sync select        # pick which packs to mirror (opens a local web page)
+synty-sync status        # enumerate + diff, print what would change. No downloads.
+synty-sync sync          # status, then download the delta, verify, rewrite the lockfile.
+                         # Exits non-zero if a file it was asked for could not be fetched.
+synty-sync list          # print the current lockfile as a readable table.
+synty-sync update [ver]  # self-replace the running binary from the latest GitHub
+                         # release, or the version named.
+synty-sync version       # print the installed version.
 ```
 
 Flags: `--manifest <path>` (project manifest; default: nearest `synty-sync.toml` walking up
 from cwd), `--config <dir>` (user config dir; not a `list` flag, since `list` reads no
 user config), `--cookies <curl|file>` (override session source), `--only <pack-glob>`,
 `--dry-run` (alias of `status` semantics on `sync`), `--concurrency <n>`, `--library <path>`, `--addr <host:port>` (the `select` page's address,
-default `localhost:8787`, and loopback only — see The selection page). Subcommands take no
-positional arguments, so a stray one is an error rather than silently swallowing the flags
-after it.
+default `localhost:8787`, and loopback only — see The selection page). No subcommand but
+`update` takes a positional argument, and `update` takes at most one (the version to
+install), so a stray one is an error rather than silently swallowing the flags after it.
 
 ## Run flow
 
@@ -163,13 +164,13 @@ config). Schema:
       "files": {
         "POLYGON_Pirate|Godot_4_5_1": {
           "fileToken": "POLYGON_Pirate", "variant": "Godot_4_5_1", "version": "v1_0_1",
-          "fileId": 2282645, "advertisedSize": 41700000, "sizeBytes": 41712983, "sha256": "…",
+          "fileId": 2282645, "tracked": true, "advertisedSize": 41700000, "sizeBytes": 41712983, "sha256": "…",
           "cachePath": "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip",
           "downloadedAt": "2026-06-16T…"
         },
         "GENERIC_Particle_FX|Godot_4_5_1": {
           "fileToken": "GENERIC_Particle_FX", "variant": "Godot_4_5_1", "version": "v1_0_0",
-          "fileId": 2344711, "advertisedSize": 2700000, "sizeBytes": 2731401, "sha256": "…",
+          "fileId": 2344711, "tracked": true, "advertisedSize": 2700000, "sizeBytes": 2731401, "sha256": "…",
           "cachePath": "GENERIC_Particle_FX/GENERIC_Particle_FX_Godot_4_5_1_v1_0_0.zip",
           "downloadedAt": "2026-06-16T…"
         },
