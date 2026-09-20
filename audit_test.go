@@ -24,7 +24,6 @@ import (
 	"github.com/curbol/synty-sync/internal/manifest"
 	"github.com/curbol/synty-sync/internal/portal"
 	"github.com/curbol/synty-sync/internal/syncer"
-	"github.com/curbol/synty-sync/internal/web"
 )
 
 // Asking a subcommand for help is not a failure.
@@ -191,10 +190,6 @@ func TestSelectAbortsOnExpiredSessionWithoutTouchingTheManifest(t *testing.T) {
 // packs they kept, an empty submission that disables everything, and a tab left open
 // from an earlier run whose slugs no longer name anything owned.
 func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
-	openBrowserWas := web.OpenBrowser
-	web.OpenBrowser = func(string) {}
-	t.Cleanup(func() { web.OpenBrowser = openBrowserWas })
-
 	const seeded = "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate-pack\"\n  name = \"Pirate Pack\"\n  enabled = true\n"
 	for _, tc := range []struct {
 		name        string
@@ -1050,10 +1045,6 @@ func TestSelectRefusesANonLoopbackAddr(t *testing.T) {
 // saw was a count of what remained. The lockfile side has always named what left
 // (Report.Removed); this is the same record for the file that holds the selection.
 func TestSelectNamesThePacksItDropsFromTheManifest(t *testing.T) {
-	openBrowserWas := web.OpenBrowser
-	web.OpenBrowser = func(string) {}
-	t.Cleanup(func() { web.OpenBrowser = openBrowserWas })
-
 	// The library lists only the pirate pack; the manifest holds both, enabled.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const sentinel = `<input class='sky-pilot-search-input'>`

@@ -1,9 +1,20 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/curbol/synty-sync/internal/web"
 )
+
+// select launches a browser at the address it binds, and run reaches it. Left alone,
+// any test that drives select to a served page opens a real tab at a URL that dies
+// with the test, leaving an unreaped child behind.
+func TestMain(m *testing.M) {
+	web.OpenBrowser = func(string) {}
+	os.Exit(m.Run())
+}
 
 func TestRunNoSubcommand(t *testing.T) {
 	if err := run(nil); err == nil {

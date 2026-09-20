@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -67,6 +68,45 @@ func installedBinaryName() string {
 		return binaryName + ".exe"
 	}
 	return binaryName
+}
+
+// The final move is a rename, and a rename cannot cross a filesystem, so the download
+// has to land beside the binary it is replacing. Staging under the system temp dir
+// still installs — replaceBinary falls through to a copy — so the suite passes either
+// way, and the guarantee that the live path is only ever replaced whole is gone.
+// Checked while the asset is in flight, because by the time installTo returns the
+// staging dir has been cleaned up and there is nothing left to observe.
+func TestUpdateStagesBesideTheBinaryItReplaces(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, fakeBinary("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Written on the server goroutine and read on the test's, so it is atomic rather
+	// than a plain bool.
+	var staged atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Errorf("reading the install dir: %v", err)
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".synty-sync-update-") {
+				staged.Store(true)
+			}
+		}
+		w.Write(zipWith(t, installedBinaryName(), fakeBinary("NEW")))
+	}))
+	defer srv.Close()
+
+	if err := installTo(context.Background(), "tok", srv.URL, exe); err != nil {
+		t.Fatalf("installTo: %v", err)
+	}
+	if !staged.Load() {
+		t.Errorf("the update did not stage in %s; the final move can now cross a filesystem, "+
+			"which turns replacing the binary into a copy over the live path", dir)
+	}
 }
 
 // The running binary is replaced by renaming a fully-written file into place, so a

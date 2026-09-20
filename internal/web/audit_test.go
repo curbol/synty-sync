@@ -14,6 +14,35 @@ import (
 	"github.com/curbol/synty-sync/internal/model"
 )
 
+// Pack display names come from the store, and the page they land on carries the token
+// that authorizes rewriting the committed manifest. They are safe only because the
+// template is html/template: switching the import, or wrapping a field in
+// template.HTML to sidestep an escaping surprise, leaves every other test here green
+// because they all assert the name is *present*, which it still is.
+func TestStoreSuppliedNamesAreEscaped(t *testing.T) {
+	const payload = `<script>alert(1)</script>"><img src=x onerror=alert(1)>`
+	packs := []model.Pack{{Slug: "polygon-pirate-pack", DisplayName: payload, IconURL: `x" onerror="alert(1)`}}
+
+	ln := listen(t)
+	base := "http://" + ln.Addr().String()
+	go Serve(context.Background(), ln, packs, nil)
+	waitUp(t, base)
+
+	body := get(t, base+"/")
+	// The payload's own markup, not a bare "<script>": the page ships a legitimate
+	// script block of its own, and matching that would fail whatever the template does.
+	for _, raw := range []string{payload, "<script>alert(1)", "<img src=x", `onerror="alert(1)"`} {
+		if strings.Contains(body, raw) {
+			t.Errorf("store-supplied text reached the page unescaped (%q):\n%s", raw, body)
+		}
+	}
+	// Present, so the assertion above is about escaping rather than about the name
+	// having been dropped altogether.
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("the escaped name is not on the page at all:\n%s", body)
+	}
+}
+
 // proveNothingLanded confirms a rejected submission did not reach Serve. Rather than
 // waiting a fixed window for nothing to arrive, which passes just as readily because
 // the scheduler was slow. It sends one legitimate submission afterwards and checks

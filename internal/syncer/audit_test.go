@@ -737,8 +737,11 @@ func TestEmptyEnumerationWithAPopulatedLockfileIsAnError(t *testing.T) {
 	prior.Packs["polygon-pirate-pack"] = lockfile.Pack{DisplayName: "POLYGON - Pirate Pack"}
 
 	_, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(t.TempDir(), false))
-	if err == nil {
-		t.Fatal("an empty library against a populated lockfile was accepted as the truth")
+	// The sentinel, not merely non-nil: main tells this apart from an expired session
+	// to say which of the two happened, and a wrap that loses errors.Is identity is
+	// invisible to a test that only checks the error exists.
+	if !errors.Is(err, ErrEmptyLibrary) {
+		t.Fatalf("an empty library against a populated lockfile gave %v, want ErrEmptyLibrary", err)
 	}
 }
 

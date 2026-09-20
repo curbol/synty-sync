@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/releaseyml"
@@ -60,11 +61,24 @@ func stubRelease(t *testing.T, asset []byte) *httptest.Server {
 // asset's "url" and its "name", standing in for GitHub adding one. The installer reads
 // the URL out of this by text, so how far apart those two keys sit must not matter.
 func stubReleaseShaped(t *testing.T, asset []byte, extraAssetFields int) *httptest.Server {
+	return stubReleaseWatching(t, asset, extraAssetFields, nil)
+}
+
+// stubReleaseWatching is stubReleaseShaped with a hook that runs while the asset
+// request is in flight, for a caller that has to observe the installer's own working
+// state rather than what it leaves behind.
+func stubReleaseWatching(t *testing.T, asset []byte, extraAssetFields int, onAsset func()) *httptest.Server {
 	t.Helper()
 	// Resolved on the test goroutine, before any handler can run: platformLabel can
 	// call t.Skipf, and a Goexit from a server goroutine would abort a response
 	// mid-write rather than skip the test.
-	label := platformLabel(t)
+	return stubReleaseLabeled(t, asset, platformLabel(t), extraAssetFields, onAsset)
+}
+
+// stubReleaseLabeled is stubReleaseWatching for a caller that drives install.sh with a
+// stubbed uname, where the platform the installer resolves is not the host's.
+func stubReleaseLabeled(t *testing.T, asset []byte, label string, extraAssetFields int, onAsset func()) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 	// The repo is private, so every one of these routes is a 404 without the token,
 	// exactly as github.com behaves. A stub that answered anyway would let the
@@ -101,6 +115,9 @@ func stubReleaseShaped(t *testing.T, asset []byte, extraAssetFields int) *httpte
 			t.Errorf("the installer resolved %s, not the asset matching its platform label", r.URL.Path)
 			http.Error(w, "wrong asset", http.StatusNotFound)
 			return
+		}
+		if onAsset != nil {
+			onAsset()
 		}
 		w.Write(asset)
 	}))
@@ -404,6 +421,80 @@ func TestInstallerInstallsAndLeavesNoStagingBehind(t *testing.T) {
 		t.Errorf("the installed binary is not executable (mode %v)", info.Mode())
 	}
 	assertNoStagingLeft(t, binDir)
+}
+
+// The binary is moved into place with mv, which is atomic only within one
+// filesystem, so staging has to sit inside the install directory. Staging under the
+// system temp dir still installs — mv degrades to copy-then-unlink across a boundary
+// — so every test here passes either way while an interruption starts being able to
+// leave a truncated binary at the live path. Checked while the asset is in flight,
+// because the trap removes the directory before the installer exits.
+func TestInstallerStagesInsideTheInstallDirectory(t *testing.T) {
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	// Written on the server goroutine and read on the test's, so it is atomic.
+	var staged atomic.Bool
+	srv := stubReleaseWatching(t, installerZip(t, append(nativeMagic(t), []byte("binary")...)), 0, func() {
+		entries, err := os.ReadDir(binDir)
+		if err != nil {
+			return // the installer has not created the install dir yet
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".synty-sync-install-") {
+				staged.Store(true)
+			}
+		}
+	})
+
+	out, _ := runInstaller(t, home, "GITHUB_TOKEN=test-token",
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+
+	if !staged.Load() {
+		t.Errorf("the installer did not stage inside %s, so the final mv can cross a filesystem:\n%s", binDir, out)
+	}
+}
+
+// check_executable switches on the live `uname -s`, so on a Linux runner only the ELF
+// arm ever runs and the macOS table is carried untested: a typo or a reorder in it
+// ships green and either rejects every valid macOS install or chmod +x's an error page
+// over one. The Go twin takes goos as a parameter precisely so all of its tables are
+// asserted on one machine; this drives the same coverage through a stubbed uname.
+func TestInstallerChecksMacMagicOnADarwinHost(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		magic  []byte
+		wantOK bool
+	}{
+		{"64-bit Mach-O", []byte{0xcf, 0xfa, 0xed, 0xfe}, true},
+		{"32-bit Mach-O", []byte{0xce, 0xfa, 0xed, 0xfe}, true},
+		{"universal binary", []byte{0xca, 0xfe, 0xba, 0xbe}, true},
+		{"an error page served as the asset", []byte("<!doctype html><title>x</title>"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			srv := stubReleaseLabeled(t, installerZip(t, append(tc.magic, []byte(" body")...)), "mac-intel", 0, nil)
+
+			// Darwin/x86_64 resolves to mac-intel, which is the label the stub serves.
+			out, _ := runInstaller(t, home, "GITHUB_TOKEN=test-token",
+				"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL,
+				"PATH="+unameStub(t, "Darwin", "x86_64")+":"+ghStub(t, "")+":/usr/bin:/bin")
+
+			// The installed file, not the exit status: the smoke test at the end runs
+			// the binary, and a Mach-O does not run on the machine this test does.
+			_, err := os.Stat(filepath.Join(home, ".local", "bin", "synty-sync"))
+			if tc.wantOK && err != nil {
+				t.Errorf("a valid macOS binary was refused:\n%s", out)
+			}
+			if !tc.wantOK {
+				if err == nil {
+					t.Errorf("a non-executable asset was installed over the binary:\n%s", out)
+				}
+				if !strings.Contains(out, "not a macOS executable") {
+					t.Errorf("refusal did not name the macOS check:\n%s", out)
+				}
+			}
+		})
+	}
 }
 
 // assertNoStagingLeft checks the install directory holds no staging directory. The

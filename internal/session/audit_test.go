@@ -28,6 +28,52 @@ func TestFromCookiesTxtKeepsHttpOnlyLines(t *testing.T) {
 	}
 }
 
+// copyDBToTemp retries into the same directory when it catches a torn pair, and the
+// browser may have checkpointed in between, so the source's sidecar can be gone on the
+// second pass. Leaving the first pass's copy behind hands SQLite a -wal holding frames
+// the main file has already absorbed, which it replays over a checkpointed database:
+// the wrong cookie set, reported to the user as an expired session against a login
+// they have just made. The retry has no deterministic trigger; the clearing it depends
+// on does.
+func TestCopyDBPairClearsASidecarTheSourceNoLongerHas(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "cookies.sqlite")
+	if err := os.WriteFile(src, []byte("main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range walSidecars {
+		if err := os.WriteFile(src+suffix, []byte("frames"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir := t.TempDir()
+	dbPath, err := copyDBPair(dir, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range walSidecars {
+		if _, err := os.Stat(dbPath + suffix); err != nil {
+			t.Fatalf("first copy did not bring %s across: %v", suffix, err)
+		}
+	}
+
+	// The browser checkpoints and SQLite removes the sidecar; the retry copies again
+	// into the directory the first attempt already populated.
+	for _, suffix := range walSidecars {
+		if err := os.Remove(src + suffix); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := copyDBPair(dir, src); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range walSidecars {
+		if _, err := os.Stat(dbPath + suffix); !os.IsNotExist(err) {
+			t.Errorf("%s survived a copy whose source had none; stale frames would replay over the checkpointed db", suffix)
+		}
+	}
+}
+
 // A running browser leaves recent writes in the -wal sidecar, so reading the main
 // file alone returns a stale cookie set: the user logs in, syncs, and is told the
 // session expired.

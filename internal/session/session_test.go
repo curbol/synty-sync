@@ -6,10 +6,14 @@ import (
 )
 
 func TestFromCookiesTxt(t *testing.T) {
+	// notsyntystore.com is the case an unrelated host cannot cover: it fails any
+	// spelling of the check, while a lookalike passes a suffix test that stops
+	// requiring the dot, disclosing a third-party session cookie to Synty.
 	content := "# Netscape HTTP Cookie File\n" +
 		".syntystore.com\tTRUE\t/\tTRUE\t0\t_shopify_essential\tABC\n" +
 		"syntystore.com\tFALSE\t/\tFALSE\t0\tlocalization\tUS\n" +
-		".other.com\tTRUE\t/\tTRUE\t0\tjunk\tXX\n"
+		".other.com\tTRUE\t/\tTRUE\t0\tjunk\tXX\n" +
+		"notsyntystore.com\tTRUE\t/\tTRUE\t0\tlookalike\tLEAK\n"
 	got, err := FromCookiesTxt(content)
 	if err != nil {
 		t.Fatal(err)
@@ -59,10 +63,14 @@ func TestFromCurlMissing(t *testing.T) {
 // stand-in schema stops representing the thing under test the moment it reads one
 // more of them.
 func TestReadSQLiteCookies(t *testing.T) {
+	// notsyntystore.com is the case an unrelated host cannot cover: it fails any
+	// spelling of the check, while a lookalike passes a LIKE pattern that stops
+	// requiring the dot, disclosing a third-party session cookie to Synty.
 	dbPath := newCookieDB(t, false,
 		[3]string{".syntystore.com", "_shopify_essential", "ABC"},
 		[3]string{"syntystore.com", "localization", "US"},
 		[3]string{".other.com", "junk", "XX"},
+		[3]string{"notsyntystore.com", "lookalike", "LEAK"},
 	)
 	got, err := readSQLiteCookies(dbPath)
 	if err != nil {
