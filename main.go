@@ -319,7 +319,11 @@ func applyFlags(cfg config.Config, library, customer string, concurrency int) co
 // directory (it is about to create one), and the read commands error.
 func resolveManifestPath(flag, cmd string) (string, error) {
 	if flag != "" {
-		return flag, nil
+		// The shell leaves a quoted --manifest "~/game/synty-sync.toml" alone, and
+		// manifest.Load reports a path that does not exist as an empty manifest rather
+		// than an error, so an unexpanded tilde surfaces as "no variant_includes"
+		// against a file that has them.
+		return config.ExpandHome(flag), nil
 	}
 	wd, err := os.Getwd()
 	if err != nil {

@@ -311,8 +311,11 @@ func replaceBinary(newPath, exe string) error {
 	}
 	if err := os.Rename(newPath, exe); err != nil {
 		// Cross-device or an exotic mount: copy instead, and put the original back if
-		// even that fails, so the user is never left without a binary.
-		if copyErr := copyFile(newPath, exe); copyErr != nil {
+		// even that fails, so the user is never left without a binary. The copy lands
+		// beside exe and is renamed on, rather than streaming into the live path: a
+		// copy straight to exe truncates it first, so an interruption mid-copy leaves a
+		// partial file already wearing the install path and the executable bit.
+		if copyErr := copyAside(newPath, exe); copyErr != nil {
 			if restoreErr := os.Rename(aside, exe); restoreErr != nil {
 				// exe was renamed aside and nothing put it back, so there is no binary
 				// at the path any more. Saying where it went is the difference between
@@ -409,6 +412,22 @@ func extractBinary(zipPath, dir string) (string, error) {
 		return out, nil
 	}
 	return "", fmt.Errorf("binary %q not found in release archive", want)
+}
+
+// copyAside copies src to a sibling of dst and renames it on, so dst is only ever
+// replaced whole. It is the fallback for a rename that cannot cross the filesystem
+// boundary between the staging dir and the install dir.
+func copyAside(src, dst string) error {
+	staged := dst + ".new"
+	if err := copyFile(src, staged); err != nil {
+		os.Remove(staged)
+		return err
+	}
+	if err := os.Rename(staged, dst); err != nil {
+		os.Remove(staged)
+		return err
+	}
+	return nil
 }
 
 func copyFile(src, dst string) error {
