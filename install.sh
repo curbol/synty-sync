@@ -38,7 +38,16 @@ trap cleanup EXIT
 auth_token() {
   local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [[ -z "$token" ]] && command -v gh >/dev/null 2>&1; then
-    token=$(gh auth token 2>/dev/null || true)
+    # Bounded the way selfupdate bounds the same call: `gh auth token` can go to the
+    # network to revalidate (an SSO check, a proxy that drops rather than refuses), and
+    # an unbounded one hangs this script with no output, since it never returns for
+    # `set -e` to act on. macOS ships no timeout(1), so it stays unbounded there rather
+    # than making the installer depend on coreutils.
+    if command -v timeout >/dev/null 2>&1; then
+      token=$(timeout 3 gh auth token 2>/dev/null || true)
+    else
+      token=$(gh auth token 2>/dev/null || true)
+    fi
   fi
   printf '%s' "$token"
 }
