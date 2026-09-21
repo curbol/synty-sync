@@ -6,7 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -236,29 +240,8 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 			stdout = &bytes.Buffer{}
 			defer func() { stdout = stdoutWas }()
 
-			client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			addr := ln.Addr().String()
-			done := make(chan error, 1)
-			go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
-
-			token := waitForSelectPage(t, addr, nil)
-			resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": tc.post, "csrf": {token}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-
-			select {
-			case err := <-done:
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("selectPacks err = %v, wantErr = %v", err, tc.wantErr)
-				}
-			case <-time.After(3 * time.Second):
-				t.Fatal("selectPacks did not return after the save")
+			if err := driveSelect(t, srv, manifestPath, tc.post); (err != nil) != tc.wantErr {
+				t.Fatalf("selectPacks err = %v, wantErr = %v", err, tc.wantErr)
 			}
 
 			man, err := manifest.Load(manifestPath)
@@ -278,6 +261,38 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 				t.Errorf("variant_includes lost on write: %v", man.VariantIncludes)
 			}
 		})
+	}
+}
+
+// driveSelect runs selectPacks against srv on an ephemeral port, fetches the page for
+// its form token, posts the given slugs, and returns what selectPacks returned. Two
+// tests spelled out the listener, the goroutine, the poll, the PostForm and the
+// timeout select before they could assert anything, so the submission they were about
+// was the one thing buried in it.
+func driveSelect(t *testing.T, srv *httptest.Server, manifestPath string, post []string) error {
+	t.Helper()
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	done := make(chan error, 1)
+	go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
+
+	token := waitForSelectPage(t, addr, done)
+	resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": post, "csrf": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatal("selectPacks did not return after the save")
+		return nil
 	}
 }
 
@@ -1050,16 +1065,6 @@ func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
 	}
 }
 
-// The selection page shows the account's whole library and its form rewrites the
-// committed manifest, so it is built for one browser on this machine — and the handlers
-// enforce exactly that. A wildcard or LAN --addr therefore cannot widen the page's
-// reach, it can only break it: the browser such a bind is aimed at gets 421 while the
-// port stands open to anything that can route to it. Refusing the bind is what keeps
-// the flag from reading as a way to share the page.
-// A bad --addr has to be reported as a bad --addr. The bind is what the user typed
-// wrong, but the session is resolved from the browser's cookie store, so ordering the
-// two the other way answers "0.0.0.0:8787" with whatever is wrong with their Firefox
-// profile — on a headless box or a fresh container, that is the only thing they see.
 // variant_includes has no default, so a manifest without it is the state a first-time
 // user is in after `select` creates one. The message has to name the key and show what
 // a value looks like: without this guard the run gets as far as syncer.Run and fails
@@ -1082,6 +1087,10 @@ func TestSyncWithoutVariantIncludesSaysWhatToAdd(t *testing.T) {
 	}
 }
 
+// A bad --addr has to be reported as a bad --addr. The bind is what the user typed
+// wrong, but the session is resolved from the browser's cookie store, so ordering the
+// two the other way answers "0.0.0.0:8787" with whatever is wrong with their Firefox
+// profile — on a headless box or a fresh container, that is the only thing they see.
 func TestSelectReportsABadAddrBeforeReadingTheSession(t *testing.T) {
 	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 	args := append([]string{"select",
@@ -1100,6 +1109,12 @@ func TestSelectReportsABadAddrBeforeReadingTheSession(t *testing.T) {
 	}
 }
 
+// The selection page shows the account's whole library and its form rewrites the
+// committed manifest, so it is built for one browser on this machine — and the handlers
+// enforce exactly that. A wildcard or LAN --addr therefore cannot widen the page's
+// reach, it can only break it: the browser such a bind is aimed at gets 421 while the
+// port stands open to anything that can route to it. Refusing the bind is what keeps
+// the flag from reading as a way to share the page.
 func TestSelectRefusesANonLoopbackAddr(t *testing.T) {
 	for _, tc := range []struct {
 		bind string
@@ -1154,29 +1169,8 @@ func TestSelectNamesThePacksItDropsFromTheManifest(t *testing.T) {
 	stdout = out
 	defer func() { stdout = stdoutWas }()
 
-	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	done := make(chan error, 1)
-	go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
-
-	token := waitForSelectPage(t, addr, done)
-	resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": {"pirate-pack"}, "csrf": {token}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("selectPacks: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("selectPacks did not return after the save")
+	if err := driveSelect(t, srv, manifestPath, []string{"pirate-pack"}); err != nil {
+		t.Fatalf("selectPacks: %v", err)
 	}
 
 	if got := out.String(); !strings.Contains(got, "dungeon-pack") {
@@ -1261,5 +1255,80 @@ func TestCommittedExamplesStillParse(t *testing.T) {
 	}
 	if len(man.Packs) == 0 {
 		t.Error("the example manifest's [[pack]] block no longer decodes")
+	}
+}
+
+// manifest.Load reports a path that does not exist as an empty manifest, so a typo in
+// --manifest used to reach runSyncOrStatus and come back as "no variant_includes in
+// <path>". The user opens the manifest they meant, finds variant_includes already
+// there, and has nothing to act on. list and select are deliberately not checked: one
+// derives a lockfile path beside a manifest that may not exist yet, the other is about
+// to create one.
+func TestSyncNamesAManifestThatIsNotThere(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "synty-sync.tml") // the typo
+
+	for _, cmd := range []string{"status", "sync"} {
+		_, err := resolveManifestPath(missing, cmd)
+		if err == nil {
+			t.Errorf("%s accepted a --manifest that does not exist", cmd)
+			continue
+		}
+		if !strings.Contains(err.Error(), missing) || strings.Contains(err.Error(), "variant_includes") {
+			t.Errorf("%s: err = %v, want it to name the missing file", cmd, err)
+		}
+	}
+	for _, cmd := range []string{"list", "select"} {
+		if _, err := resolveManifestPath(missing, cmd); err != nil {
+			t.Errorf("%s refused a manifest that does not have to exist yet: %v", cmd, err)
+		}
+	}
+}
+
+// Every audit_test.go in this repo holds guard tests, and the convention is that each
+// one carries a comment naming the specific failure it prevents. That comment is what
+// makes a red guard read as a regression rather than as a test to update, which is the
+// whole reason these files are separate from the ordinary suites. Nine of them had
+// drifted out of it — seven with no comment at all, two with their paragraphs stacked
+// above a neighbour — and nothing could see that, so check it rather than trust it.
+func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
+	var files []string
+	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "testdata") {
+			return fs.SkipDir
+		}
+		if !d.IsDir() && d.Name() == "audit_test.go" {
+			files = append(files, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A wrong glob that matched nothing would pass this vacuously, and the count only
+	// ever grows.
+	if len(files) < 9 {
+		t.Fatalf("found %d audit_test.go files (%v); the walk no longer reaches them", len(files), files)
+	}
+
+	for _, path := range files {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
+			}
+			if fn.Doc == nil || strings.TrimSpace(fn.Doc.Text()) == "" {
+				t.Errorf("%s:%d: %s has no comment naming the failure it prevents",
+					path, fset.Position(fn.Pos()).Line, fn.Name.Name)
+			}
+		}
 	}
 }

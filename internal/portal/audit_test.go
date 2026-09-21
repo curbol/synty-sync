@@ -69,26 +69,44 @@ func TestGetBodyRedactsCustomerIDOnTransportError(t *testing.T) {
 	}
 }
 
-// A rate limit is transient: it must back off and retry, not fail the run like a
-// permanent 4xx.
-func TestGetBodyRetriesRateLimit(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		fmt.Fprint(w, "OK")
-	}))
-	defer srv.Close()
+// The statuses transientStatus blesses are the ones getBody really retries. Each of
+// these had its own end-to-end test serving one status and asserting two calls, which
+// says nothing the classifier's own table does not — what is worth driving through the
+// stack is that a status the table calls transient survives the whole retry path, and
+// that more than one flake in a row does too. A 403 is deliberately absent: it is
+// permanent for a page fetch and retryable for a download, and the two policies have
+// their own guards naming each other.
+func TestGetBodyRetriesEveryTransientStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		flakes int32
+	}{
+		// Twice, so the backoff loop itself runs rather than one retry standing in for it.
+		{"server error", http.StatusInternalServerError, 2},
+		{"rate limit", http.StatusTooManyRequests, 1},
+		{"request timeout", http.StatusRequestTimeout, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if atomic.AddInt32(&calls, 1) <= tc.flakes {
+					w.WriteHeader(tc.status)
+					return
+				}
+				fmt.Fprint(w, "OK")
+			}))
+			defer srv.Close()
 
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
-	body, err := c.getBody(context.Background(), srv.URL)
-	if err != nil {
-		t.Fatalf("getBody: %v", err)
-	}
-	if string(body) != "OK" || calls != 2 {
-		t.Errorf("body=%q calls=%d; want OK after one retry", body, calls)
+			c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
+			body, err := c.getBody(context.Background(), srv.URL)
+			if err != nil {
+				t.Fatalf("getBody: %v", err)
+			}
+			if want := tc.flakes + 1; string(body) != "OK" || atomic.LoadInt32(&calls) != want {
+				t.Errorf("body=%q calls=%d; want OK after %d retries", body, calls, tc.flakes)
+			}
+		})
 	}
 }
 
@@ -277,29 +295,6 @@ func TestEnumerateStopsWhenPaginationRepeats(t *testing.T) {
 	}
 	if calls > 4 {
 		t.Errorf("made %d requests before giving up; want it to notice on the second page", calls)
-	}
-}
-
-// A 408 is the server saying the request did not complete in time, which is
-// retryable. Failing fast on it aborts the whole run over one blip.
-func TestGetBodyRetriesRequestTimeout(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusRequestTimeout)
-			return
-		}
-		fmt.Fprint(w, "OK")
-	}))
-	defer srv.Close()
-
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
-	body, err := c.getBody(context.Background(), srv.URL)
-	if err != nil {
-		t.Fatalf("getBody: %v", err)
-	}
-	if string(body) != "OK" || calls != 2 {
-		t.Errorf("body=%q calls=%d; want OK after one retry", body, calls)
 	}
 }
 
@@ -603,6 +598,12 @@ func TestResolveRefusesADocumentBody(t *testing.T) {
 	}
 }
 
+// The document refusal is a guard on the way to the cache, so it has to let the real
+// thing through. The signed CDN URL answers with any of these, including no
+// Content-Type at all, and a check that widened from "is this a document" to "is this
+// a type I recognize" would turn every one of them into ErrNotAPackage — a permanent
+// failure the download retry deliberately does not retry, so the whole library would
+// stop mirroring at once.
 func TestResolveAcceptsPackageContentTypes(t *testing.T) {
 	for _, ct := range []string{"application/zip", "application/octet-stream", "binary/octet-stream", ""} {
 		t.Run("content-type "+ct, func(t *testing.T) {

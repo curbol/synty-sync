@@ -83,6 +83,10 @@ func TestUpdateStagesBesideTheBinaryItReplaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Built on the test goroutine, before any handler can run: zipWith calls t.Fatal,
+	// which is a runtime.Goexit, and from a server goroutine that aborts the response
+	// mid-write instead of failing the test.
+	body := zipWith(t, installedBinaryName(), fakeBinary("NEW"))
 	// Written on the server goroutine and read on the test's, so it is atomic rather
 	// than a plain bool.
 	var staged atomic.Bool
@@ -96,7 +100,7 @@ func TestUpdateStagesBesideTheBinaryItReplaces(t *testing.T) {
 				staged.Store(true)
 			}
 		}
-		w.Write(zipWith(t, installedBinaryName(), fakeBinary("NEW")))
+		w.Write(body)
 	}))
 	defer srv.Close()
 
@@ -174,6 +178,10 @@ func TestInstallRejectsNonExecutableAsset(t *testing.T) {
 	}
 }
 
+// The binary being replaced is the one running the update, so a download that fails has
+// to leave it exactly as it was and take its staging directory with it. Moving the
+// current binary aside before the new one is in hand would leave a user whose download
+// 403'd with no synty-sync at all, and no way to run update again to fix it.
 func TestInstallLeavesBinaryOnFailedDownload(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "synty-sync")
@@ -207,6 +215,10 @@ func TestExtractBinaryRequiresTheNamedBinary(t *testing.T) {
 	}
 }
 
+// The repo is private, so the update only works with a token, and install.sh resolves
+// one in this same order. Reversing it hands GH_TOKEN (whatever `gh` happened to log in
+// as last) precedence over the token the user set for this command, which on a machine
+// with both silently updates from an account that may not have access at all.
 func TestResolveTokenPrefersGithubToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "primary")
 	t.Setenv("GH_TOKEN", "secondary")
@@ -465,6 +477,11 @@ func TestRunRefusesADevBuild(t *testing.T) {
 	}
 }
 
+// Tags carry a leading v and main.version does not, except when it does, so the
+// comparison has to be on the numbers rather than the strings. Getting it wrong makes
+// every `update` on an already-current install download and swap the same binary over
+// itself, which is the one operation in this package that cannot be undone if it goes
+// wrong.
 func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

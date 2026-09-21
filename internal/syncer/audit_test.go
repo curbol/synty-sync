@@ -1375,6 +1375,10 @@ func TestAUnityPackageIsAdoptedWithoutAZipTrailer(t *testing.T) {
 	}
 }
 
+// Adoption is the one path into the lockfile that never consults classify, and the head
+// sniff cannot see this: a copy that stopped part way still begins with an archive's
+// magic. Taking one records its own short bytes as the file's truth, after which every
+// Verify compares those bytes against themselves and finds them intact forever.
 func TestTruncatedLayoutFileIsNotAdopted(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()

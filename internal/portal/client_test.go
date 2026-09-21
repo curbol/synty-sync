@@ -2,39 +2,13 @@ package portal
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/curbol/synty-sync/internal/model"
 )
-
-func TestGetBodyRetriesTransient(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) <= 2 {
-			w.WriteHeader(http.StatusInternalServerError) // flake twice
-			return
-		}
-		fmt.Fprint(w, "OK")
-	}))
-	defer srv.Close()
-
-	c := &Client{Limits: testLimits(), HTTP: http.DefaultClient, BaseURL: srv.URL}
-	body, err := c.getBody(context.Background(), srv.URL)
-	if err != nil {
-		t.Fatalf("getBody: %v", err)
-	}
-	if string(body) != "OK" {
-		t.Errorf("body = %q", body)
-	}
-	if calls < 3 {
-		t.Errorf("expected retries past the 500s, got %d calls", calls)
-	}
-}
 
 func TestGetBodyRedactsCustomerID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -127,14 +127,21 @@ install_binary() {
   if [[ -n "$AUTH_CONF" ]]; then
     # Private repo: resolve the asset's API URL, then download with the token.
     #
-    # The window is wide and the nearest match wins, rather than depending on "url"
-    # sitting an exact number of lines above "name". GitHub's asset object happens to
-    # put it three lines up today, with no margin: one field added ahead of "name" and
-    # every fresh install breaks with "asset not found". Matching the assets URL shape
-    # directly also cannot pick up browser_download_url or the uploader block.
+    # One asset object per line, so the id and the name that selects it are matched
+    # together rather than by proximity. Searching a window above "name" and taking the
+    # nearest id instead depends on "url" preceding "name" inside the object: reorder
+    # those two and the window ends at the name while the last id in it belongs to the
+    # asset before, which installs the wrong architecture. Both are ELF between
+    # linux-intel and linux-arm64, so check_executable passes and the smoke test at the
+    # end is the first thing that notices, after the working binary is gone.
+    # "uploader" opens its own brace after "name", so the asset's chunk keeps both
+    # fields whichever order they come in.
+    # Whitespace goes first so the match holds for the API's compact JSON and for a
+    # pretty-printed one alike; asset names carry no spaces, so nothing this needs is
+    # lost with it.
     url=$(curl -fsSL --config "$AUTH_CONF" "${API_BASE}/repos/${REPO}/releases/tags/v${VERSION}" \
-      | grep -F -B40 "\"name\": \"${file}\"" \
-      | grep -oE "https?://[^\"]+/releases/assets/[0-9]+" | tail -1) || true
+      | tr -d '[:space:]' | tr '{' '\n' | grep -F "\"name\":\"${file}\"" \
+      | grep -oE "https?://[^\"]+/releases/assets/[0-9]+" | head -1) || true
     [[ -n "$url" ]] || { err "asset ${file} not found in release v${VERSION}"; exit 1; }
     curl -fsSL --config "$AUTH_CONF" -H "Accept: application/octet-stream" -o "${STAGE}/${file}" "$url"
   else

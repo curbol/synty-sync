@@ -43,5 +43,15 @@ func Platforms(path string) ([]Platform, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%s: no platforms parsed", path)
 	}
+	// A shape this reads only part of is the same failure as one it cannot read at all,
+	// just quieter: an entry the regex misses (an underscore or a capital in a label,
+	// say) drops out of the installer's guard, the updater's guard and the workflow's
+	// own cross-compile step, while the release keeps publishing that asset. Counting
+	// the quoted entries in the block is what tells "parsed everything" from "parsed
+	// what it recognized".
+	if quoted := strings.Count(block, `"`) / 2; quoted != len(out) {
+		return nil, fmt.Errorf("%s: the platforms list holds %d entries but only %d parse; "+
+			"this guard would silently stop covering the rest", path, quoted, len(out))
+	}
 	return out, nil
 }

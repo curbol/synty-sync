@@ -54,30 +54,40 @@ func nativeMagic(t *testing.T) []byte {
 // stubRelease serves the two GitHub endpoints the installer reads plus the asset
 // itself, so the script can be run end to end without network.
 func stubRelease(t *testing.T, asset []byte) *httptest.Server {
-	return stubReleaseShaped(t, asset, 0)
+	return stubReleaseShaped(t, asset, assetShape{})
 }
 
-// stubReleaseShaped is stubRelease with extraAssetFields keys inserted between an
-// asset's "url" and its "name", standing in for GitHub adding one. The installer reads
-// the URL out of this by text, so how far apart those two keys sit must not matter.
-func stubReleaseShaped(t *testing.T, asset []byte, extraAssetFields int) *httptest.Server {
-	return stubReleaseWatching(t, asset, extraAssetFields, nil)
+// assetShape is how an asset object in the release payload is arranged. The installer
+// reads the asset's API URL out of that payload by text, so neither the distance
+// between "url" and "name" nor their order may decide which asset it resolves.
+type assetShape struct {
+	// extraFields is how many keys sit between "url" and "name", standing in for GitHub
+	// adding one (it has already added "digest" once).
+	extraFields int
+	// nameFirst puts "name" ahead of "url" in the object, which is the arrangement that
+	// makes a search for the nearest id above the name resolve the asset before it.
+	nameFirst bool
+}
+
+// stubReleaseShaped is stubRelease serving an asset object arranged as shape says.
+func stubReleaseShaped(t *testing.T, asset []byte, shape assetShape) *httptest.Server {
+	return stubReleaseWatching(t, asset, shape, nil)
 }
 
 // stubReleaseWatching is stubReleaseShaped with a hook that runs while the asset
 // request is in flight, for a caller that has to observe the installer's own working
 // state rather than what it leaves behind.
-func stubReleaseWatching(t *testing.T, asset []byte, extraAssetFields int, onAsset func()) *httptest.Server {
+func stubReleaseWatching(t *testing.T, asset []byte, shape assetShape, onAsset func()) *httptest.Server {
 	t.Helper()
 	// Resolved on the test goroutine, before any handler can run: platformLabel can
 	// call t.Skipf, and a Goexit from a server goroutine would abort a response
 	// mid-write rather than skip the test.
-	return stubReleaseLabeled(t, asset, platformLabel(t), extraAssetFields, onAsset)
+	return stubReleaseLabeled(t, asset, platformLabel(t), shape, onAsset)
 }
 
 // stubReleaseLabeled is stubReleaseWatching for a caller that drives install.sh with a
 // stubbed uname, where the platform the installer resolves is not the host's.
-func stubReleaseLabeled(t *testing.T, asset []byte, label string, extraAssetFields int, onAsset func()) *httptest.Server {
+func stubReleaseLabeled(t *testing.T, asset []byte, label string, shape assetShape, onAsset func()) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	// The repo is private, so every one of these routes is a 404 without the token,
@@ -106,7 +116,7 @@ func stubReleaseLabeled(t *testing.T, asset []byte, label string, extraAssetFiel
 		// other and disagree with GitHub the moment a field is added ahead of "name".
 		// The asset URL is built from the request's own Host rather than a variable the
 		// test goroutine writes after the server is already serving.
-		fmt.Fprint(w, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", extraAssetFields))
+		fmt.Fprint(w, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", shape))
 	}))
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/assets/", authed(func(w http.ResponseWriter, r *http.Request) {
 		// The wanted asset is id 2; resolving to the decoy's id means the parse picked
@@ -138,24 +148,35 @@ func stubReleaseLabeled(t *testing.T, asset []byte, label string, extraAssetFiel
 // block and a second asset ahead of the wanted one. install.sh reads the asset URL out
 // of this by text, so what it is read out of has to look like the real thing rather
 // than like whatever the reader currently happens to need.
-func githubReleaseJSON(host, wantName string, extraAssetFields int) string {
+func githubReleaseJSON(host, wantName string, shape assetShape) string {
 	var padding strings.Builder
-	for i := range extraAssetFields {
+	for i := range shape.extraFields {
 		fmt.Fprintf(&padding, "\n      \"field_github_added_%d\": null,", i)
 	}
+	// Argument indexes are explicit throughout, because nameFirst reorders the verbs
+	// and a sequential %s after a reordered head would silently pick up the wrong one.
+	head := `    {
+      "url": "http://%[1]s/repos/curbol/synty-sync/releases/assets/%[2]d",
+      "id": %[3]d,
+      "node_id": "RA_kwDOAbCdEf4AAAAA",` + padding.String() + `
+      "name": %[4]q,
+      "label": null,`
+	if shape.nameFirst {
+		head = `    {
+      "name": %[4]q,
+      "id": %[3]d,
+      "node_id": "RA_kwDOAbCdEf4AAAAA",` + padding.String() + `
+      "url": "http://%[1]s/repos/curbol/synty-sync/releases/assets/%[2]d",
+      "label": null,`
+	}
 	asset := func(id int, name string) string {
-		return fmt.Sprintf(`    {
-      "url": "http://%s/repos/curbol/synty-sync/releases/assets/%d",
-      "id": %d,
-      "node_id": "RA_kwDOAbCdEf4AAAAA",`+padding.String()+`
-      "name": %q,
-      "label": null,
+		return fmt.Sprintf(head+`
       "uploader": {
         "login": "curbol",
         "id": 1,
         "node_id": "MDQ6VXNlcjE=",
         "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
-        "url": "http://%s/users/curbol",
+        "url": "http://%[5]s/users/curbol",
         "html_url": "https://github.com/curbol",
         "type": "User",
         "site_admin": false
@@ -167,7 +188,7 @@ func githubReleaseJSON(host, wantName string, extraAssetFields int) string {
       "download_count": 0,
       "created_at": "2026-01-01T00:00:00Z",
       "updated_at": "2026-01-01T00:00:00Z",
-      "browser_download_url": "http://%s/curbol/synty-sync/releases/download/v9.9.9/%s"
+      "browser_download_url": "http://%[6]s/curbol/synty-sync/releases/download/v9.9.9/%[7]s"
     }`, host, id, id, name, host, host, name)
 	}
 	return fmt.Sprintf(`{
@@ -378,24 +399,33 @@ func TestInstallerAcceptsEveryCredentialSource(t *testing.T) {
 }
 
 // install.sh finds the asset's API URL by text, because the private-repo download needs
-// the id and there is no jq on a fresh machine. What must not matter is how far "url"
-// sits from "name": GitHub puts them three lines apart today with no margin, and has
-// already added a key to this object once ("digest"). One field ahead of "name" used to
-// drop the URL out of the grep's window, leaving every fresh install with "asset not
-// found in release" while everyone who already had a binary kept updating fine.
-func TestInstallerFindsTheAssetHoweverGitHubPadsTheObject(t *testing.T) {
+// the id and there is no jq on a fresh machine. What must not matter is how that object
+// is arranged. Distance first: GitHub puts "url" and "name" three lines apart today with
+// no margin and has already added a key to this object once ("digest"), and one field
+// ahead of "name" used to drop the URL out of the grep's window, leaving every fresh
+// install with "asset not found in release" while everyone who already had a binary kept
+// updating fine. Order second, and it is the worse failure: searching above the name for
+// the nearest id resolves the *previous* asset once "name" comes first, and between
+// linux-intel and linux-arm64 both are ELF, so the magic check passes, the binary is
+// replaced, and the smoke test is the first thing that notices.
+func TestInstallerFindsTheAssetHoweverGitHubShapesTheObject(t *testing.T) {
 	want := append(nativeMagic(t), []byte("a real enough binary")...)
-	for _, extra := range []int{0, 1, 8} {
-		t.Run(fmt.Sprintf("%d added fields", extra), func(t *testing.T) {
+	for _, shape := range []assetShape{
+		{extraFields: 1},
+		{extraFields: 8},
+		{nameFirst: true},
+		{nameFirst: true, extraFields: 8},
+	} {
+		t.Run(fmt.Sprintf("%+v", shape), func(t *testing.T) {
 			home := t.TempDir()
-			srv := stubReleaseShaped(t, installerZip(t, want), extra)
+			srv := stubReleaseShaped(t, installerZip(t, want), shape)
 			// The smoke test at the end runs the installed file, which is not a real
 			// binary here, so a non-zero exit is expected; what matters is that the right
 			// asset was resolved and landed.
 			out, _ := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
 				"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
 			if strings.Contains(out, "not found in release") {
-				t.Fatalf("the asset URL was not found with %d extra fields between \"url\" and \"name\":\n%s", extra, out)
+				t.Fatalf("the asset URL was not found in an object shaped %+v:\n%s", shape, out)
 			}
 			got, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync"))
 			if err != nil {
@@ -449,7 +479,7 @@ func TestInstallerStagesInsideTheInstallDirectory(t *testing.T) {
 	binDir := filepath.Join(home, ".local", "bin")
 	// Written on the server goroutine and read on the test's, so it is atomic.
 	var staged atomic.Bool
-	srv := stubReleaseWatching(t, installerZip(t, append(nativeMagic(t), []byte("binary")...)), 0, func() {
+	srv := stubReleaseWatching(t, installerZip(t, append(nativeMagic(t), []byte("binary")...)), assetShape{}, func() {
 		entries, err := os.ReadDir(binDir)
 		if err != nil {
 			return // the installer has not created the install dir yet
@@ -487,7 +517,7 @@ func TestInstallerChecksMacMagicOnADarwinHost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
-			srv := stubReleaseLabeled(t, installerZip(t, append(tc.magic, []byte(" body")...)), "mac-intel", 0, nil)
+			srv := stubReleaseLabeled(t, installerZip(t, append(tc.magic, []byte(" body")...)), "mac-intel", assetShape{}, nil)
 
 			// Darwin/x86_64 resolves to mac-intel, which is the label the stub serves.
 			out, _ := runInstaller(t, home, "GITHUB_TOKEN=test-token",

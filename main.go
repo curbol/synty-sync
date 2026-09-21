@@ -319,17 +319,29 @@ func applyFlags(cfg config.Config, library, customer string, concurrency int) co
 }
 
 // resolveManifestPath locates the project manifest. An explicit --manifest is honored
-// verbatim (existence is not pre-checked, so `list` can derive a lockfile path beside a
-// not-yet-created manifest). Otherwise it is discovered by walking up from the working
-// directory; when nothing is found, `select` defaults to synty-sync.toml in the working
-// directory (it is about to create one), and the read commands error.
+// verbatim, and checked to exist only for the commands that need to read one: `list`
+// derives a lockfile path beside a not-yet-created manifest, and `select` creates one.
+// Otherwise it is discovered by walking up from the working directory; when nothing is
+// found, `select` defaults to synty-sync.toml in the working directory, and the read
+// commands error.
 func resolveManifestPath(flag, cmd string) (string, error) {
 	if flag != "" {
 		// The shell leaves a quoted --manifest "~/game/synty-sync.toml" alone, and
 		// manifest.Load reports a path that does not exist as an empty manifest rather
 		// than an error, so an unexpanded tilde surfaces as "no variant_includes"
 		// against a file that has them.
-		return config.ExpandHome(flag), nil
+		p := config.ExpandHome(flag)
+		// Same reason, one typo further along: a path that does not exist loads as an
+		// empty manifest, and the commands that go on to read one then report a missing
+		// variant_includes against the file the user meant, which has them. Only those
+		// commands check, since the other two have a manifest that legitimately is not
+		// there yet.
+		if cmd == "status" || cmd == "sync" {
+			if _, err := os.Stat(p); err != nil {
+				return "", fmt.Errorf("no manifest at %s: %w", p, err)
+			}
+		}
+		return p, nil
 	}
 	wd, err := os.Getwd()
 	if err != nil {

@@ -172,6 +172,10 @@ func TestGeckoProfilePickPrefersDefaultRelease(t *testing.T) {
 	}
 }
 
+// A profile base holding no cookies.sqlite is a reportable error, not an empty cookie
+// header. Returning nothing here sends an empty Cookie to the store, which answers with
+// a logged-out page, and the user is told their session expired when the real problem is
+// that the tool never found their browser profile.
 func TestGeckoProfilePickWithNoProfiles(t *testing.T) {
 	if _, err := pickUnder(t, t.TempDir()); err == nil {
 		t.Error("expected an error when no profile holds a cookies.sqlite")
@@ -329,6 +333,10 @@ func TestFromFileDetectsItsFormat(t *testing.T) {
 	}
 }
 
+// Resolve takes a browser name or a file path in one string, so the two routes are told
+// apart by what the value looks like. A source that is neither has to error: falling
+// through to an empty header would reach the store as a logged-out request and be
+// reported as an expired session, naming nothing the user mistyped.
 func TestResolveRoutesBrowserNamesAndPaths(t *testing.T) {
 	if _, err := Resolve("not-a-browser-and-not-a-file"); err == nil {
 		t.Error("an unknown source must error rather than resolve to nothing")
