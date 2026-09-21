@@ -1104,3 +1104,62 @@ func TestResolveIsNotBoundByThePageDeadline(t *testing.T) {
 		t.Errorf("read %d bytes, want %d; the transfer was truncated", len(got), want)
 	}
 }
+
+// The download leg carries no whole-request deadline, because a pack runs to
+// gigabytes, and the stall guard is only installed on the body handed back to the
+// caller. Every path that refuses a response therefore has to bound its own discard:
+// drainClose stops after a megabyte, which is a bound on bytes and not on time, so a
+// server that sends a few and then goes quiet without closing blocked Resolve for good
+// — no error, no retry, and no output from a sync that had already decided to re-sign
+// the URL and try again. Both refusals below are the ordinary ones: a 403 is an expired
+// CloudFront signature, a document is an expired session.
+func TestResolveRefusalsDoNotHangOnABodyThatStopsArriving(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		contentType string
+	}{
+		{"an expired signature", http.StatusForbidden, "application/xml"},
+		{"an expired session", http.StatusOK, "text/html"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				// Promises far more than it sends, so the drain's byte bound is never
+				// reached and only a time bound can end the read.
+				w.Header().Set("Content-Length", strconv.Itoa(drainReadLimit*4))
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("<Error><Code>"))
+				w.(http.Flusher).Flush()
+				<-release
+			}))
+			// Registered after the server, so it runs before Close: the handler is
+			// parked on this channel and Close waits on the handler.
+			t.Cleanup(srv.Close)
+			t.Cleanup(func() { close(release) })
+
+			c := New(nil, srv.URL, "1000000000001", "x=y")
+			c.Limits = testLimits()
+			c.Limits.StallTimeout = 150 * time.Millisecond
+
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := c.Resolve(context.Background(), model.FileEntry{
+					FileToken: "POLYGON_Pirate", Variant: "Godot_4_5_1", Version: "v1", FileID: 1,
+					DownloadHref: "/apps/downloads/downloads/1",
+				})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("a refused response came back as a usable body")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("Resolve did not return: the discard is bounded in bytes but not in time, "+
+					"and StallTimeout (%s) never reaches it", c.Limits.StallTimeout)
+			}
+		})
+	}
+}

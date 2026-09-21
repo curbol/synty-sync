@@ -305,9 +305,24 @@ const drainReadLimit = 1 << 20
 // drainClose reads off any unconsumed body before closing, so the transport can
 // return the connection to the pool instead of tearing it down. A retried request
 // would otherwise pay a fresh handshake on every attempt.
+//
+// The bound here is on bytes, which is not the same as a bound on time: a server that
+// sends a few and then goes quiet without closing blocks the read for as long as the
+// request context allows. Callers whose context carries a deadline get one from it;
+// the download leg deliberately has none, so it uses drainCloseBounded instead.
 func drainClose(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, drainReadLimit))
 	resp.Body.Close()
+}
+
+// drainCloseBounded is drainClose for a request that carries no deadline of its own.
+// Cancelling the request is what breaks the read, which is the same lever the stall
+// guard pulls on the success path; on an error path the deferred cancel fires straight
+// after anyway, so calling it early costs nothing.
+func drainCloseBounded(resp *http.Response, cancel context.CancelFunc, window time.Duration) {
+	stop := time.AfterFunc(window, cancel)
+	defer stop.Stop()
+	drainClose(resp)
 }
 
 // redact removes the customer id from a string bound for an error message; the id
@@ -489,12 +504,19 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 		// reaches the message; the file key identifies the request instead.
 		return nil, "", fmt.Errorf("download %s: %w", file.Key(), transportCause(err))
 	}
+	// reqCtx carries no deadline, because a pack runs to gigabytes, and the stall guard
+	// is only installed on the way out. So every path that discards a body here bounds
+	// the discard itself: the refusals below are the ordinary ones — a 403 is an expired
+	// CloudFront signature the syncer re-signs on the next attempt, a document is an
+	// expired session — and a server that sends a few bytes of one and then goes quiet
+	// would otherwise block the read for good, with no retry and no output.
+	stall := c.limits().StallTimeout
 	if resp.StatusCode != http.StatusOK {
-		drainClose(resp)
+		drainCloseBounded(resp, cancel, stall)
 		return nil, "", &StatusError{Status: resp.StatusCode, Op: "download " + file.Key()}
 	}
 	if mt, isDoc := documentMediaType(resp.Header.Get("Content-Type")); isDoc {
-		drainClose(resp)
+		drainCloseBounded(resp, cancel, stall)
 		return nil, "", fmt.Errorf("download %s: %w (Content-Type %s)", file.Key(), ErrNotAPackage, mt)
 	}
 	filename = filenameFromURL(resp.Request.URL)
@@ -502,10 +524,10 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 		filename = filenameFromDisposition(resp.Header.Get("Content-Disposition"))
 	}
 	if filename == "" {
-		drainClose(resp)
+		drainCloseBounded(resp, cancel, stall)
 		return nil, "", fmt.Errorf("download %s: could not determine filename", file.Key())
 	}
-	return newStallGuard(resp.Body, c.limits().StallTimeout, cancel), filename, nil
+	return newStallGuard(resp.Body, stall, cancel), filename, nil
 }
 
 // ErrStalled marks a transfer that stopped delivering bytes.
