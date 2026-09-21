@@ -175,42 +175,92 @@ type resolved struct {
 // through every call site, three of which are tests that would still compile with the
 // new one left nil.
 type verdicts struct {
+	// live is what this run's pages say each fileId is, decided once for every owner.
+	// Every entry the run writes takes its identity from here rather than from the row
+	// in front of it: the store labels a bundled file per order item, so two in-scope
+	// owners reading their own rows commit two versions, two variants or two advertised
+	// sizes for one fileId, at one sha.
+	live map[int]live
 	// resolved is what the run has bytes for: a download, an adoption, or a prior copy
 	// it checked and kept.
 	resolved map[int]resolved
-	// unresolved is what it went looking for and did not find, at the identity the live
-	// page gives it. Without that identity an owner reports the loss against a stale
-	// version.
-	unresolved map[int]live
+	// unresolved is what it went looking for and did not find. The identity it is
+	// dropped at comes from live, so every owner reports the loss the same way.
+	unresolved map[int]struct{}
 	// deselected is what it read and declined — filtered out by variant, or archived by
 	// the store. Nothing failed, so no other channel says so, and leaving these records
 	// alone is what let one fileId end up tracked under one owner and untracked under
 	// the pack the run rebuilt.
-	deselected map[int]live
-	// advertised is the portal's rounded label for every fileId the run read a page for.
-	// It refreshes every run and describes the store's listing rather than the bytes, so
-	// it travels whatever the verdict was; without it one fileId carries two different
-	// advertisedSize values under two owners, at one version and one sha.
-	advertised map[int]int64
+	deselected map[int]struct{}
 }
 
 func newVerdicts() verdicts {
 	return verdicts{
+		live:       map[int]live{},
 		resolved:   map[int]resolved{},
-		unresolved: map[int]live{},
-		deselected: map[int]live{},
-		advertised: map[int]int64{},
+		unresolved: map[int]struct{}{},
+		deselected: map[int]struct{}{},
 	}
 }
 
-// live is what this run's pages say a fileId is. Both fields travel to the owning
-// packs the run did not fetch: the version because a carried entry otherwise names
-// one version against another version's sha, and the variant because it is half the
-// entry's key, so an owner that keeps the old one ends up filing the new bytes under
-// the old engine's name.
+// live is what this run's pages say a fileId is. Every field travels to the owning
+// packs the run did not fetch: the version because a carried entry otherwise names one
+// version against another version's sha, the token and variant because together they
+// are the entry's key, so an owner that keeps the old ones ends up filing the new bytes
+// under the old engine's name, and the advertised size because it describes the store's
+// listing rather than the bytes and so refreshes whatever the verdict was.
 type live struct {
-	version string
-	variant string
+	fileToken      string
+	variant        string
+	version        string
+	advertisedSize int64
+}
+
+// liveOf is one page row read as the identity of the fileId it names.
+func liveOf(f model.FileEntry) live {
+	return live{
+		fileToken:      f.FileToken,
+		variant:        string(f.Variant),
+		version:        f.Version,
+		advertisedSize: f.AdvertisedSize,
+	}
+}
+
+// readRows turns every in-scope pack's rows into one answer per fileId: the identity
+// the run will record it under, which owning packs selected it, and the order to work
+// through them in. Building a verdicts anywhere else is how a channel ends up nil for a
+// fileId the run did read, so this is the only constructor that fills live.
+func readRows(packFiles []packWithFiles, filter func(model.Variant) bool) (verdicts, map[int][]selection, []int) {
+	vd := newVerdicts()
+	selectedByID := map[int][]selection{}
+	var selOrder []int
+	for _, pf := range packFiles {
+		for _, f := range pf.files {
+			// The first row read stands in until a selected one arrives, so a fileId no
+			// owner selected still has an identity to be dropped at. A selected row then
+			// takes over and keeps it: that row is the one the download is keyed on, so
+			// anything else would name the bytes after a row the run never fetched.
+			if _, known := vd.live[f.FileID]; !known {
+				vd.live[f.FileID] = liveOf(f)
+			}
+			if !filter(f.Variant) || f.Archived {
+				vd.deselected[f.FileID] = struct{}{}
+				continue
+			}
+			if _, seen := selectedByID[f.FileID]; !seen {
+				selOrder = append(selOrder, f.FileID)
+				vd.live[f.FileID] = liveOf(f)
+			}
+			selectedByID[f.FileID] = append(selectedByID[f.FileID], selection{pf.pack, f})
+		}
+	}
+	// Selected anywhere wins. Archived is a per-row label and the filter reads a
+	// variant, so one pack can decline a fileId that another pack offers under a
+	// variant this run does take.
+	for id := range selectedByID {
+		delete(vd.deselected, id)
+	}
+	return vd, selectedByID, selOrder
 }
 
 // Run executes a sync (or status when DryRun) and returns a Report. The lockfile
@@ -279,29 +329,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	priorByID := indexByFileID(lf)
 	cacheOK := cacheChecker(opts)
 
-	// Group selected files by fileId for dedup.
-	selectedByID := map[int][]selection{}
-	var selOrder []int
-	vd := newVerdicts()
-	for _, pf := range packFiles {
-		for _, f := range pf.files {
-			vd.advertised[f.FileID] = f.AdvertisedSize
-			if !opts.Filter(f.Variant) || f.Archived {
-				vd.deselected[f.FileID] = live{version: f.Version, variant: string(f.Variant)}
-				continue
-			}
-			if _, seen := selectedByID[f.FileID]; !seen {
-				selOrder = append(selOrder, f.FileID)
-			}
-			selectedByID[f.FileID] = append(selectedByID[f.FileID], selection{pf.pack, f})
-		}
-	}
-	// Selected anywhere wins. Archived is a per-row label and the filter reads a
-	// variant, so one pack can decline a fileId that another pack offers under a
-	// variant this run does take.
-	for id := range selectedByID {
-		delete(vd.deselected, id)
-	}
+	vd, selectedByID, selOrder := readRows(packFiles, opts.Filter)
 
 	if opts.Attempts <= 0 {
 		opts.Attempts = 3
@@ -368,7 +396,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 						size: prior.SizeBytes, version: prior.Version, variant: prior.Variant,
 					}
 				} else {
-					vd.unresolved[id] = live{version: rep.Version, variant: string(rep.Variant)}
+					vd.unresolved[id] = struct{}{}
 				}
 				continue
 			}
@@ -804,17 +832,28 @@ func goneFromTheStore(err error) bool {
 }
 
 // clearTracking marks an entry as not downloaded, at the identity this run's pages give
-// the fileId. Both fields travel with the verdict: the version because an entry
-// otherwise names one version against another version's sha, and the variant because it
-// is half the entry's key.
+// the fileId. applyLive travels with it for the same reason it travels with a resolved
+// entry: an owner that keeps its own row's labels drops the record against a version the
+// run was not looking for, under a key no other owner agrees on.
 func clearTracking(f lockfile.File, v live) lockfile.File {
 	f.Tracked, f.CachePath, f.SHA256, f.SizeBytes, f.DownloadedAt = false, "", "", 0, ""
-	if v.version != "" {
-		f.Version = v.version
+	return applyLive(f, v)
+}
+
+// applyLive writes this run's identity for a fileId onto an entry, leaving a field the
+// run has nothing to say about alone. It is the one place an entry learns what the store
+// currently calls a file, so every owner learns the same thing.
+func applyLive(f lockfile.File, v live) lockfile.File {
+	if v.fileToken != "" {
+		f.FileToken = v.fileToken
 	}
 	if v.variant != "" {
 		f.Variant = v.variant
 	}
+	if v.version != "" {
+		f.Version = v.version
+	}
+	f.AdvertisedSize = v.advertisedSize
 	return f
 }
 
@@ -848,12 +887,12 @@ func applyResolved(f lockfile.File, r resolved, now, fallbackDownloadedAt string
 }
 
 // keyFor is the key an entry belongs under once the run is done with it. The key is
-// half variant, so an entry whose variant moved has to move key with it, or the new
-// engine's file stays filed under the old engine's name for every owner the run did not
-// fetch while the one it did fetch is rebuilt under the new one. An entry the run left
-// alone keeps the key it arrived with, whatever shape that key is in.
-func keyFor(f lockfile.File, wasVariant, key string) string {
-	if f.Variant == wasVariant {
+// the token and the variant, so an entry whose either moved has to move key with it, or
+// the renamed file stays filed under the old name for every owner the run did not fetch
+// while the one it did fetch is rebuilt under the new one. An entry the run left alone
+// keeps the key it arrived with, whatever shape that key is in.
+func keyFor(f lockfile.File, was lockfile.File, key string) string {
+	if f.FileToken == was.FileToken && f.Variant == was.Variant {
 		return key
 	}
 	return model.FileEntry{FileToken: f.FileToken, Variant: model.Variant(f.Variant)}.Key()
@@ -880,28 +919,33 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, vd v
 		// new key, and which entry survives must not depend on the iteration.
 		for _, key := range sortedKeys(p.Files) {
 			f := p.Files[key]
-			wasVariant := f.Variant
-			if size, read := vd.advertised[f.FileID]; read {
-				f.AdvertisedSize = size
+			was := f
+			v, read := vd.live[f.FileID]
+			if read {
+				// Read a page for this fileId, so the store's current labels are known and
+				// apply to every owner, whatever the verdict turned out to be. A fileId no
+				// in-scope pack lists keeps what it arrived with: nothing this run saw
+				// describes it.
+				f = applyLive(f, v)
 			}
 			// The question is whether this fileId was re-resolved on this run, not
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the identity has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
-			switch v, unresolved := vd.unresolved[f.FileID]; {
-			case unresolved:
+			switch {
+			case isIn(vd.unresolved, f.FileID):
 				// The run went looking for these bytes and did not find them, so the
 				// record naming them has to go with them — at the version the run was
 				// looking for, or this owner reports the loss against a stale one.
 				f = clearTracking(f, v)
+			case isIn(vd.deselected, f.FileID):
+				// The run read this file and declined it, so it is not downloaded any
+				// more for this owner either. Nothing failed, so no other channel says
+				// so, and leaving the record alone is what let one fileId end up
+				// tracked here and untracked in the pack the run rebuilt.
+				f = clearTracking(f, v)
 			default:
-				if v, deselected := vd.deselected[f.FileID]; deselected {
-					// The run read this file and declined it, so it is not downloaded any
-					// more for this owner either. Nothing failed, so no other channel says
-					// so, and leaving the record alone is what let one fileId end up
-					// tracked here and untracked in the pack the run rebuilt.
-					f = clearTracking(f, v)
-				} else if r, ok := vd.resolved[f.FileID]; ok && r.cachePath != "" {
+				if r, ok := vd.resolved[f.FileID]; ok && r.cachePath != "" {
 					// Tracked or not: a fileId this run selected and resolved was selectable
 					// for this owner too, and the only way its entry stayed untracked is an
 					// earlier run that failed to fetch it. That is the case that has to
@@ -917,7 +961,7 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, vd v
 					f = applyResolved(f, r, opts.Now, stamp)
 				}
 			}
-			carried.Files[keyFor(f, wasVariant, key)] = f
+			carried.Files[keyFor(f, was, key)] = f
 		}
 		report.NewLockfile.Packs[slug] = carried
 	}
@@ -929,22 +973,18 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, vd v
 			Files:       map[string]lockfile.File{},
 		}
 		for _, f := range pf.files {
-			entry := lockfile.File{
-				FileToken: f.FileToken,
-				Variant:   string(f.Variant),
-				Version:   f.Version,
-				FileID:    f.FileID,
-				// Through the shared channel rather than off this row, which is the same
-				// reason the carried owners read it there: the store can re-label a
-				// bundled file between two item-page fetches of one run, and the fan-out
-				// reads those pages concurrently. Taking each row's own figure leaves two
-				// in-scope owners committing two advertised sizes for one fileId at one
-				// version and one sha. advertisedByID is populated from exactly these
-				// rows, so the lookup cannot miss.
-				AdvertisedSize: vd.advertised[f.FileID],
-			}
-			key := f.Key()
-			wasVariant := entry.Variant
+			// Every identity field comes through the shared channel rather than off this
+			// row, which is the same reason the carried owners read it there: the store
+			// labels a bundled file per order item, and the fan-out reads those pages
+			// concurrently. Taking each row's own figures leaves two in-scope owners
+			// committing two versions, two variants or two advertised sizes for one
+			// fileId at one sha. vd.live is populated from exactly these rows, so the
+			// lookup cannot miss.
+			entry := applyLive(lockfile.File{FileID: f.FileID}, vd.live[f.FileID])
+			// The key follows the identity, so two owners of one fileId file it under one
+			// key even when their rows disagree about what to call it.
+			key := model.FileEntry{FileToken: entry.FileToken, Variant: model.Variant(entry.Variant)}.Key()
+			was := entry
 			// Keyed on the fileId's outcome for the run, not on this row's own verdict.
 			// Selection is decided once across every owner ("selected anywhere wins"),
 			// and the bytes are one file in one place, so an owner whose row the store
@@ -959,7 +999,7 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, vd v
 			if r, ok := vd.resolved[f.FileID]; ok && r.cachePath != "" {
 				entry = applyResolved(entry, r, opts.Now, prevByID[f.FileID].DownloadedAt)
 			}
-			lp.Files[keyFor(entry, wasVariant, key)] = entry
+			lp.Files[keyFor(entry, was, key)] = entry
 		}
 		report.NewLockfile.Packs[pf.pack.Slug] = lp
 	}
@@ -984,6 +1024,12 @@ func warnings(packFiles []packWithFiles, filter func(model.Variant) bool) []stri
 	}
 	sort.Strings(w)
 	return w
+}
+
+// isIn reports whether a verdict set names a fileId.
+func isIn(set map[int]struct{}, id int) bool {
+	_, ok := set[id]
+	return ok
 }
 
 // sortedKeys returns a pack's file keys in a fixed order, for the two places that

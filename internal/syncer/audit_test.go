@@ -1295,7 +1295,10 @@ func TestUnfetchedBundledFileCarriesOneDownloadedAt(t *testing.T) {
 	}}
 
 	rep := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
-	buildLockfile(&rep, pf, runOpts(t.TempDir(), false), verdicts{resolved: resolvedByID}, prev)
+	opts := runOpts(t.TempDir(), false)
+	vd, _, _ := readRows(pf, opts.Filter)
+	vd.resolved = resolvedByID
+	buildLockfile(&rep, pf, opts, vd, prev)
 
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
 	out := rep.NewLockfile.Packs["polygon-dungeon-pack"].Files[key]
@@ -1330,7 +1333,9 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 		}},
 	}}
 	opts := runOpts(lib, false)
-	buildLockfile(&rep, pf, opts, verdicts{unresolved: map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}}, prev)
+	vd, _, _ := readRows(pf, opts.Filter)
+	vd.unresolved[999] = struct{}{}
+	buildLockfile(&rep, pf, opts, vd, prev)
 
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
@@ -2014,6 +2019,78 @@ func TestDivergentArchivedKeepsInScopeOwnersInAgreement(t *testing.T) {
 		if strings.Contains(w, "unreferenced") {
 			t.Errorf("a copy another owner still records was reported unreferenced: %s", w)
 		}
+	}
+}
+
+// The same divergence, on the verdicts that resolve nothing. applyResolved is what
+// converged the two owners above, so every verdict that does not go through it left the
+// in-scope rebuild taking version, variant and token off each owner's own row — and the
+// store labels a bundled file per order item, so the two rows disagree. One fileId then
+// reached the committed lockfile at two versions, under two keys, with nothing failing
+// and nothing reporting it; indexByFileID picked between them by slug order on the run
+// after, and drawing the stale one refetches a multi-GB file.
+//
+// Both halves are here because they fail for one reason and are reached two ways: a
+// download that failed with no good prior copy, and a filter that declines every row.
+func TestDivergentLabelsKeepInScopeOwnersInAgreementWhenNothingResolves(t *testing.T) {
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	both := func(slug string) bool {
+		return slug == "polygon-pirate-pack" || slug == "polygon-dungeon-pack"
+	}
+	items := func(orderItem string) (string, bool) {
+		switch orderItem {
+		case "1": // Pirate: the store archived this order item's copy
+			return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", "v1_0_0_ARCHIVED", 999), true
+		case "4": // Dungeon: the same fileId, still served
+			return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", "v1_0_0", 999), true
+		}
+		return "", false
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts func(Options) Options
+	}{
+		{"the download fails", func(o Options) Options {
+			o.Attempts = 1
+			return o
+		}},
+		{"the filter declines every row", func(o Options) Options {
+			o.Filter = func(model.Variant) bool { return false }
+			return o
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			srv := newServer(t, serverOpts{
+				itemHTML:       items,
+				downloadStatus: func(string) (int, bool) { return http.StatusInternalServerError, true },
+			})
+			opts := tc.opts(runOpts(lib, false))
+			opts.PackSelected = both
+
+			if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			lf, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var owners []lockfile.File
+			for _, slug := range []string{"polygon-dungeon-pack", "polygon-pirate-pack"} {
+				files := lf.Packs[slug].Files
+				if len(files) != 1 {
+					t.Fatalf("%s holds %d entries for one fileId: %+v", slug, len(files), files)
+				}
+				f, ok := files[key]
+				if !ok {
+					t.Fatalf("%s filed the shared file under a key of its own: %+v", slug, files)
+				}
+				owners = append(owners, f)
+			}
+			assertOwnersAgree(t, owners[0], owners[1])
+		})
 	}
 }
 
