@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/curbol/synty-sync/internal/config"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -218,7 +220,12 @@ func Resolve(src string) (string, error) {
 // honouring SYNTY_BROWSER_PROFILE as a direct profile-dir override.
 func FromBrowser(name string) (string, error) {
 	if p := os.Getenv("SYNTY_BROWSER_PROFILE"); p != "" {
-		return geckoCookieHeader(filepath.Join(p, "cookies.sqlite"))
+		// No shell expands an environment value, so a ~ written in a systemd unit, a
+		// direnv file or a quoted export arrives literally. Every other path input this
+		// tool takes is expanded; leaving this one out made the documented escape hatch
+		// for an unrecognized profile layout fail with the path the reader can see
+		// exists, and nothing saying the ~ was taken at face value.
+		return geckoCookieHeader(filepath.Join(config.ExpandHome(p), "cookies.sqlite"))
 	}
 	if !knownBrowser(name) {
 		return "", fmt.Errorf("unknown browser %q (use %s, or a cookies file path)", name, strings.Join(browserNames, ", "))

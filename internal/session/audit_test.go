@@ -446,13 +446,33 @@ func TestEveryReleasedPlatformHasAProfileLocation(t *testing.T) {
 // not seen.
 func TestBrowserProfileOverrideIsHonored(t *testing.T) {
 	db := newCookieDB(t, false, [3]string{"syntystore.com", "session", "abc"})
-	t.Setenv("SYNTY_BROWSER_PROFILE", filepath.Dir(db))
-	got, err := FromBrowser("firefox")
-	if err != nil {
-		t.Fatalf("FromBrowser with an explicit profile: %v", err)
-	}
-	if got != "session=abc" {
-		t.Errorf("Cookie header = %q, want session=abc", got)
+	profile := filepath.Dir(db)
+
+	for _, tc := range []struct {
+		name string
+		// value is the override as it is set; home is what ~ has to resolve to for it
+		// to mean the profile, or "" when the value names the profile outright.
+		value, home string
+	}{
+		{name: "an absolute path", value: profile},
+		// No shell expands an environment value, so a ~ written in a systemd unit, a
+		// direnv file or a quoted export arrives literally. Without expansion this
+		// stats ./~/<profile> and reports a path the reader can see exists.
+		{name: "a tilde path", value: filepath.Join("~", filepath.Base(profile)), home: filepath.Dir(profile)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.home != "" {
+				t.Setenv("HOME", tc.home)
+			}
+			t.Setenv("SYNTY_BROWSER_PROFILE", tc.value)
+			got, err := FromBrowser("firefox")
+			if err != nil {
+				t.Fatalf("FromBrowser with an explicit profile: %v", err)
+			}
+			if got != "session=abc" {
+				t.Errorf("Cookie header = %q, want session=abc", got)
+			}
+		})
 	}
 }
 
