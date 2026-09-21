@@ -45,9 +45,9 @@ jobs:
       #
       # Read out of release.yml rather than listed again here. A second copy is a
       # second thing to remember: adding a platform there trips the label guards in
-      # install_test.go and selfupdate_test.go, which send you to platformAsset and
-      # install.sh, and nothing at all would mention this list, so the step meant to
-      # catch a break before the tag would silently stop covering the new platform.
+      # install_test.go and internal/selfupdate/audit_test.go, which send you to
+      # platformAsset and install.sh, and nothing would mention this list, so the step
+      # meant to catch a break before the tag would silently stop covering it.
       - name: Cross-compile every released platform
         run: |
           platforms=$(grep -oE '"[a-z0-9]+/[a-z0-9]+/[a-z0-9-]+"' .github/workflows/release.yml | tr -d '"')

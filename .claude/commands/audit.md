@@ -372,8 +372,9 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   `release.yml` publishes `mac-intel` / `mac-apple` / `linux-intel` / `linux-arm64` / `win`,
   `selfupdate.assetSuffix` decides which one this platform wants (`platformAsset` then
   finds it in the release), and `install.sh` derives them from `uname`. A label that names
-  an asset no release publishes fails only at update time. Both directions are bound in
-  `selfupdate_test.go`, against `release.yml` itself rather than a copied list. Tier 1.
+  an asset no release publishes fails only at update time. Both directions are bound for
+  the updater in `internal/selfupdate/audit_test.go` and for the installer in
+  `install_test.go`, against `release.yml` itself rather than a copied list. Tier 1.
 
 **Duplication and extraction**
 
@@ -401,10 +402,11 @@ Tests use the standard library `testing` package with table-driven cases, `httpt
 servers, and `t.TempDir()`; there is no testify and no mocking framework. The repo has a
 convention worth respecting: guard tests carry a comment naming the specific failure they
 prevent, and live in the package's `audit_test.go` unless they cannot — `install_test.go`
-guards `install.sh` and the workflows from a root package that already has one, and
-`internal/releaseyml`'s whole suite is a guard's parser.
-`TestEveryGuardTestSaysWhatItPrevents` enforces the comment across all three filenames, so
-a new guard file needs adding to `guardFiles` or it is unchecked. A guard test that fails
+guards `install.sh` and the workflows from a root package that already has one,
+`internal/releaseyml`'s whole suite is a guard's parser, and `internal/fixtures`'s
+`guard_test.go` is the PII guard and so cannot sit beside that package's own suite.
+`TestEveryGuardTestSaysWhatItPrevents` enforces the comment across those four filenames,
+so a new guard file needs adding to `guardFiles` or it is unchecked. A guard test that fails
 is a regression, not a test to update. The
 suite is expected to run under `-race` with nothing bound to a fixed port and nothing
 sleeping for a fixed duration — a test that takes a listener or an address should let the
