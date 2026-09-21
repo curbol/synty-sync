@@ -542,22 +542,27 @@ func TestInstallerChecksMacMagicOnADarwinHost(t *testing.T) {
 	}
 }
 
-// assertNoStagingLeft checks the install directory holds no staging directory. The
-// trap that removes it fires on every exit, so this belongs on the failure paths as
-// much as the success one — those are the ones that depend on the trap at all.
+// assertNoStagingLeft checks the install directory holds the binary and nothing else.
+// The trap that removes the staging directory fires on every exit, so this belongs on
+// the failure paths as much as the success one — those are the ones that depend on the
+// trap at all.
+//
+// The exact set, not a scan for the staging prefix: the prefix comes from a mktemp
+// template in install.sh, so a scan passes vacuously the moment that template changes.
+// Both callers require a binary at this path anyway, one freshly installed and one that
+// had to survive a refusal, so a missing directory is a failure rather than a pass.
 func assertNoStagingLeft(t *testing.T, binDir string) {
 	t.Helper()
 	entries, err := os.ReadDir(binDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
 		t.Fatal(err)
 	}
+	var names []string
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".synty-sync-install-") {
-			t.Errorf("a staging directory was left behind: %s", e.Name())
-		}
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "synty-sync" {
+		t.Errorf("the install dir holds %v, want only synty-sync; staging was left behind", names)
 	}
 }
 
@@ -775,14 +780,20 @@ func TestInstallerKeepsTheTokenOutOfArgvAndLeavesNoConfigBehind(t *testing.T) {
 	if _, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync")); err != nil {
 		t.Fatalf("nothing was installed: %v\n%s", err, out)
 	}
+	// TMPDIR is a directory only install.sh writes into, so the assertion is that it is
+	// empty rather than that nothing in it wears the auth file's prefix: that prefix is
+	// a mktemp template in install.sh, and a scan for it stops checking anything at all
+	// the moment the template changes.
 	entries, err := os.ReadDir(tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".synty-auth-") {
-			t.Errorf("a file holding the token was left behind: %s", e.Name())
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
 		}
+		t.Errorf("install.sh left %v in its TMPDIR; the token travels in one of those files", names)
 	}
 	// install.sh must not pass the token as an argument.
 	sh, err := os.ReadFile("install.sh")

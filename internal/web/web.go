@@ -90,9 +90,18 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
 	rows := make([]row, 0, len(packs))
 	known := make(map[string]bool, len(packs))
+	// Counted off the rows rather than off enabled, so the number in the header is the
+	// number of boxes actually ticked below it. An enabled set holding a slug that is
+	// not in packs — a caller measuring against what was enabled before the library was
+	// re-read, say — otherwise renders a count the page itself contradicts.
+	checked := 0
 	for _, p := range packs {
-		rows = append(rows, row{Slug: p.Slug, Name: p.DisplayName, IconURL: p.IconURL, Enabled: enabled[p.Slug]})
+		on := enabled[p.Slug]
+		rows = append(rows, row{Slug: p.Slug, Name: p.DisplayName, IconURL: p.IconURL, Enabled: on})
 		known[p.Slug] = true
+		if on {
+			checked++
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
@@ -117,13 +126,7 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
 			return
 		}
-		count := 0
-		for _, e := range enabled {
-			if e {
-				count++
-			}
-		}
-		_ = page.Execute(w, pageData{Rows: rows, Count: count, Token: token})
+		_ = page.Execute(w, pageData{Rows: rows, Count: checked, Token: token})
 	})
 	// POST only: this endpoint persists the whole pack selection, and any page the
 	// user visits while select is open can reach localhost with a GET.

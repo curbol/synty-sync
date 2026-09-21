@@ -277,3 +277,24 @@ func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T)
 		})
 	}
 }
+
+// The header count and the checkboxes describe the same thing, so they have to be read
+// off the same list. Counting the enabled map instead lets a slug that is not in packs
+// inflate the number over the boxes the page actually renders, and that count is the
+// only thing telling the user how much they are about to save.
+func TestPageCountsTheBoxesItRenders(t *testing.T) {
+	packs := []model.Pack{
+		{Slug: "pirate-pack", DisplayName: "Pirate Pack"},
+		{Slug: "dungeon-pack", DisplayName: "Dungeon Pack"},
+	}
+	// long-gone is enabled but no longer owned, so the page never offers it.
+	base, _ := serving(t, packs, map[string]bool{"pirate-pack": true, "long-gone": true})
+
+	body := get(t, base+"/")
+	if n := strings.Count(body, `type="checkbox"`); n != 2 {
+		t.Fatalf("page rendered %d checkboxes, want 2:\n%s", n, body)
+	}
+	if !strings.Contains(body, `<span id="n">1</span>`) {
+		t.Errorf("the header count is not the one box the page ticked:\n%s", body)
+	}
+}

@@ -84,7 +84,7 @@ func registerFlags(fs *flag.FlagSet, cmd string) *cliFlags {
 		fs.StringVar(&f.manifestFlag, "manifest", "", "project manifest path (default: nearest synty-sync.toml walking up from cwd)")
 	}
 	if needsConfigDir {
-		fs.StringVar(&f.cfgDir, "config", "", "user config dir holding config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)")
+		fs.StringVar(&f.cfgDir, "config", "", "user config dir holding config.toml (default: $SYNTY_CONFIG_DIR, $XDG_CONFIG_HOME/synty-sync, or ~/.config/synty-sync)")
 	}
 	if needsSession {
 		fs.StringVar(&f.cookies, "cookies", "", "cookie source: a cookies.txt or pasted-curl file (overrides config; default Firefox)")
@@ -575,7 +575,7 @@ flags (a subcommand accepts only the ones listed for it):
   select status sync list
     -manifest <path>    project manifest (default: nearest synty-sync.toml walking up from cwd)
   select status sync
-    -config <dir>       user config dir with config.toml (default: $XDG_CONFIG_HOME/synty-sync or ~/.config/synty-sync)
+    -config <dir>       user config dir with config.toml (default: $SYNTY_CONFIG_DIR, $XDG_CONFIG_HOME/synty-sync, or ~/.config/synty-sync)
     -customer <id>      Synty customer id (overrides SYNTY_CUSTOMER_ID / config)
     -cookies <src>      "firefox" | "zen" | a cookies.txt / pasted-curl file (default: firefox)
   status sync
