@@ -85,8 +85,14 @@ detect_platform() {
 latest_version() {
   ensure_auth_config
   local opts=(-fsSL); [[ -n "$AUTH_CONF" ]] && opts+=(--config "$AUTH_CONF")
+  # Whitespace goes first and the match is anchored to the key, for the same reason
+  # install_binary does it: the API's compact JSON puts the whole payload on one line,
+  # where a greedy match takes the last quoted run in the document — the release body,
+  # or the final asset's download URL — and hands back a version that is not one. A tag
+  # carries no spaces, so nothing this needs is lost with the whitespace.
   VERSION=$(curl "${opts[@]}" "${API_BASE}/repos/${REPO}/releases/latest" \
-    | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') || true
+    | tr -d '[:space:]' | grep -oE '"tag_name":"[^"]+"' | head -1 \
+    | sed -E 's/.*:"(.*)"$/\1/') || true
   VERSION=${VERSION#v}
   # GitHub answers 404, not 403, for a private repo the caller cannot see, so an empty
   # result means either no token or a token without access. Telling someone who already

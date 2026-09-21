@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -67,6 +68,26 @@ type assetShape struct {
 	// nameFirst puts "name" ahead of "url" in the object, which is the arrangement that
 	// makes a search for the nearest id above the name resolve the asset before it.
 	nameFirst bool
+	// compact puts the whole payload on one line. GitHub pretty-prints today and that
+	// is not a contract; both of the installer's text reads have to hold either way.
+	compact bool
+}
+
+// spaced renders a release payload the way the stub is configured to: as GitHub
+// pretty-prints it today, or on the one line its compact form uses. Errorf rather than
+// Fatalf because this runs on a server goroutine, where a Goexit would abort the
+// response mid-write instead of failing the test.
+func spaced(t *testing.T, payload string, compact bool) string {
+	t.Helper()
+	if !compact {
+		return payload
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(payload)); err != nil {
+		t.Errorf("the release fixture is not valid JSON: %v", err)
+		return payload
+	}
+	return buf.String()
 }
 
 // stubReleaseShaped is stubRelease serving an asset object arranged as shape says.
@@ -106,7 +127,11 @@ func stubReleaseLabeled(t *testing.T, asset []byte, label string, shape assetSha
 		}
 	}
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/latest", authed(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"tag_name": "v9.9.9"}`)
+		// The whole release object, the same one the tags route serves. A lone
+		// {"tag_name": ...} is a payload where the tag is also the last quoted run in
+		// the document, so a greedy read of it and a correct one agree — and the
+		// installer reads this by text, so the fixture has to be able to disagree.
+		fmt.Fprint(w, spaced(t, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", shape), shape.compact))
 	}))
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/tags/v9.9.9", authed(func(w http.ResponseWriter, r *http.Request) {
 		// GitHub's real asset object, keys in the order the API returns them and the
@@ -116,7 +141,7 @@ func stubReleaseLabeled(t *testing.T, asset []byte, label string, shape assetSha
 		// other and disagree with GitHub the moment a field is added ahead of "name".
 		// The asset URL is built from the request's own Host rather than a variable the
 		// test goroutine writes after the server is already serving.
-		fmt.Fprint(w, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", shape))
+		fmt.Fprint(w, spaced(t, githubReleaseJSON(r.Host, "synty-sync-9.9.9-"+label+".zip", shape), shape.compact))
 	}))
 	mux.HandleFunc("/repos/curbol/synty-sync/releases/assets/", authed(func(w http.ResponseWriter, r *http.Request) {
 		// The wanted asset is id 2; resolving to the decoy's id means the parse picked
@@ -883,5 +908,41 @@ func TestReleaseRunsTheSameGateAMergeDoes(t *testing.T) {
 	}
 	if strings.Contains(string(ci), "contents: write") {
 		t.Error("ci.yml grants contents: write; it only ever reads the repo")
+	}
+}
+
+// GitHub pretty-prints its API responses today, and that is not a contract. The
+// installer reads both the release tag and the asset URL out of the payload by text, so
+// a payload that arrives on one line has to read the same. A greedy match over an
+// unstripped document takes the last quoted run in the whole thing — the release body,
+// or the final asset's download URL — which is not a version, and the installer then
+// fails with "asset … not found in release v<that>", pointing at the release rather
+// than at its own parse.
+func TestInstallerReadsTheReleaseHoweverGitHubSpacesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		compact bool
+	}{
+		{"pretty-printed, as the API sends it today", false},
+		{"on one line", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(nativeMagic(t), []byte("a real enough binary")...)
+			home := t.TempDir()
+			srv := stubReleaseShaped(t, installerZip(t, want), assetShape{compact: tc.compact})
+
+			// No version argument, so this goes through latest_version rather than
+			// taking the tag from the command line.
+			out, _ := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
+				"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+
+			got, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync"))
+			if err != nil {
+				t.Fatalf("nothing was installed: %v\n%s", err, out)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("installed %d bytes, want the %d from the asset", len(got), len(want))
+			}
+		})
 	}
 }
