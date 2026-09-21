@@ -11,22 +11,45 @@ import (
 // cache dir: an OS cache cleaner that wiped it would cost a full re-download of
 // everything. Nothing but this pins the choice — a switch to os.UserCacheDir would
 // still land in a directory named synty-sync and satisfy a suffix check.
+//
+// Both branches, because most distributions leave XDG_DATA_HOME unset and so most
+// readers get the second one. Setting it and checking only that left the fallback free
+// to move to ~/.cache with the whole suite green.
 func TestDefaultLibraryLivesInDataNotCache(t *testing.T) {
-	data := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", data)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		// xdg is what XDG_DATA_HOME is set to, or "" to unset it and take the fallback.
+		xdg bool
+	}{
+		{"XDG_DATA_HOME is set", true},
+		{"XDG_DATA_HOME is unset, as it is on most machines", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			want := filepath.Join(home, ".local", "share", "synty-sync")
+			if tc.xdg {
+				data := t.TempDir()
+				t.Setenv("XDG_DATA_HOME", data)
+				want = filepath.Join(data, "synty-sync")
+			} else {
+				t.Setenv("XDG_DATA_HOME", "")
+			}
 
-	c, err := Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.LibraryPath != filepath.Join(data, "synty-sync") {
-		t.Errorf("library = %q, want it under XDG_DATA_HOME %q", c.LibraryPath, data)
-	}
-	for _, seg := range strings.Split(filepath.ToSlash(c.LibraryPath), "/") {
-		if seg == ".cache" || seg == "Caches" {
-			t.Errorf("the library landed in a cache directory: %q", c.LibraryPath)
-		}
+			c, err := Load(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.LibraryPath != want {
+				t.Errorf("library = %q, want %q", c.LibraryPath, want)
+			}
+			for _, seg := range strings.Split(filepath.ToSlash(c.LibraryPath), "/") {
+				if seg == ".cache" || seg == "Caches" {
+					t.Errorf("the library landed in a cache directory: %q", c.LibraryPath)
+				}
+			}
+		})
 	}
 }
 

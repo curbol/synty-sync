@@ -462,6 +462,44 @@ func TestReplaceBinaryNamesTheAsideCopyWhenRestoreFails(t *testing.T) {
 	}
 }
 
+// The branch that makes installTo's promise true — "a failure at any point leaves the
+// working binary exactly as it was". Once exe has been renamed aside there is no binary
+// at the install path, so a failed install has to put it back, and update is the one
+// command that cannot be re-run to fix itself. Every other failure test stops before
+// replaceBinary is reached (a failed download, a rejected asset) or forces the restore
+// itself to fail, so a regression that restored from the wrong path, or returned early
+// without restoring, deleted the user's only binary with the suite green.
+func TestReplaceBinaryPutsTheWorkingBinaryBackWhenTheInstallFails(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A source that does not exist fails both the rename and the copy. The directory
+	// stays writable, so the restore that follows can succeed.
+	err := replaceBinary(filepath.Join(dir, "not-there"), exe)
+	if err == nil {
+		t.Fatal("replaceBinary reported success with nothing to install")
+	}
+	got, readErr := os.ReadFile(exe)
+	if readErr != nil {
+		t.Fatalf("the working binary is gone after a failed install: %v", readErr)
+	}
+	if string(got) != "old" {
+		t.Errorf("the binary at the install path holds %q, want the original %q", got, "old")
+	}
+	info, statErr := os.Stat(exe)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("the restored binary is not executable (mode %v)", info.Mode())
+	}
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Errorf("the aside copy was left behind at %s", exe+".old")
+	}
+}
+
 // Run's own gates have no coverage otherwise, and they decide whether an update
 // happens at all. The dev-build refusal is what makes a release that failed to stamp
 // main.version unrecoverable in place, and the version comparison is what keeps
@@ -489,13 +527,22 @@ func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
 		current string
 		target  string
 		want    string
+		// wantPath is the release the request has to ask GitHub for. fetchRelease adds
+		// the v itself, and nothing read the URL, so routing a targeted update at
+		// /latest or dropping that prefix left the suite green while `update 1.2.3`
+		// came back 404 — reported as "a token without access to this private repo
+		// reads as 404", which sends the reader to audit a token over a URL.
+		wantPath string
 	}{
-		{"latest, tag carries the v", "v1.2.3", "1.2.3", "", "already on the latest version (1.2.3)"},
-		{"explicit target", "v1.2.3", "1.2.3", "1.2.3", "already on the requested version (1.2.3)"},
-		{"current carries the v too", "v1.2.3", "v1.2.3", "", "already on the latest version (1.2.3)"},
+		{"latest, tag carries the v", "v1.2.3", "1.2.3", "", "already on the latest version (1.2.3)", "/latest"},
+		{"explicit target", "v1.2.3", "1.2.3", "1.2.3", "already on the requested version (1.2.3)", "/tags/v1.2.3"},
+		{"explicit target carrying its own v", "v1.2.3", "1.2.3", "v1.2.3", "already on the requested version (1.2.3)", "/tags/v1.2.3"},
+		{"current carries the v too", "v1.2.3", "v1.2.3", "", "already on the latest version (1.2.3)", "/latest"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
 				fmt.Fprintf(w, `{"tag_name":%q,"assets":[]}`, tc.tag)
 			}))
 			defer srv.Close()
@@ -514,6 +561,9 @@ func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
 			}
 			if got := strings.TrimSpace(out.String()); got != tc.want {
 				t.Errorf("said %q, want %q", got, tc.want)
+			}
+			if gotPath != tc.wantPath {
+				t.Errorf("asked GitHub for %q, want %q", gotPath, tc.wantPath)
 			}
 		})
 	}

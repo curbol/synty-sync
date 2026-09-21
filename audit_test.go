@@ -16,10 +16,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1330,5 +1332,50 @@ func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
 					path, fset.Position(fn.Pos()).Line, fn.Name.Name)
 			}
 		}
+	}
+}
+
+// --only is the one flag whose whole job is to narrow what a run touches, and the
+// four strings around it at the call site are all paths. Dropping the forward, or
+// transposing it with one of them, left every test in the suite green while
+// `sync --only one-pack` fetched every enabled pack's item page, downloaded the lot,
+// and rebuilt the whole lockfile. registerFlags is proven to bind -only and syncer is
+// proven to honour OnlyGlob; nothing connected the two.
+func TestOnlyReachesTheRunFromTheFlag(t *testing.T) {
+	var mu sync.Mutex
+	fetched := map[string]bool{}
+	packs := []stubPack{
+		{orderItem: 3, name: "POLYGON - Pirate Pack", token: "POLYGON_Pirate", fileID: 11, version: "v1_0_0"},
+		{orderItem: 4, name: "POLYGON - Dungeon Pack", token: "POLYGON_Dungeon", fileID: 12, version: "v1_0_0"},
+	}
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/order_items/") {
+			mu.Lock()
+			fetched[path.Base(r.URL.Path)] = true
+			mu.Unlock()
+		}
+		libraryStore(packs, nil)(w, r)
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n\n"+
+		"[[pack]]\nslug = \"polygon-pirate-pack\"\nname = \"POLYGON - Pirate Pack\"\nenabled = true\n\n"+
+		"[[pack]]\nslug = \"polygon-dungeon-pack\"\nname = \"POLYGON - Dungeon Pack\"\nenabled = true\n")
+
+	var out bytes.Buffer
+	prev := stdout
+	stdout = &out
+	defer func() { stdout = prev }()
+
+	// status rather than sync: this is about which item pages the run reads, and a
+	// download would need signed URLs the stub does not serve.
+	if err := run(e.args("status", "-only", "polygon-pirate-pack")); err != nil {
+		t.Fatalf("status --only: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !fetched["3"] {
+		t.Errorf("the pack --only names was not read; fetched = %v", fetched)
+	}
+	if fetched["4"] {
+		t.Errorf("--only did not reach the run: the pack it excludes was read too (fetched = %v)", fetched)
 	}
 }

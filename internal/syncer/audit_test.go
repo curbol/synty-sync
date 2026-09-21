@@ -2171,3 +2171,48 @@ func TestNarrowingTheVariantFilterIsReportedNotSilentlyDropped(t *testing.T) {
 		}
 	}
 }
+
+// The second half of the expired-session invariant. The first — Enumerate returning
+// the sentinel — is covered by serving the logout shell as page 1, which kills the run
+// before fetchAll is ever reached, so the wrap that carries the sentinel out of an item
+// page fetch was never exercised. Turning that %w into a %v left the suite green while
+// explainSession stopped firing, and a reader whose session died between the library
+// page and the item pages got a bare "item page for …: expired or missing session" with
+// no hint and no cookie source named. The lockfile stays safe either way, since any
+// fetchAll error aborts before the save; what is lost is the diagnosis.
+func TestASessionThatExpiresDuringItemPagesKeepsTheSentinel(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	// The library page still lists packs, so the walk finishes; the session is gone by
+	// the time the item page behind it is asked for.
+	srv := newServer(t, serverOpts{itemHTML: func(string) (string, bool) {
+		return logoutShell, true
+	}})
+
+	seeded := lockfile.Lockfile{GeneratedAt: "before", Packs: map[string]lockfile.Pack{
+		"polygon-pirate-pack": {DisplayName: "POLYGON - Pirate Pack", Files: map[string]lockfile.File{
+			"POLYGON_Pirate|Godot_4_5_1": {
+				FileToken: "POLYGON_Pirate", Variant: "Godot_4_5_1", Version: "v1_0_0", FileID: 1,
+				Tracked: true, CachePath: "POLYGON_Pirate/1.zip", SHA256: "sha",
+			},
+		}},
+	}}
+	if err := lockfile.Save(lockPath, seeded); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
+	if !errors.Is(err, portal.ErrExpiredSession) {
+		t.Fatalf("err = %v, want it to carry portal.ErrExpiredSession so explainSession can add the hint", err)
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.GeneratedAt != "before" {
+		t.Errorf("an expired session rewrote the lockfile (generatedAt = %q)", after.GeneratedAt)
+	}
+}
