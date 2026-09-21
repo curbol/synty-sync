@@ -519,41 +519,76 @@ func cachedFiles(t *testing.T, libraryRoot string) []string {
 }
 
 // An expired session and a CDN refusal both answer a download href with a document,
-// often at 200. Those bytes must never occupy a cache path, and a login page's digest
-// must never be recorded as a pack's verified content.
+// often at 200, and the two guards that refuse it sit at different layers: portal
+// checks the Content-Type before a byte streams, and the syncer sniffs the delivered
+// bytes for the response that claims to be an archive and is not. Either has to hold
+// on its own, so each case here asserts the guard it is about actually fired. Those
+// bytes must never occupy a cache path and a login page's digest must never be
+// recorded as a pack's verified content, or every later Verify compares them against
+// themselves and finds them intact forever.
 func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
-	srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
-		return []byte("<!doctype html><title>Log in</title>"), "text/html; charset=utf-8", true
-	}})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		wantGuard   string
+	}{
+		{
+			name:        "a document that says it is one is refused on Content-Type",
+			contentType: "text/html; charset=utf-8",
+			wantGuard:   portal.ErrNotAPackage.Error(),
+		},
+		{
+			// A document wearing an archive's Content-Type, so portal.documentMediaType
+			// waves it through and only the body sniff can catch it. This is what a CDN
+			// error page served as application/octet-stream looks like.
+			name:        "a document wearing an archive's type is refused on its bytes",
+			contentType: "application/zip",
+			wantGuard:   ErrNotAPackageBody.Error(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
+				return []byte("<!doctype html><title>Log in</title>"), tc.contentType, true
+			}})
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
 
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatalf("a rejected body must fail its file, not the run: %v", err)
-	}
-	if len(rep.Downloaded) != 0 {
-		t.Errorf("reported %d downloads for a run that only ever received login pages", len(rep.Downloaded))
-	}
-	if len(rep.Failures) == 0 {
-		t.Fatal("no failures reported for a run where every body was a document")
-	}
-	if rep.ActionableFailures() == 0 {
-		t.Error("no actionable failures, so the command would exit 0 on a session that is not working")
-	}
-	if left := cachedFiles(t, lib); len(left) != 0 {
-		t.Errorf("a rejected body left files in the cache: %v", left)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for slug, p := range lf.Packs {
-		for key, f := range p.Files {
-			if f.Tracked || f.SHA256 != "" || f.CachePath != "" {
-				t.Errorf("%s/%s recorded a login page as content: %+v", slug, key, f)
+			rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+			if err != nil {
+				t.Fatalf("a rejected body must fail its file, not the run: %v", err)
 			}
-		}
+			if len(rep.Failures) == 0 {
+				t.Fatal("no failures reported for a run where every body was a document")
+			}
+			for _, f := range rep.Failures {
+				if !strings.Contains(f.Err, tc.wantGuard) {
+					t.Errorf("failure %q was not caught by the guard this case is about (%s)", f.Err, tc.wantGuard)
+				}
+			}
+			if rep.ActionableFailures() == 0 {
+				t.Error("no actionable failures, so the command would exit 0 on a session that is not working")
+			}
+			if len(rep.Downloaded) != 0 {
+				t.Errorf("reported %d downloads for a run that only ever received login pages", len(rep.Downloaded))
+			}
+			// Nothing committed and no temp left behind: Store stops at the temp file and
+			// the caller discards it, so a rejected body never occupies a real cache path
+			// even briefly.
+			if left := cachedFiles(t, lib); len(left) != 0 {
+				t.Errorf("a rejected body left files in the cache: %v", left)
+			}
+			lf, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for slug, p := range lf.Packs {
+				for key, f := range p.Files {
+					if f.Tracked || f.SHA256 != "" || f.CachePath != "" {
+						t.Errorf("%s/%s recorded a login page as content: %+v", slug, key, f)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -1380,44 +1415,57 @@ func TestAUnityPackageIsAdoptedWithoutAZipTrailer(t *testing.T) {
 	}
 }
 
-// Adoption is the one path into the lockfile that never consults classify, and the head
-// sniff cannot see this: a copy that stopped part way still begins with an archive's
-// magic. Taking one records its own short bytes as the file's truth, after which every
-// Verify compares those bytes against themselves and finds them intact forever.
-func TestTruncatedLayoutFileIsNotAdopted(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	dir := filepath.Join(lib, "POLYGON_Pirate")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cut := truncatedPackageBytes("POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	layout := filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip")
-	if err := os.WriteFile(layout, cut, 0o644); err != nil {
-		t.Fatal(err)
-	}
+// Adoption is the one path into the lockfile that never consults classify, and the
+// head sniff cannot see a truncation: a copy that stopped part way still begins with
+// an archive's magic. Taking one records its own short bytes as the file's truth,
+// after which every Verify compares those bytes against themselves and finds them
+// intact forever. The trailer check keys on the leading bytes rather than the name,
+// because the name comes from a signed URL, a Content-Disposition, or a hand, and the
+// cache deliberately matches a wanted file under any extension or none, so an
+// extension check would leave unexamined exactly the names the cache is most willing
+// to adopt.
+func TestATruncatedArchiveIsNeverAdopted(t *testing.T) {
+	// normalizeName drops extensions, so the adopt scan matches the bare name exactly
+	// as it matches the .zip.
+	for _, name := range []string{
+		"POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip",
+		"POLYGON_Pirate_Godot_4_5_1_v1_0_1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			dir := filepath.Join(lib, "POLYGON_Pirate")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cut := truncatedPackageBytes(name)
+			if err := os.WriteFile(filepath.Join(dir, name), cut, 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	for _, d := range rep.Adopted {
-		if d.FileID == 2282645 {
-			t.Error("a truncated zip was adopted as the pack's content")
-		}
-	}
-	if len(warnContaining(rep.Warnings, "end-of-central-directory")) == 0 {
-		t.Errorf("truncation not reported: %v", rep.Warnings)
-	}
-	// It is re-downloaded instead, so the short bytes never become the record.
-	lf, _ := lockfile.Load(lockPath)
-	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
-	if !f.Tracked {
-		t.Fatalf("file not recovered by download: %+v", f)
-	}
-	if f.SizeBytes == int64(len(cut)) {
-		t.Error("the lockfile recorded the truncated size as the file's truth")
+			rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
+			if err != nil {
+				t.Fatalf("sync: %v", err)
+			}
+			for _, d := range rep.Adopted {
+				if d.FileID == 2282645 {
+					t.Error("a truncated archive was adopted as the pack's content")
+				}
+			}
+			if len(warnContaining(rep.Warnings, "end-of-central-directory")) == 0 {
+				t.Errorf("truncation not reported: %v", rep.Warnings)
+			}
+			// It is re-downloaded instead, so the short bytes never become the record.
+			lf, _ := lockfile.Load(lockPath)
+			f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
+			if !f.Tracked {
+				t.Fatalf("file not recovered by download: %+v", f)
+			}
+			if f.SizeBytes == int64(len(cut)) {
+				t.Error("the lockfile recorded the truncated size as the file's truth")
+			}
+		})
 	}
 }
 
@@ -1521,115 +1569,102 @@ func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
 	}
 }
 
-// A file the store archives keeps its lockfile entry (the pack still owns it), so
-// it never reaches orphanedRecords, but the entry is rebuilt untracked and its cache
-// path and sha go with it. The bytes stay on disk, and nothing can take them back:
-// an archived file is never selected, so it is never an adopt candidate, and the
-// adopt scan keys on the version the page now reports. Saying nothing leaves the
-// user a shrinking mirror and no account of where it went.
-func TestArchivingAFileIsReportedNotSilentlyDropped(t *testing.T) {
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	version := "v1_0_0"
-	items := func(orderItem string) (string, bool) {
-		if orderItem != "1" {
-			return "", false
-		}
-		return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
-	}
-	srv := newServer(t, serverOpts{itemHTML: items})
-	opts := runOpts(lib, false)
-	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+// The store archiving a file and a variant_includes that stops matching one leave
+// exactly the same thing behind: the pack still lists it, so the entry survives and
+// orphanedRecords never sees it, while the entry is rebuilt untracked and its cache
+// path and sha go with it as the bytes stay on disk. Nothing can take them back
+// either, since a declined file is never an adopt candidate. Keying the report on the
+// Archived label alone left a reader who dropped a variant with gigabytes nothing
+// points at and no run that would ever mention them, and in that case the pack keeps
+// a variant that still matches, so not even the "nothing matches the filter" warning
+// fires. Both causes have to be said, and said once.
+func TestDecliningAFileIsReportedNotSilentlyDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		// build returns the item page order item 1 serves and the decline the second run
+		// applies: a re-label by the store, or a change to the reader's own filter.
+		build func() (func(string) (string, bool), func(*Options))
+	}{
+		{
+			name: "the store archives it",
+			key:  "POLYGON_Pirate|Godot_4_5_1",
+			build: func() (func(string) (string, bool), func(*Options)) {
+				version := "v1_0_0"
+				return func(orderItem string) (string, bool) {
+					if orderItem != "1" {
+						return "", false
+					}
+					return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
+				}, func(*Options) { version = "v1_0_0_ARCHIVED" }
+			},
+		},
+		{
+			name: "variant_includes stops matching it",
+			key:  "POLYGON_Pirate|SourceFiles",
+			build: func() (func(string) (string, bool), func(*Options)) {
+				return func(orderItem string) (string, bool) {
+						if orderItem != "1" {
+							return "", false
+						}
+						// The pack keeps a Godot file that still matches, so the pack itself has
+						// nothing to warn about.
+						return itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 4242) +
+							itemPage("POLYGON_Pirate", "SourceFiles", "v1_0_0", 4243), true
+					}, func(o *Options) {
+						o.Filter = func(v model.Variant) bool { return strings.HasPrefix(string(v), "Godot_") }
+					}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, decline := tc.build()
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			srv := newServer(t, serverOpts{itemHTML: items})
+			opts := runOpts(lib, false)
+			opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
 
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, opts); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	seeded, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := seeded.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
-	if !before.Tracked || before.CachePath == "" {
-		t.Fatalf("seed did not track the file: %+v", before)
-	}
-
-	version = "v1_0_0_ARCHIVED"
-	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
-	if err != nil {
-		t.Fatalf("second sync: %v", err)
-	}
-	var said bool
-	for _, w := range rep.Warnings {
-		if strings.Contains(w, before.CachePath) && strings.Contains(w, "unreferenced") {
-			said = true
-		}
-	}
-	if !said {
-		t.Errorf("the cached copy at %s lost its record with nothing said; warnings = %q", before.CachePath, rep.Warnings)
-	}
-	// Said once. The run after finds nothing tracked, so repeating it would nag about
-	// the same file for the life of the library.
-	again, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rep2, err := Run(context.Background(), newClient(srv.URL), again, lockPath, opts)
-	if err != nil {
-		t.Fatalf("third sync: %v", err)
-	}
-	for _, w := range rep2.Warnings {
-		if strings.Contains(w, "unreferenced") {
-			t.Errorf("the archived file was reported a second time: %q", w)
-		}
-	}
-}
-
-// The second of the two not-a-package guards. portal refuses a document by
-// Content-Type before a byte streams; this one catches the response that claims to
-// be an archive and is not, which is what a CDN error page served as
-// application/octet-stream looks like. Without it those bytes are hashed, committed,
-// and recorded as the pack's verified content, after which every Verify compares
-// them against themselves and finds them intact forever.
-func TestABodyThatIsNotAPackageIsRefusedEvenWhenTheTypeSaysItIs(t *testing.T) {
-	srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
-		// A document wearing an archive's Content-Type, so portal.documentMediaType
-		// waves it through and only the body sniff can catch it.
-		return []byte("<!doctype html><title>Log in</title>"), "application/zip", true
-	}})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatalf("a rejected body must fail its file, not the run: %v", err)
-	}
-	if len(rep.Failures) == 0 {
-		t.Fatal("no failures reported for a run where every body was a document")
-	}
-	for _, f := range rep.Failures {
-		if !strings.Contains(f.Err, ErrNotAPackageBody.Error()) {
-			t.Errorf("failure %q does not name the body sniff; the Content-Type guard cannot have caught this", f.Err)
-		}
-	}
-	if len(rep.Downloaded) != 0 {
-		t.Errorf("reported %d downloads for a run that only ever received login pages", len(rep.Downloaded))
-	}
-	// Nothing committed and no temp left behind: Store stops at the temp file and the
-	// caller discards it, so a rejected body never occupies a real cache path even
-	// briefly.
-	if left := cachedFiles(t, lib); len(left) != 0 {
-		t.Errorf("a rejected body left files in the cache: %v", left)
-	}
-	lf, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for slug, p := range lf.Packs {
-		for key, f := range p.Files {
-			if f.Tracked || f.SHA256 != "" || f.CachePath != "" {
-				t.Errorf("%s/%s recorded a login page as content: %+v", slug, key, f)
+			seeded := seedRun(t, srv, lockPath, opts)
+			before := seeded.Packs["polygon-pirate-pack"].Files[tc.key]
+			if !before.Tracked || before.CachePath == "" {
+				t.Fatalf("seed did not track the file the run is about to decline: %+v", before)
 			}
-		}
+
+			decline(&opts)
+			rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
+			if err != nil {
+				t.Fatalf("second sync: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(lib, before.CachePath)); err != nil {
+				t.Fatalf("the bytes this is about are not on disk: %v", err)
+			}
+			said := false
+			for _, w := range rep.Warnings {
+				if strings.Contains(w, before.CachePath) && strings.Contains(w, "unreferenced") {
+					said = true
+				}
+			}
+			if !said {
+				t.Errorf("the cached copy at %s lost its record with nothing said; warnings = %q", before.CachePath, rep.Warnings)
+			}
+
+			// Said once: the run after finds nothing tracked, so repeating it would nag
+			// about the same file for the life of the library.
+			again, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rep2, err := Run(context.Background(), newClient(srv.URL), again, lockPath, opts)
+			if err != nil {
+				t.Fatalf("third sync: %v", err)
+			}
+			for _, w := range rep2.Warnings {
+				if strings.Contains(w, "unreferenced") {
+					t.Errorf("the declined file was reported a second time: %q", w)
+				}
+			}
+		})
 	}
 }
 
@@ -1801,45 +1836,6 @@ func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
 		t.Errorf("one fileId filed under two variants: in-scope %q vs carried %q", in.Variant, out.Variant)
 	}
 	assertOwnersAgree(t, in, out)
-}
-
-// The trailer check keys on the leading bytes, not the filename. The name comes from
-// a signed URL, a Content-Disposition, or a file someone placed by hand, and the
-// cache deliberately matches a wanted file under any extension or none, so an
-// extension check leaves unexamined exactly the names the cache is most willing to
-// adopt, and a truncated archive wearing one of them is hashed as the file's truth.
-func TestTruncatedArchiveIsRefusedWithoutAZipExtension(t *testing.T) {
-	srv := newServer(t, serverOpts{})
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	dir := filepath.Join(lib, "POLYGON_Pirate")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Same truncated archive, no extension. normalizeName drops extensions, so the
-	// adopt scan matches this exactly as it would the .zip.
-	cut := truncatedPackageBytes("POLYGON_Pirate_Godot_4_5_1_v1_0_1")
-	if err := os.WriteFile(filepath.Join(dir, "POLYGON_Pirate_Godot_4_5_1_v1_0_1"), cut, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	for _, d := range rep.Adopted {
-		if d.FileID == 2282645 {
-			t.Error("a truncated archive with no .zip on it was adopted as the pack's content")
-		}
-	}
-	if len(warnContaining(rep.Warnings, "end-of-central-directory")) == 0 {
-		t.Errorf("truncation not reported: %v", rep.Warnings)
-	}
-	lf, _ := lockfile.Load(lockPath)
-	f := lf.Packs["polygon-pirate-pack"].Files["POLYGON_Pirate|Godot_4_5_1"]
-	if f.SizeBytes == int64(len(cut)) {
-		t.Error("the lockfile recorded the truncated size as the file's truth")
-	}
 }
 
 // Selection is opt-in, and the allowlist has to narrow what the run *fetches*, not
@@ -2104,71 +2100,6 @@ func assertOwnersAgree(t *testing.T, in, out lockfile.File) {
 	t.Helper()
 	if !reflect.DeepEqual(in, out) {
 		t.Errorf("owning packs diverged over one fileId:\n  in-scope %+v\n  other    %+v", in, out)
-	}
-}
-
-// The other half of declinedRecords, and the one it was missing. Narrowing
-// variant_includes leaves exactly what archiving leaves: the pack still lists the file,
-// so its entry survives and orphanedRecords never sees it, but the entry is rebuilt
-// untracked and its cache path and sha go with it while the bytes stay on disk. Keying
-// the report on the Archived label alone meant a reader who dropped a variant was left
-// with gigabytes nothing points at and no run that would ever mention them — and the
-// pack keeps a variant that still matches, so not even the "nothing matches the filter"
-// warning fires.
-func TestNarrowingTheVariantFilterIsReportedNotSilentlyDropped(t *testing.T) {
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	srv := newServer(t, serverOpts{itemHTML: func(orderItem string) (string, bool) {
-		if orderItem != "1" {
-			return "", false
-		}
-		return itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 4242) +
-			itemPage("POLYGON_Pirate", "SourceFiles", "v1_0_0", 4243), true
-	}})
-	opts := runOpts(lib, false)
-	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-
-	seeded := seedRun(t, srv, lockPath, opts)
-	const key = "POLYGON_Pirate|SourceFiles"
-	before := seeded.Packs["polygon-pirate-pack"].Files[key]
-	if !before.Tracked || before.CachePath == "" {
-		t.Fatalf("seed did not track the file the run is about to decline: %+v", before)
-	}
-
-	// SourceFiles leaves variant_includes; the pack's Godot file still matches, so the
-	// pack itself has nothing to warn about.
-	opts.Filter = func(v model.Variant) bool { return strings.HasPrefix(string(v), "Godot_") }
-	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
-	if err != nil {
-		t.Fatalf("second sync: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(lib, before.CachePath)); err != nil {
-		t.Fatalf("the bytes this is about are not on disk: %v", err)
-	}
-	var said bool
-	for _, w := range rep.Warnings {
-		if strings.Contains(w, before.CachePath) && strings.Contains(w, "unreferenced") {
-			said = true
-		}
-	}
-	if !said {
-		t.Errorf("the cached copy at %s lost its record with nothing said; warnings = %q", before.CachePath, rep.Warnings)
-	}
-
-	// Said once: the run after finds nothing tracked, so repeating it would nag about
-	// the same file for the life of the library.
-	again, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rep2, err := Run(context.Background(), newClient(srv.URL), again, lockPath, opts)
-	if err != nil {
-		t.Fatalf("third sync: %v", err)
-	}
-	for _, w := range rep2.Warnings {
-		if strings.Contains(w, "unreferenced") {
-			t.Errorf("the declined file was reported a second time: %q", w)
-		}
 	}
 }
 
