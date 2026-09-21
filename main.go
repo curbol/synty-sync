@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 
@@ -106,7 +105,7 @@ func registerFlags(fs *flag.FlagSet, cmd string) *cliFlags {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		usage()
+		usage(os.Stderr)
 		return fmt.Errorf("a subcommand is required")
 	}
 	cmd, rest := args[0], args[1:]
@@ -114,16 +113,16 @@ func run(args []string) error {
 	switch cmd {
 	case "status", "sync", "list", "select", "update", "version", "-h", "--help", "help", "--version", "-v":
 	default:
-		usage()
+		usage(os.Stderr)
 		return fmt.Errorf("unknown subcommand %q", cmd)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	// Silence the flag package's own dump: help prints usage() below, and a bad flag
+	// Silence the flag package's own dump: help prints usage below, and a bad flag
 	// comes back as an error that main reports once.
 	fs.SetOutput(io.Discard)
 	f := registerFlags(fs, cmd)
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
-		usage()
+		usage(stdout)
 		return nil
 	}
 	if cmd == "version" || cmd == "--version" || cmd == "-v" {
@@ -132,7 +131,7 @@ func run(args []string) error {
 	}
 	if err := fs.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			usage()
+			usage(stdout)
 			return nil
 		}
 		return err
@@ -341,6 +340,17 @@ func resolveManifestPath(flag, cmd string) (string, error) {
 				return "", fmt.Errorf("no manifest at %s: %w", p, err)
 			}
 		}
+		// select creates the manifest, so it does not need one to exist — but it does
+		// need somewhere to write it, and it only finds out after enumerating the
+		// library, serving the page and taking the user's whole selection. Saying so
+		// here costs a stat and saves them ticking every box again.
+		if cmd == "select" {
+			if dir := filepath.Dir(p); dir != "" {
+				if _, err := os.Stat(dir); err != nil {
+					return "", fmt.Errorf("no directory for --manifest %s: %w", p, err)
+				}
+			}
+		}
 		return p, nil
 	}
 	wd, err := os.Getwd()
@@ -380,16 +390,12 @@ func listenLocal(bind string) (net.Listener, error) {
 }
 
 // loopbackHost reports whether the host half of a bind address names this machine. An
-// empty host is the wildcard form (":8787"), which binds every interface.
+// empty host is the wildcard form (":8787"), which binds every interface, and is the
+// only part of this question that belongs to a bind string rather than to a Host
+// header — so the rest goes through web, which owns the handler-side half and has to
+// give the same answer.
 func loopbackHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return host != "" && web.LoopbackHost(host)
 }
 
 // sortedKeys is a map's keys in a fixed order, so what the terminal prints does not
@@ -560,8 +566,11 @@ func list(w io.Writer, lockPath string) error {
 	return nil
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `synty-sync - mirror your Synty store library into a local cache
+// usage writes the help text to w. Help someone asked for is output like the run
+// summary and the lockfile listing, and goes to stdout so it can be piped; the three
+// sites that print it alongside an error keep stderr, where the error is.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `synty-sync - mirror your Synty store library into a local cache
 
 usage:
   synty-sync select [flags]   pick which packs to mirror (opens a local web page)

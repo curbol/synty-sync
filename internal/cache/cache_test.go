@@ -226,7 +226,7 @@ func TestSweepTempsRemovesAbandonedDownloadsButSparesFreshOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, bytes := SweepTemps(lib, time.Now().Add(-time.Hour))
+	count, bytes := SweepTemps(lib, time.Hour)
 
 	if count != 1 || bytes != int64(len("abandoned")) {
 		t.Errorf("SweepTemps = %d files, %d bytes; want 1, %d", count, bytes, len("abandoned"))

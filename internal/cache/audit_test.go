@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // storeCommitted writes body into the layout and commits it, which seven tests need
@@ -220,7 +219,7 @@ func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
 // that does not exist yet. WalkDir hands the callback a nil DirEntry there, and only
 // the short-circuit on err keeps d.IsDir() from being reached.
 func TestSweepTempsOnAMissingRoot(t *testing.T) {
-	count, bytes := SweepTemps(filepath.Join(t.TempDir(), "not-created-yet"), time.Now())
+	count, bytes := SweepTemps(filepath.Join(t.TempDir(), "not-created-yet"), 0)
 	if count != 0 || bytes != 0 {
 		t.Errorf("SweepTemps = %d files, %d bytes on a missing root; want nothing", count, bytes)
 	}

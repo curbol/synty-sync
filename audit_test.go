@@ -883,18 +883,7 @@ func TestEachSubcommandTakesOnlyItsOwnFlags(t *testing.T) {
 	// And the help text says the same thing, so the two cannot drift: a flag listed
 	// for a subcommand it cannot take sends the user to a parse error.
 	var help strings.Builder
-	prev := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	usage()
-	w.Close()
-	os.Stderr = prev
-	if _, err := io.Copy(&help, r); err != nil {
-		t.Fatal(err)
-	}
+	usage(&help)
 	for flagName, allowed := range matrix {
 		line := findUsageLine(help.String(), "-"+flagName+" ")
 		if line == "" {
@@ -1286,12 +1275,20 @@ func TestSyncNamesAManifestThatIsNotThere(t *testing.T) {
 	}
 }
 
-// Every audit_test.go in this repo holds guard tests, and the convention is that each
-// one carries a comment naming the specific failure it prevents. That comment is what
-// makes a red guard read as a regression rather than as a test to update, which is the
-// whole reason these files are separate from the ordinary suites. Nine of them had
-// drifted out of it — seven with no comment at all, two with their paragraphs stacked
-// above a neighbour — and nothing could see that, so check it rather than trust it.
+// guardFiles are the test files that hold guard tests. Every audit_test.go by
+// convention, plus the two that cannot be one: install_test.go guards install.sh and
+// the workflows from the root package, which already has an audit_test.go, and
+// releaseyml_test.go is the whole of a package that exists only to be a guard's parser.
+// Matching on the filename alone left both outside the check that the convention is
+// what makes these files worth having.
+var guardFiles = []string{"audit_test.go", "install_test.go", "releaseyml_test.go"}
+
+// The convention is that each guard test carries a comment naming the specific failure
+// it prevents. That comment is what makes a red guard read as a regression rather than
+// as a test to update, which is the whole reason these files are separate from the
+// ordinary suites. Nine of them had drifted out of it — seven with no comment at all,
+// two with their paragraphs stacked above a neighbour — and nothing could see that, so
+// check it rather than trust it.
 func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
 	var files []string
 	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
@@ -1301,7 +1298,7 @@ func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
 		if d.IsDir() && (d.Name() == ".git" || d.Name() == "testdata") {
 			return fs.SkipDir
 		}
-		if !d.IsDir() && d.Name() == "audit_test.go" {
+		if !d.IsDir() && slices.Contains(guardFiles, d.Name()) {
 			files = append(files, p)
 		}
 		return nil
@@ -1311,8 +1308,8 @@ func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
 	}
 	// A wrong glob that matched nothing would pass this vacuously, and the count only
 	// ever grows.
-	if len(files) < 9 {
-		t.Fatalf("found %d audit_test.go files (%v); the walk no longer reaches them", len(files), files)
+	if len(files) < 11 {
+		t.Fatalf("found %d guard files (%v); the walk no longer reaches them", len(files), files)
 	}
 
 	for _, path := range files {
@@ -1377,5 +1374,65 @@ func TestOnlyReachesTheRunFromTheFlag(t *testing.T) {
 	}
 	if fetched["4"] {
 		t.Errorf("--only did not reach the run: the pack it excludes was read too (fetched = %v)", fetched)
+	}
+}
+
+// select is allowed a manifest that does not exist yet, since it creates one, but it
+// only reaches the write after enumerating the library, serving the page and taking the
+// whole selection. A directory that is not there fails inside atomicfile, naming a temp
+// file that never existed, and the user has to tick every box again.
+func TestSelectChecksItCanWriteTheManifestBeforeServingThePage(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "synty-sync.toml")
+	absent := filepath.Join(dir, "newgame", "synty-sync.toml")
+
+	// A manifest that is not there yet is still fine, which is the half that lets
+	// select start a new project at all.
+	if got, err := resolveManifestPath(present, "select"); err != nil || got != present {
+		t.Errorf("resolveManifestPath(%q, select) = %q, %v; want the path and no error", present, got, err)
+	}
+	if _, err := resolveManifestPath(absent, "select"); err == nil {
+		t.Errorf("select accepted %q, a path it cannot write", absent)
+	}
+
+	// And the refusal lands before the store is reached, rather than after the page has
+	// taken a selection there is nowhere to put.
+	reached := false
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		fmt.Fprint(w, `<html><body><input class="sky-pilot-search-input"></body></html>`)
+	}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	err := run(e.selectArgs("-manifest", absent))
+	if err == nil {
+		t.Fatal("select accepted a manifest path it cannot write")
+	}
+	if !strings.Contains(err.Error(), absent) {
+		t.Errorf("err = %v, want it to name the path the user typed", err)
+	}
+	if reached {
+		t.Error("select went to the store before checking it could write the result")
+	}
+}
+
+// Help someone asked for is output, not a diagnostic: `synty-sync --help > help.txt`
+// produced an empty file while the command exited 0. It also forced the flag-matrix
+// test to swap os.Stderr for a pipe, which was the only process-global mutation in the
+// suite and the reason those cases could never run in parallel. The three sites that
+// print usage alongside an error keep stderr, where the error is.
+func TestExplicitHelpGoesToStdout(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var out bytes.Buffer
+		prev := stdout
+		stdout = &out
+		err := run(args)
+		stdout = prev
+		if err != nil {
+			t.Errorf("%v: %v", args, err)
+		}
+		if !strings.Contains(out.String(), "usage:") {
+			t.Errorf("%v printed no help to stdout: %q", args, out.String())
+		}
 	}
 }

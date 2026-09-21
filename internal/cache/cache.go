@@ -163,17 +163,23 @@ func Store(libraryRoot, fileToken, filename string, r io.Reader) (*Pending, erro
 	}, nil
 }
 
-// SweepTemps removes abandoned download temps anywhere in the tree, returning how
-// many and how many bytes. It walks rather than scanning the root, because temps live
-// beside their destinations, and it spares anything newer than the cutoff so a
-// concurrent run's in-flight transfer survives.
+// SweepTemps removes download temps that have gone untouched for at least minAge,
+// anywhere in the tree, returning how many and how many bytes. It walks rather than
+// scanning the root, because temps live beside their destinations, and an in-flight
+// transfer touches its temp on every write, so any age long enough to clear a stall
+// spares a concurrent run's.
+//
+// An age rather than a cutoff instant: the caller's only sensible cutoff is
+// now-minus-something, and a sign the wrong way round there compiles, runs, reports a
+// large sweep, and deletes every in-flight transfer on the machine.
 //
 // Nothing here fails: a subtree that cannot be read, or a root that does not exist yet
 // on a first run, is skipped. One unreadable directory must not stop a mirror over a
 // housekeeping pass.
-func SweepTemps(libraryRoot string, olderThan time.Time) (int, int64) {
+func SweepTemps(libraryRoot string, minAge time.Duration) (int, int64) {
 	var count int
 	var bytes int64
+	olderThan := time.Now().Add(-minAge)
 	filepath.WalkDir(libraryRoot, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), tempPrefix) {
 			return nil
@@ -205,21 +211,14 @@ func Verify(libraryRoot, relPath string, wantSize int64) bool {
 
 // VerifyDeep re-hashes the file. It is opt-in because a library runs to tens of
 // gigabytes, and it is the only check that sees a mid-file corruption.
+//
+// Through Hash rather than hashing again here: the digest this compares against is one
+// Hash produced when the file was adopted, and it holds for the life of the file, so
+// the two have to agree forever about what they read and how. Two copies of that only
+// agree until one of them changes.
 func VerifyDeep(libraryRoot, relPath, sha string) bool {
-	full, err := resolve(libraryRoot, relPath)
-	if err != nil {
-		return false
-	}
-	f, err := os.Open(full)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return false
-	}
-	return hex.EncodeToString(h.Sum(nil)) == sha
+	got, _, err := Hash(libraryRoot, relPath)
+	return err == nil && got == sha
 }
 
 // Tail returns up to the last n bytes of a cached file, for a caller that has to look

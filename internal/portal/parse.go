@@ -175,8 +175,10 @@ func ParseItemPage(html []byte, packSlug string) (files []model.FileEntry, unkno
 			Version:        version,
 			FileID:         fileID,
 			AdvertisedSize: size,
-			DownloadHref:   html2href(href),
-			Archived:       strings.Contains(strings.ToUpper(version), "ARCHIVED"),
+			// As goquery handed it over: it decodes HTML entities in attribute values,
+			// so "&amp;" has already arrived as "&".
+			DownloadHref: href,
+			Archived:     strings.Contains(strings.ToUpper(version), "ARCHIVED"),
 		})
 		return true
 	})
@@ -240,10 +242,6 @@ func parseSize(s string) (int64, bool) {
 }
 
 func collapse(s string) string { return strings.TrimSpace(wsRe.ReplaceAllString(s, " ")) }
-
-// html2href returns the href as given; goquery already decodes HTML entities in
-// attribute values, so "&amp;" arrives as "&".
-func html2href(h string) string { return h }
 
 // normalizeURL upgrades a protocol-relative URL ("//cdn...") to https.
 func normalizeURL(u string) string {

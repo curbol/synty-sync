@@ -13,6 +13,10 @@ func workflow(t *testing.T) string {
 	return filepath.Join("..", "..", ".github", "workflows", "release.yml")
 }
 
+// The parser is read against the committed workflow rather than a fixture, because a
+// fixture is a copy of the list the installer and the updater exist to agree with. A
+// release.yml whose shape moved would parse a fixture perfectly and hand both guards a
+// list that no longer describes what gets published.
 func TestPlatformsReadsTheRealWorkflow(t *testing.T) {
 	got, err := Platforms(workflow(t))
 	if err != nil {
@@ -57,6 +61,9 @@ func TestAnUnreadableShapeIsAnErrorNotAnEmptyList(t *testing.T) {
 	}
 }
 
+// The same reason as the shape guards, one step earlier: a workflow that is not there
+// at all — moved, renamed, or read from the wrong relative path — must fail rather than
+// parse as no platforms, which every guard built on this would pass vacuously.
 func TestAMissingWorkflowIsAnError(t *testing.T) {
 	if _, err := Platforms(filepath.Join(t.TempDir(), "absent.yml")); err == nil {
 		t.Fatal("a missing workflow parsed without error")

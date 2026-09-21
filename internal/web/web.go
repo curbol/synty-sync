@@ -213,19 +213,31 @@ func localRequest(r *http.Request, bound net.Addr) bool {
 	if err != nil || port != boundPort {
 		return false
 	}
-	if strings.EqualFold(host, "localhost") {
+	// A wildcard bind has no single address to match, so only loopback is accepted.
+	if LoopbackHost(host) {
 		return true
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return false
 	}
-	// A wildcard bind has no single address to match, so only loopback is accepted.
-	if ip.IsLoopback() {
-		return true
-	}
 	boundIP := net.ParseIP(boundHost)
 	return boundIP != nil && !boundIP.IsUnspecified() && boundIP.Equal(ip)
+}
+
+// LoopbackHost reports whether a host names this machine's loopback: the literal
+// "localhost" in any casing, or an address that is one.
+//
+// Exported because main asks the same question of the --addr it is about to bind, and
+// the two answers have to match: a name this accepts on the way in but main refuses on
+// the way out cannot be reached at all, and one main binds but this refuses serves a
+// page that answers every request with a 421.
+func LoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // shutdownGrace bounds how long a shutdown waits for the response already being

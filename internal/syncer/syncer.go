@@ -315,7 +315,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// Housekeeping first, so an interrupted earlier run does not keep its bytes for
 	// the life of the library. A dry run touches nothing.
 	if !opts.DryRun {
-		report.Swept, report.SweptBytes = cache.SweepTemps(opts.LibraryRoot, time.Now().Add(-abandonedTempAge))
+		report.Swept, report.SweptBytes = cache.SweepTemps(opts.LibraryRoot, abandonedTempAge)
 		if report.Swept > 0 {
 			progress(fmt.Sprintf("swept %d abandoned download temp(s)", report.Swept))
 		}
