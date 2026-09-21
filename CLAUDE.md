@@ -114,12 +114,16 @@ Layered `internal/` packages, each with a package doc comment stating its contra
 
 - **Files dedupe by `fileId`.** A file bundled under several packs downloads once and every
   owning pack's lockfile entry shares the same `cachePath`. Preserve this in `syncer` and
-  `cache`. Every verdict reaches the owners the run did not fetch: `resolvedByID` for bytes
-  it got, `unresolvedByID` for a file it went looking for and did not find, and
-  `deselectedByID` for one it read and declined (filtered out, or archived by the store).
-  A verdict with no channel leaves one `fileId` tracked under one owner and untracked
-  under another, and the declined case has no failure behind it, so nothing else reports
-  it.
+  `cache`. The `verdicts` struct is the whole of it, and every entry a run writes goes
+  through one of its channels: `live` for what the store currently calls the file (token,
+  variant, version, advertised size, read once for every owner), `resolved` for bytes the
+  run has, `unresolved` for a file it went looking for and did not find, and `deselected`
+  for one it read and declined, against why. A verdict with no channel leaves one `fileId`
+  tracked under one owner and untracked under another, and the declined case has no failure
+  behind it, so nothing else reports it. Identity taken off the row in front of a rebuild
+  rather than out of `live` is the same bug in a second shape: the store labels a bundled
+  file per order item. `readRows` is the only constructor that fills `live`, so a hand-built
+  `verdicts` cannot leave it nil.
 - **Selection is opt-in, and never silently wiped.** Newly-owned packs are disabled by
   default in `manifest`. An enumeration that returns no packs while a committed file
   holds some is refused rather than written — `syncer.ErrEmptyLibrary` for the lockfile,

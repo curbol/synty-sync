@@ -58,8 +58,9 @@ tests build throwaway Gecko `cookies.sqlite` files, selfupdate tests serve fake 
 assets, and `install_test.go` runs `install.sh` end to end against a stub GitHub
 (`SYNTY_INSTALL_API` / `SYNTY_INSTALL_DOWNLOAD`) with a stubbed `uname` ahead of it on
 `PATH`. Nothing needs network, a real session, or a customer id, so a green run means
-something. Every `internal/` package has a test file; `cmd/scrubfixtures` has none, and
-is covered only through `internal/fixtures`.
+something. Every `internal/` package has a test file, and so does `cmd/scrubfixtures`,
+whose own test covers the two things `internal/fixtures` cannot see from inside the
+package: the filename scrub and the `.html` filter.
 
 ## Step 3: Dispatch review sub-agents
 
@@ -81,11 +82,12 @@ agents run in parallel:
   incomplete live data, a version attached to another version's sha, a failure that
   costs the run instead of the file, and a race in the fan-out.
 - **Cache & session** — `internal/cache/`, `internal/session/`, `internal/config/`,
-  `internal/fixtures/`, `cmd/scrubfixtures/`. Everything touching the local filesystem and
-  the user's identity: two-phase stores, path confinement, flat-file migration, temp
-  sweeping, XDG resolution, and cookie extraction from a live browser DB. What goes wrong
-  here is an unverified file adopted as verified, a path from the committed lockfile
-  escaping the library root, and a stale cookie set read from a checkpointed DB.
+  `internal/atomicfile/`, `internal/fixtures/`, `cmd/scrubfixtures/`. Everything touching
+  the local filesystem and the user's identity: two-phase stores, path confinement,
+  flat-file migration, temp sweeping, the one way a committed file is replaced, XDG
+  resolution, and cookie extraction from a live browser DB. What goes wrong here is an
+  unverified file adopted as verified, a path from the committed lockfile escaping the
+  library root, and a stale cookie set read from a checkpointed DB.
 - **CLI & selection page** — `main.go`, `main_test.go`, `audit_test.go`, `internal/web/`,
   `config.example.toml`, `synty-sync.example.toml`. Flag parsing and subcommand dispatch,
   the config → session → client wiring, report printing, the exit status, and the local
@@ -93,12 +95,12 @@ agents run in parallel:
   after it, an error losing the sentinel a caller checks, a failure class that stops
   moving the exit status, and a submission that rewrites the committed allowlist with
   less than the user chose.
-- **Distribution** — `internal/selfupdate/`, `install.sh`, `install_test.go`,
-  `.github/workflows/ci.yml`, `.github/workflows/release.yml`. How the binary is built,
-  released, installed, and replaced in place. What goes wrong here is a non-executable
-  asset swapped over a working binary, a platform label that names an asset no release
-  publishes, a token reaching an error message, and a release path that skips the checks
-  a merge would have run.
+- **Distribution** — `internal/selfupdate/`, `internal/releaseyml/`, `install.sh`,
+  `install_test.go`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`. How the
+  binary is built, released, installed, and replaced in place. What goes wrong here is a
+  non-executable asset swapped over a working binary, a platform label that names an asset
+  no release publishes, a token reaching an error message, and a release path that skips
+  the checks a merge would have run.
 
 For each sub-agent, provide:
 - The full list of files in its area, not a diff.
@@ -150,10 +152,15 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   owning packs record diverging values for it. The subtle shape is a carried entry in
   `buildLockfile` keeping its old `version` while being repointed at newly downloaded bytes,
   which attaches one version's number to another version's sha. Check
-  `syncer.buildLockfile`'s `resolvedByID` / `unresolvedByID` handling against
+  `syncer.buildLockfile`'s handling of the `verdicts` channels against
   `TestChangedBundledFileKeepsOwningPacksInAgreement`,
-  `TestFailedUpdateKeepsOwningPacksInAgreement`, and
-  `TestFailedCacheMissingKeepsOwningPacksInAgreement`.
+  `TestFailedUpdateKeepsOwningPacksInAgreement`,
+  `TestFailedCacheMissingKeepsOwningPacksInAgreement`, and
+  `TestDivergentLabelsKeepInScopeOwnersInAgreementWhenNothingResolves`. The second shape is
+  identity taken off the row in front of a rebuild rather than out of `verdicts.live`: the
+  store labels a bundled file per order item, so two in-scope owners reading their own rows
+  commit two versions, two variants or two advertised sizes for one `fileId` at one sha.
+  `applyResolved` hides it, so it only surfaces on the verdicts that resolve nothing.
 - **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
   `ErrExpiredSession` when a zero-anchor page lacks the logged-in sentinel, on **every**
   page of the walk, not just page 1. `syncer.ErrEmptyLibrary` is the second half: an
@@ -182,10 +189,14 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   rather than dropped, so the file stays a complete record of what is owned. A pack the
   library no longer lists keeps its record and is reported (`Report.Removed`); a file that
   leaves every pack takes its record with it and is reported by `orphanedRecords`, since the
-  bytes stay in the cache with nothing pointing at them. Violation: a `buildLockfile` path
-  that starts from an empty `Packs` map and fills only in-scope packs, a cancelled/aborted
-  fetch whose zero-valued slots reach `buildLockfile` as packs that own nothing, or a record
-  that disappears between two runs with nothing said about it.
+  bytes stay in the cache with nothing pointing at them. A file the pack still lists but the
+  run declined keeps its entry, so `orphanedRecords` never sees it, and `declinedRecords`
+  names it instead — for both causes, the store archiving it and a `variant_includes` that
+  no longer matches, since each leaves the same unreferenced bytes and only the sentence
+  differs. Violation: a `buildLockfile` path that starts from an empty `Packs` map and fills
+  only in-scope packs, a cancelled/aborted fetch whose zero-valued slots reach
+  `buildLockfile` as packs that own nothing, a record that disappears between two runs with
+  nothing said about it, or a report keyed on one cause of a verdict that has two.
 - **Bytes reach disk only through temp file → hash → atomic rename, and paths from the
   lockfile are confined to the library root.** Applies to `cache.Store`, `lockfile.Save`,
   `manifest.Save`, and `selfupdate.replaceBinary`. The lockfile is committed and travels
@@ -215,11 +226,11 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   `Failure.Gone` (404/410, which no re-run clears), and `main.runSyncOrStatus` builds the
   exit status from it. A file that already had a verified copy keeps its record when the
   *update* fails, at the version those bytes actually are; every other class reaches the
-  failure path with no good prior copy and must say so through `unresolvedByID`, so every
-  owning pack agrees. Violation: a download error returned from `Run` instead of recorded,
-  a `Gone` failure counted into the exit status, a failed `Changed` update rebuilt from the
-  live page (dropping the path and sha while the bytes stay on disk), or an in-scope owner
-  marked untracked while an out-of-scope one keeps the record.
+  failure path with no good prior copy and must say so through `verdicts.unresolved`, so
+  every owning pack agrees. Violation: a download error returned from `Run` instead of
+  recorded, a `Gone` failure counted into the exit status, a failed `Changed` update
+  rebuilt from the live page (dropping the path and sha while the bytes stay on disk), or
+  an in-scope owner marked untracked while an out-of-scope one keeps the record.
 - **No account identity in the repo, in output, or in errors.** The customer id, account
   email, session cookies, and any GitHub token live in the user config dir and must never be
   hard-coded, committed, logged, or embedded in an error message. Portal URLs carry the
@@ -232,7 +243,7 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 
 **Correctness**
 
-- `classify` (`internal/syncer/syncer.go:57`) is pure and drives download-vs-skip. Verify
+- `classify` (`internal/syncer/syncer.go`) is pure and drives download-vs-skip. Verify
   each branch against its condition: `!hasPrior` → `New`; `!prior.Tracked` → `DownloadNow`;
   version differs → `Changed`; empty `CachePath` or a failed `cacheOK` → `CacheMissing`;
   else `Unchanged`. A wrong branch means a missed download or a needless multi-GB refetch.
@@ -292,8 +303,9 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 - Pruning a prior version is best-effort but must not vanish: a failed prune leaves an
   orphaned file in the cache with nothing recording it, so it has to be reported. Tier 2.
 - `cache.SweepTemps` runs before enumeration on a real run only, against
-  `abandonedTempAge`, which has to stay long enough that a concurrent run's in-flight
-  transfer survives it. Tier 1 if it can delete a live download.
+  `abandonedTempAge`, passed as a duration rather than a cutoff instant so a sign the wrong
+  way round cannot delete every in-flight transfer. It has to stay long enough that a
+  concurrent run's transfer survives it. Tier 1 if it can delete a live download.
 
 **Failure model & errors**
 
@@ -310,7 +322,10 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   that stand in for it must both survive: `Limits.PageTimeout` per page attempt, and
   `Limits.StallTimeout` on silence inside a body, reset by every byte. Removing either
   leaves a run that hangs indefinitely, and the retry that would re-sign an expired
-  CloudFront URL never runs. Tier 1/2.
+  CloudFront URL never runs. The same applies to every path in `portal.Resolve` that
+  discards a body rather than returning it: `drainClose` bounds bytes, not time, so those go
+  through `drainCloseBounded`, or a server that sends part of a refusal and goes quiet
+  blocks the read for good. Tier 1/2.
 - Bounded reads: `Limits.MaxPageBytes` must error rather than truncate, since a shortened
   library page parses as a valid short page and quietly ends enumeration early. Tier 1.
 
@@ -384,9 +399,13 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 
 Tests use the standard library `testing` package with table-driven cases, `httptest`
 servers, and `t.TempDir()`; there is no testify and no mocking framework. The repo has a
-convention worth respecting: each package's `audit_test.go` holds guard tests, every one
-carrying a comment naming the specific failure it prevents. A new guard test belongs there
-and needs that comment; a guard test that fails is a regression, not a test to update. The
+convention worth respecting: guard tests carry a comment naming the specific failure they
+prevent, and live in the package's `audit_test.go` unless they cannot — `install_test.go`
+guards `install.sh` and the workflows from a root package that already has one, and
+`internal/releaseyml`'s whole suite is a guard's parser.
+`TestEveryGuardTestSaysWhatItPrevents` enforces the comment across all three filenames, so
+a new guard file needs adding to `guardFiles` or it is unchecked. A guard test that fails
+is a regression, not a test to update. The
 suite is expected to run under `-race` with nothing bound to a fixed port and nothing
 sleeping for a fixed duration — a test that takes a listener or an address should let the
 OS pick the port — so flag anything that reintroduces either.
@@ -436,8 +455,8 @@ agent can do.
 After the area agents report, trace each core invariant end to end across boundaries, which
 no single agent could do:
 
-1. **fileId dedup.** Read the dedup point in `syncer.Run`, `resolvedByID`,
-   `unresolvedByID`, both halves of `buildLockfile` (carried packs and rebuilt packs),
+1. **fileId dedup.** Read `readRows` (the only constructor that fills `verdicts.live`),
+   both halves of `buildLockfile` (carried packs and rebuilt packs),
    `cache.RelPath`'s identity keying, and the lockfile `File` schema. Confirm a file owned
    by several packs downloads once and that every owning pack's entry ends the run agreeing
    on `cachePath`, `version`, `sha256`, and `sizeBytes`, including when only some of its
@@ -473,11 +492,12 @@ no single agent could do:
    → `cache.Hash`. Confirm no route commits or records bytes that skipped a check, and that
    an accessor joining a lockfile path without confining it does not exist.
 7. **A failed file, not a failed run.** Trace a download error from `downloadWithRetry`
-   through the `Failures` append, `unresolvedByID`, `buildLockfile`'s carried and rebuilt
-   halves, `Report.ActionableFailures`, and `main.runSyncOrStatus`'s exit status. Confirm
-   the lockfile is still written, that a `Gone` failure is reported without moving the exit
-   status, that a failed `Changed` update keeps the verified copy recorded at the version
-   those bytes are, and that every other class leaves all owning packs untracked together.
+   through the `Failures` append, `verdicts.unresolved`, `buildLockfile`'s carried and
+   rebuilt halves, `Report.ActionableFailures`, and `main.runSyncOrStatus`'s exit status.
+   Confirm the lockfile is still written, that a `Gone` failure is reported without moving
+   the exit status, that a failed `Changed` update keeps the verified copy recorded at the
+   version those bytes are, and that every other class leaves all owning packs untracked
+   together.
 8. **No account identity anywhere.** Grep the tree for a hard-coded customer id, email,
    cookie, token, or absolute home path. Then read every error-formatting site in
    `internal/portal` and `internal/selfupdate` and confirm each raw URL or API body goes

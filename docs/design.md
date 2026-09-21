@@ -154,7 +154,10 @@ owners, not just a successful download: a file the run went looking for and did 
 a file it read and declined (filtered out, or archived by the store), both land untracked
 under every owner. The declined case is the one with no failure behind it, so nothing else
 would report it, and leaving it to the packs in scope alone puts one `fileId` in the file
-tracked under one owner and untracked under another. The account-identifying
+tracked under one owner and untracked under another. The identity every owner records it at
+travels the same way, read once from the pages rather than off the row in front of each
+rebuild: the store labels a bundled file per order item, so two owners reading their own rows
+commit two versions, two variants or two advertised sizes for one `fileId` at one sha. The account-identifying
 `customerId` is **not** stored here (it is account PII; it lives in env / a gitignored local
 config). Schema:
 
@@ -210,7 +213,10 @@ The original filename comes from the final signed-URL path basename (it matches 
 `<fileToken>_<variant>_<version>.zip` convention). Files are deduped by `fileId`: the bundled
 `GENERIC_Particle_FX` lands once under `GENERIC_Particle_FX/` and every owning pack's lockfile
 entry points at it. On update the tool writes the new version and removes the prior file for
-that file identity, so the cache always reflects the lockfile's current state. No backup and
+that file identity, so a tracked entry and the bytes it names stay in step. A file that
+stops being tracked leaves its bytes behind instead of deleting them, and is reported rather
+than pruned (see Failure handling): the cache is the expensive half to rebuild, and a run
+that declined a file this time is not evidence the reader wants it gone. No backup and
 no version archive: current versions are re-downloadable from Synty, and the assets you depend
 on are made durable in the game repo at promotion (sub-project 2), not here. What makes the
 cache reconstructable in practice: both commands read the cache when diffing, so a tracked
@@ -314,6 +320,13 @@ sweep deletes and no scan can take back.
   `sync` also re-hashes, which is the only check that sees a mid-file corruption.
 - **De-owned packs:** a pack the library no longer lists is reported and its lockfile record
   kept. One enumeration is not enough to erase a committed record.
+- **A file that stops being tracked is named on the way out.** A pack the store still lists
+  keeps its entry, so a file the run declines never reaches `orphanedRecords`, but the entry
+  is rebuilt untracked and takes its cache path and sha with it while the bytes stay on disk,
+  where nothing points at them and no later run can take them back. Both causes are reported
+  the same way and said once, on the run that drops the record: the store archiving the file,
+  and a `variant_includes` that no longer matches it. Only the sentence differs, because one
+  is the store's doing and the other is the reader's own manifest.
 - **Politeness:** capped concurrency, honor obvious rate limits (429 and 408 back off and
   retry), and abandon the queue once a pack fails rather than fetching a whole library's
   item pages for a run that is going to abort.
