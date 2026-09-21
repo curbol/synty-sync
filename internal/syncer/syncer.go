@@ -440,7 +440,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	buildLockfile(&report, packFiles, opts, vd, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
-	report.Warnings = append(report.Warnings, declinedRecords(vd, lf, report.NewLockfile)...)
+	report.Warnings = append(report.Warnings, declinedRecords(vd, lf)...)
 	report.Warnings = append(report.Warnings, unreadable...)
 	report.Warnings = append(report.Warnings, append(adoptWarnings, pruneWarnings...)...)
 
@@ -1078,25 +1078,14 @@ func sortedKeys(files map[string]lockfile.File) []string {
 // only the first left someone who narrowed their filter with gigabytes on disk that
 // nothing points at and no run would ever mention.
 //
-// A fileId another owner still tracks is not one of these. Both labels are per-row, so
-// a bundled file can be declined under one order item while another still serves it,
-// and the new record keeps the path under that owner. Claiming the copy is unreferenced
-// there sends someone looking for bytes that nothing lost.
-func declinedRecords(vd verdicts, prev, next lockfile.Lockfile) []string {
+// Every fileId reaching here is unreferenced across the whole record, which is why no
+// pass over the new lockfile is needed to confirm it: selection is decided once across
+// all owners, so a declined fileId is one no owner selected, and nothing the run
+// resolved can be holding its path.
+func declinedRecords(vd verdicts, prev lockfile.Lockfile) []string {
 	prevByID := indexByFileID(prev)
-	referenced := map[int]bool{}
-	for _, p := range next.Packs {
-		for _, f := range p.Files {
-			if f.Tracked && f.CachePath != "" {
-				referenced[f.FileID] = true
-			}
-		}
-	}
 	var w []string
 	for id, why := range vd.deselected {
-		if referenced[id] {
-			continue
-		}
 		p, ok := prevByID[id]
 		if !ok || !p.Tracked || p.CachePath == "" {
 			continue

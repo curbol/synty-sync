@@ -435,6 +435,31 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	if len(packs) == 0 && len(man.Packs) > 0 {
 		return fmt.Errorf("the library listed no packs while %s holds %d; refusing to rewrite it", manifestPath, len(man.Packs))
 	}
+	// Compared against what the page actually offered, not against what was enabled
+	// before: a pack that has left the library is dropped by Reconcile, so measuring
+	// against the prior set would refuse an honest empty submission naming a pack the
+	// user was never shown.
+	man.Reconcile(packs)
+	offered := man.EnabledSet()
+	chosen, err := web.Serve(ctx, ln, packs, offered)
+	if err != nil {
+		return err
+	}
+	// Turning off every pack is a real choice, but it is also what an empty or
+	// drive-by submission looks like, and it costs the user their whole selection in
+	// a committed file. Make them state it.
+	if len(chosen) == 0 && len(offered) > 0 {
+		return fmt.Errorf("the selection came back empty while %d packs were enabled; %s left unchanged (deselect them in the manifest if that is what you meant)", len(offered), manifestPath)
+	}
+	// Read the file again now the wait is over. Serve blocks on a person, Save
+	// re-encodes the whole manifest, and the copy loaded before the page went up would
+	// write every field back at its pre-page value, silently reverting an edit made in
+	// the meantime. The page decides the selection and nothing else, so the rest comes
+	// from the file as it stands now.
+	man, err = manifest.Load(manifestPath)
+	if err != nil {
+		return err
+	}
 	// Reconcile rebuilds the pack list from this one enumeration, so anything the walk
 	// did not return drops out and takes its enabled flag with it. The zero-pack case
 	// above is refused, but a partial read is not detectable from here — the library
@@ -447,21 +472,6 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	man.Reconcile(packs)
 	for _, e := range man.Packs {
 		delete(dropped, e.Slug)
-	}
-	// Compared against what the page actually offered, not against what was enabled
-	// before: a pack that has left the library is dropped by Reconcile, so measuring
-	// against the prior set would refuse an honest empty submission naming a pack the
-	// user was never shown.
-	offered := man.EnabledSet()
-	chosen, err := web.Serve(ctx, ln, packs, offered)
-	if err != nil {
-		return err
-	}
-	// Turning off every pack is a real choice, but it is also what an empty or
-	// drive-by submission looks like, and it costs the user their whole selection in
-	// a committed file. Make them state it.
-	if len(chosen) == 0 && len(offered) > 0 {
-		return fmt.Errorf("the selection came back empty while %d packs were enabled; %s left unchanged (deselect them in the manifest if that is what you meant)", len(offered), manifestPath)
 	}
 	man.SetEnabled(chosen)
 	if err := manifest.Save(manifestPath, man); err != nil {
@@ -540,20 +550,10 @@ func list(w io.Writer, lockPath string) error {
 		fmt.Fprintf(w, "no packs recorded yet: %s does not exist.\nRun `synty-sync select` to choose packs, then `synty-sync sync`.\n", lockPath)
 		return nil
 	}
-	slugs := make([]string, 0, len(lf.Packs))
-	for s := range lf.Packs {
-		slugs = append(slugs, s)
-	}
-	sort.Strings(slugs)
-	for _, s := range slugs {
+	for _, s := range sortedKeys(lf.Packs) {
 		p := lf.Packs[s]
 		fmt.Fprintf(w, "%s  (%s)\n", s, p.DisplayName)
-		keys := make([]string, 0, len(p.Files))
-		for k := range p.Files {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range sortedKeys(p.Files) {
 			f := p.Files[k]
 			mark := " "
 			if f.Tracked {

@@ -266,12 +266,62 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 	}
 }
 
+// selectPacks re-encodes the whole manifest from a copy loaded before the page went
+// up, and the wait for the page is a person's, so every field was written back at its
+// pre-page value. An edit made in that window was reverted in a committed file the
+// README invites hand-editing, with nothing printed about it. Only the selection is
+// the page's to decide.
+func TestSelectKeepsAManifestEditMadeWhileThePageWasOpen(t *testing.T) {
+	srv := httptest.NewServer(libraryStore([]stubPack{
+		{orderItem: 3, name: "Pirate Pack"},
+		{orderItem: 4, name: "Dungeon Pack"},
+	}, nil))
+	defer srv.Close()
+
+	manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
+	if err := os.WriteFile(manifestPath, []byte("variant_includes = [\"Godot_*\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdoutWas := stdout
+	stdout = &bytes.Buffer{}
+	defer func() { stdout = stdoutWas }()
+
+	edit := func() {
+		if err := os.WriteFile(manifestPath, []byte("variant_includes = [\"Godot_*\", \"SourceSprites\"]\n"), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := driveSelectWith(t, srv, manifestPath, []string{"pirate-pack"}, edit); err != nil {
+		t.Fatal(err)
+	}
+
+	man, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(man.VariantIncludes, ","); got != "Godot_*,SourceSprites" {
+		t.Errorf("variant_includes = %q, want the edit made while the page was open to survive", got)
+	}
+	if enabled := man.EnabledSet(); len(enabled) != 1 || !enabled["pirate-pack"] {
+		t.Errorf("enabled = %v, want the page to still decide the selection (just pirate-pack)", enabled)
+	}
+}
+
 // driveSelect runs selectPacks against srv on an ephemeral port, fetches the page for
 // its form token, posts the given slugs, and returns what selectPacks returned. Two
 // tests spelled out the listener, the goroutine, the poll, the PostForm and the
 // timeout select before they could assert anything, so the submission they were about
 // was the one thing buried in it.
 func driveSelect(t *testing.T, srv *httptest.Server, manifestPath string, post []string) error {
+	t.Helper()
+	return driveSelectWith(t, srv, manifestPath, post, nil)
+}
+
+// driveSelectWith is driveSelect with a hook that runs while the page is up and
+// selectPacks is blocked on it, for a test about something happening inside that
+// window rather than before or after it.
+func driveSelectWith(t *testing.T, srv *httptest.Server, manifestPath string, post []string, duringPageOpen func()) error {
 	t.Helper()
 	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -283,6 +333,9 @@ func driveSelect(t *testing.T, srv *httptest.Server, manifestPath string, post [
 	go func() { done <- selectPacks(context.Background(), client, manifestPath, ln) }()
 
 	token := waitForSelectPage(t, addr, done)
+	if duringPageOpen != nil {
+		duringPageOpen()
+	}
 	resp, err := http.PostForm("http://"+addr+"/save", url.Values{"pack": post, "csrf": {token}})
 	if err != nil {
 		t.Fatal(err)
