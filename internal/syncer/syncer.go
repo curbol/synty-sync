@@ -474,7 +474,12 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 	fetchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// A pointer per slot rather than a value: a pack that never ran, or one dropped
-	// below, leaves a nil that cannot be mistaken for a pack owning no files.
+	// below, leaves a nil that cannot be mistaken for a pack owning no files. Indexing
+	// by the pack's position also holds the result in enumeration order, which is what
+	// decides whose labels a bundled file is recorded under: the store labels it per
+	// order item, so collecting with an append under the mutex instead would hand that
+	// to whichever item page answered first, and two runs over unchanged data would
+	// disagree.
 	out := make([]*packWithFiles, len(packs))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup

@@ -2216,3 +2216,111 @@ func TestASessionThatExpiresDuringItemPagesKeepsTheSentinel(t *testing.T) {
 		t.Errorf("an expired session rewrote the lockfile (generatedAt = %q)", after.GeneratedAt)
 	}
 }
+
+// sync re-hashes the cache and status does not, and a body corrupted in place keeps
+// the length that was recorded for it, so the cheap check cannot see it. Drop the
+// VerifyDeep half of cacheChecker and every test still passes while a sync calls that
+// file Unchanged for good, leaving the recorded sha describing bytes nothing reads
+// again.
+func TestOnlySyncSeesACorruptionThatKeptTheSize(t *testing.T) {
+	// The bundled file: one set of bytes, so corrupting it is unambiguous.
+	const bundledFileID = 2344711
+	for _, tc := range []struct {
+		name string
+		dry  bool
+		want Class
+	}{
+		{name: "status compares the recorded size", dry: true, want: Unchanged},
+		{name: "sync re-hashes", dry: false, want: CacheMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+
+			rel := ""
+			for _, p := range lf.Packs {
+				for _, f := range p.Files {
+					if f.FileID == bundledFileID && f.Tracked {
+						rel = f.CachePath
+					}
+				}
+			}
+			if rel == "" {
+				t.Fatalf("the seed run tracked no file %d; this test no longer corrupts anything", bundledFileID)
+			}
+			full := filepath.Join(lib, filepath.FromSlash(rel))
+			was, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Same byte count, different content: exactly what Verify cannot see.
+			corrupt := append([]byte(nil), was...)
+			corrupt[len(corrupt)-1] ^= 0xff
+			if err := os.WriteFile(full, corrupt, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, runOpts(lib, tc.dry))
+			if err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			got, found := Class(-1), false
+			for _, d := range rep.Diffs {
+				if d.FileID == bundledFileID {
+					got, found = d.Class, true
+				}
+			}
+			if !found {
+				t.Fatalf("file %d was not classified at all", bundledFileID)
+			}
+			if got != tc.want {
+				t.Errorf("class = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The store labels a bundled file per order item, so which owner's row a run records
+// it under decides its version, variant and advertised size. fetchAll collects into
+// slots indexed by the pack's position, so that is enumeration order whatever order
+// the item pages come back in. Collect with an append instead and the first page to
+// answer names the file: two runs over unchanged data then disagree, and when the
+// differing label is the version they re-download it on every other run.
+func TestABundledFileTakesItsLabelsFromEnumerationOrderNotResponseOrder(t *testing.T) {
+	const row = `<div class='sky-pilot-list-item'>
+	  <div class='sky-pilot-file-heading'>GENERIC_Particle_FX_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(%s)</span></div>
+	  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/999?x=1'>Download</a></div>
+	</div>`
+	// Dungeon is second in the library page and is made to answer first.
+	dungeonServed := make(chan struct{})
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "4":
+				close(dungeonServed)
+				return fmt.Sprintf(row, "41 MB"), true
+			case "1":
+				select {
+				case <-dungeonServed:
+				case <-time.After(5 * time.Second):
+					// t.Error, not t.Fatal: this runs on the server's goroutine.
+					t.Error("the two item pages were not fetched concurrently, so this proves nothing")
+				}
+				return fmt.Sprintf(row, "40 MB"), true
+			}
+			return "", false
+		},
+	})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	after := seedRun(t, srv, lockPath, runOpts(lib, false))
+
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	const wantSize = 40 << 20 // Pirate's label, the pack listed first
+	got := after.Packs["polygon-pirate-pack"].Files[key].AdvertisedSize
+	if got != wantSize {
+		t.Errorf("advertisedSize = %d, want %d: the file was labelled by the page that answered first, not the pack listed first", got, wantSize)
+	}
+}
