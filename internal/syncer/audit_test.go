@@ -233,9 +233,7 @@ func TestChangedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
 	if in.Version != out.Version {
 		t.Errorf("same fileId recorded at two versions: in-scope %q vs carried %q", in.Version, out.Version)
 	}
-	if in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
-		t.Errorf("owning packs diverged: %+v vs %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 	if in.Version != "v2_0_0" {
 		t.Errorf("version = %q, want the freshly downloaded v2_0_0", in.Version)
 	}
@@ -246,13 +244,7 @@ func TestChangedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
 // zero-files guards below check has not shrunk.
 func seedPirateLockfile(t *testing.T, srv *httptest.Server, lib, lockPath string) (lockfile.Lockfile, int) {
 	t.Helper()
-	if _, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false)); err != nil {
-		t.Fatalf("seed sync: %v", err)
-	}
-	seeded, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	seeded := seedRun(t, srv, lockPath, runOpts(lib, false))
 	n := len(seeded.Packs["polygon-pirate-pack"].Files)
 	if n == 0 {
 		t.Fatal("seed produced no pirate files")
@@ -906,9 +898,7 @@ func TestFailedUpdateKeepsOwningPacksInAgreement(t *testing.T) {
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := after.Packs["polygon-pirate-pack"].Files[key]
 	out := after.Packs["polygon-dungeon-pack"].Files[key]
-	if in.Tracked != out.Tracked || in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
-		t.Errorf("owning packs diverged after a failed update:\n  in-scope %+v\n  carried  %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 }
 
 // The failed update again, with the store renaming the variant on the same fileId as
@@ -966,9 +956,7 @@ func TestFailedUpdateOnARenamedVariantKeepsTheBytesUnderTheirOwnName(t *testing.
 		t.Errorf("the entry names %s %s, but the recorded sha is the %s %s bytes",
 			in.Variant, in.Version, before.Variant, before.Version)
 	}
-	if in.Variant != out.Variant || in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
-		t.Errorf("owning packs diverged after a failed update on a renamed variant:\n  in-scope %+v\n  carried  %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 }
 
 // The same divergence one class over. A missing cache file whose re-download fails
@@ -1021,9 +1009,7 @@ func TestFailedCacheMissingKeepsOwningPacksInAgreement(t *testing.T) {
 	}
 	in := after.Packs["polygon-pirate-pack"].Files[key]
 	out := after.Packs["polygon-dungeon-pack"].Files[key]
-	if in.Tracked != out.Tracked || in.CachePath != out.CachePath || in.SHA256 != out.SHA256 || in.SizeBytes != out.SizeBytes {
-		t.Errorf("owning packs diverged after a failed cache-missing download:\n  in-scope %+v\n  carried  %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 	if out.Tracked {
 		t.Errorf("the carried entry still records bytes the run could not find: %+v", out)
 	}
@@ -1181,9 +1167,7 @@ func TestResolvedBundledFileConvergesAnUntrackedCarriedOwner(t *testing.T) {
 	if !in.Tracked {
 		t.Fatalf("in-scope owner not tracked: %+v", in)
 	}
-	if in.Tracked != out.Tracked || in.CachePath != out.CachePath || in.SHA256 != out.SHA256 || in.Version != out.Version {
-		t.Errorf("owning packs disagree on fileId 999:\n  in-scope  %+v\n  carried   %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 	// An owner that never held the file has no stamp of its own, so it takes the one
 	// recorded for the same fileId rather than ending the run tracked, at a shared
 	// path and sha, with no downloadedAt at all.
@@ -1240,6 +1224,40 @@ func TestAdvertisedSizeReachesAnOwnerTheRunDidNotFetch(t *testing.T) {
 	}
 }
 
+// The same invariant one channel over: two owners the run *did* fetch. fetchAll reads
+// item pages concurrently, so a store-side re-label landing mid-run gives one owner's
+// page a figure the other's does not have. Rebuilding each entry from its own row then
+// commits two advertised sizes for one fileId at one version and one sha — the shape
+// the test above exists to prevent, reached without any pack going out of scope.
+func TestAdvertisedSizeAgreesAcrossTwoOwnersTheRunFetched(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	srv := newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			// Pirate's page is read before the re-label, Dungeon's after.
+			size := map[string]string{"1": "40 MB", "4": "41 MB"}[orderItem]
+			if size == "" {
+				return "", false
+			}
+			return fmt.Sprintf(`<div class='sky-pilot-list-item'>
+			  <div class='sky-pilot-file-heading'>GENERIC_Particle_FX_Godot_4_5_1 | v1_0_0 <span class='sky-pilot-file-size'>(%s)</span></div>
+			  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/999?x=1'>Download</a></div>
+			</div>`, size), true
+		},
+	})
+
+	seedRun(t, srv, lockPath, runOpts(lib, false))
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "GENERIC_Particle_FX|Godot_4_5_1"
+	assertOwnersAgree(t,
+		after.Packs["polygon-pirate-pack"].Files[key],
+		after.Packs["polygon-dungeon-pack"].Files[key])
+}
+
 // A fileId whose bytes this run did not re-fetch still has to leave every owner with
 // the same downloadedAt. The in-scope entry is rebuilt with the stamp from whichever
 // prior record held one; an owner that never held the file has none of its own, so
@@ -1277,7 +1295,7 @@ func TestUnfetchedBundledFileCarriesOneDownloadedAt(t *testing.T) {
 	}}
 
 	rep := Report{NewLockfile: lockfile.Lockfile{Packs: map[string]lockfile.Pack{}}}
-	buildLockfile(&rep, pf, runOpts(t.TempDir(), false), resolvedByID, nil, nil, nil, prev)
+	buildLockfile(&rep, pf, runOpts(t.TempDir(), false), verdicts{resolved: resolvedByID}, prev)
 
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
 	out := rep.NewLockfile.Packs["polygon-dungeon-pack"].Files[key]
@@ -1312,7 +1330,7 @@ func TestUnresolvedBundledFileDropsEveryOwnerAtOneVersion(t *testing.T) {
 		}},
 	}}
 	opts := runOpts(lib, false)
-	buildLockfile(&rep, pf, opts, map[int]resolved{}, map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}, nil, nil, prev)
+	buildLockfile(&rep, pf, opts, verdicts{unresolved: map[int]live{999: {version: "v1_0_1", variant: "Godot_4_5_1"}}}, prev)
 
 	const key = "GENERIC_Particle_FX|Godot_4_5_1"
 	in := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[key]
@@ -1773,9 +1791,7 @@ func TestRenamedVariantMovesTheKeyForCarriedOwnersToo(t *testing.T) {
 	if in.Variant != out.Variant {
 		t.Errorf("one fileId filed under two variants: in-scope %q vs carried %q", in.Variant, out.Variant)
 	}
-	if in.Version != out.Version || in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
-		t.Errorf("owning packs diverged:\n  in-scope %+v\n  carried  %+v", in, out)
-	}
+	assertOwnersAgree(t, in, out)
 }
 
 // The trailer check keys on the leading bytes, not the filename. The name comes from
@@ -1902,10 +1918,7 @@ func TestDeselectedBundledFileKeepsOwningPacksInAgreement(t *testing.T) {
 			if in.Tracked {
 				t.Errorf("the in-scope owner still tracks a file this run declined: %+v", in)
 			}
-			if in.Tracked != out.Tracked || in.Version != out.Version ||
-				in.SHA256 != out.SHA256 || in.CachePath != out.CachePath {
-				t.Errorf("owning packs diverged over a declined file:\n  in-scope %+v\n  carried  %+v", in, out)
-			}
+			assertOwnersAgree(t, in, out)
 		})
 	}
 }
@@ -1992,14 +2005,23 @@ func TestDivergentArchivedKeepsInScopeOwnersInAgreement(t *testing.T) {
 	if !live.Tracked || live.CachePath == "" {
 		t.Fatalf("the owner still serving the file lost its record: %+v", live)
 	}
-	if archived.Tracked != live.Tracked || archived.CachePath != live.CachePath ||
-		archived.SHA256 != live.SHA256 || archived.Version != live.Version ||
-		archived.SizeBytes != live.SizeBytes {
-		t.Errorf("owning packs diverged over one fileId:\n  archived row %+v\n  live row     %+v", archived, live)
-	}
+	assertOwnersAgree(t, archived, live)
 	for _, w := range rep.Warnings {
 		if strings.Contains(w, "unreferenced") {
 			t.Errorf("a copy another owner still records was reported unreferenced: %s", w)
 		}
+	}
+}
+
+// assertOwnersAgree is the fileId-dedup invariant as one assertion: two packs that own
+// one fileId end a run holding the same record, field for field. Eight tests used to
+// spell out their own field list and the lists had already drifted apart — SizeBytes in
+// two of them, Variant in two, AdvertisedSize in none — so a divergence in a field a
+// given scenario did not happen to name passed silently, and the next field added to
+// lockfile.File would have been unchecked in all eight.
+func assertOwnersAgree(t *testing.T, in, out lockfile.File) {
+	t.Helper()
+	if !reflect.DeepEqual(in, out) {
+		t.Errorf("owning packs diverged over one fileId:\n  in-scope %+v\n  other    %+v", in, out)
 	}
 }
