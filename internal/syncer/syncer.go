@@ -187,11 +187,11 @@ type verdicts struct {
 	// unresolved is what it went looking for and did not find. The identity it is
 	// dropped at comes from live, so every owner reports the loss the same way.
 	unresolved map[int]struct{}
-	// deselected is what it read and declined — filtered out by variant, or archived by
-	// the store. Nothing failed, so no other channel says so, and leaving these records
-	// alone is what let one fileId end up tracked under one owner and untracked under
-	// the pack the run rebuilt.
-	deselected map[int]struct{}
+	// deselected is what it read and declined, against why it declined it. Nothing
+	// failed, so no other channel says so, and leaving these records alone is what let
+	// one fileId end up tracked under one owner and untracked under the pack the run
+	// rebuilt.
+	deselected map[int]declined
 }
 
 func newVerdicts() verdicts {
@@ -199,8 +199,26 @@ func newVerdicts() verdicts {
 		live:       map[int]live{},
 		resolved:   map[int]resolved{},
 		unresolved: map[int]struct{}{},
-		deselected: map[int]struct{}{},
+		deselected: map[int]declined{},
 	}
+}
+
+// declined is why a run read a file and did not select it. The lockfile outcome is the
+// same either way, so this exists for the sentence declinedRecords has to write: one
+// cause is the store's doing and the other is the reader's own filter, and they call
+// for different things to be done about the bytes left behind.
+type declined int
+
+const (
+	declinedByFilter declined = iota
+	declinedArchived
+)
+
+func (d declined) describe(version string) string {
+	if d == declinedArchived {
+		return fmt.Sprintf("archived by the store (%s)", version)
+	}
+	return "no longer matched by variant_includes"
 }
 
 // live is what this run's pages say a fileId is. Every field travels to the owning
@@ -243,8 +261,15 @@ func readRows(packFiles []packWithFiles, filter func(model.Variant) bool) (verdi
 			if _, known := vd.live[f.FileID]; !known {
 				vd.live[f.FileID] = liveOf(f)
 			}
-			if !filter(f.Variant) || f.Archived {
-				vd.deselected[f.FileID] = struct{}{}
+			// The filter is asked first so its answer is the one reported: a reader who
+			// has stopped wanting a variant does not need to hear that the store also
+			// archived it, and the thing they can act on is their own manifest.
+			if !filter(f.Variant) {
+				vd.deselected[f.FileID] = declinedByFilter
+				continue
+			}
+			if f.Archived {
+				vd.deselected[f.FileID] = declinedArchived
 				continue
 			}
 			if _, seen := selectedByID[f.FileID]; !seen {
@@ -415,7 +440,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	buildLockfile(&report, packFiles, opts, vd, lf)
 	report.Warnings = append(warnings(packFiles, opts.Filter), orphanedRecords(lf, report.NewLockfile)...)
-	report.Warnings = append(report.Warnings, archivedRecords(packFiles, lf, report.NewLockfile)...)
+	report.Warnings = append(report.Warnings, declinedRecords(vd, lf, report.NewLockfile)...)
 	report.Warnings = append(report.Warnings, unreadable...)
 	report.Warnings = append(report.Warnings, append(adoptWarnings, pruneWarnings...)...)
 
@@ -932,13 +957,15 @@ func buildLockfile(report *Report, packFiles []packWithFiles, opts Options, vd v
 			// whether its path moved: a re-fetch to the same filename still changes the
 			// bytes, and the identity has to travel with them or the carried entry ends
 			// up naming one version against another version's sha.
+			_, unresolved := vd.unresolved[f.FileID]
+			_, declined := vd.deselected[f.FileID]
 			switch {
-			case isIn(vd.unresolved, f.FileID):
+			case unresolved:
 				// The run went looking for these bytes and did not find them, so the
 				// record naming them has to go with them — at the version the run was
 				// looking for, or this owner reports the loss against a stale one.
 				f = clearTracking(f, v)
-			case isIn(vd.deselected, f.FileID):
+			case declined:
 				// The run read this file and declined it, so it is not downloaded any
 				// more for this owner either. Nothing failed, so no other channel says
 				// so, and leaving the record alone is what let one fileId end up
@@ -1026,12 +1053,6 @@ func warnings(packFiles []packWithFiles, filter func(model.Variant) bool) []stri
 	return w
 }
 
-// isIn reports whether a verdict set names a fileId.
-func isIn(set map[int]struct{}, id int) bool {
-	_, ok := set[id]
-	return ok
-}
-
 // sortedKeys returns a pack's file keys in a fixed order, for the two places that
 // must not let Go's map iteration decide an outcome: which of two prior entries
 // sharing a fileId wins, and which of two entries landing on one key survives.
@@ -1044,19 +1065,24 @@ func sortedKeys(files map[string]lockfile.File) []string {
 	return keys
 }
 
-// archivedRecords names every file the prior lockfile tracked that this run's pages
-// now label archived. The store still lists it, so the pack keeps its entry and the
-// file never reaches orphanedRecords, but the entry is rebuilt untracked, taking its
-// cache path and sha with it while the bytes stay on disk. Nothing can take them back
-// either: an archived file is never selected, so it is never an adopt candidate, and
-// the adopt scan keys on the version the page now reports. Said once, on the run that
-// drops the record, since the run after finds nothing tracked to report.
+// declinedRecords names every file the prior lockfile tracked that this run read and
+// declined. The store still lists it, so the pack keeps its entry and the file never
+// reaches orphanedRecords, but the entry is rebuilt untracked, taking its cache path
+// and sha with it while the bytes stay on disk. Nothing can take them back either: a
+// declined file is never selected, so it is never an adopt candidate. Said once, on the
+// run that drops the record, since the run after finds nothing tracked to report.
 //
-// A fileId another owner still tracks is not one of these. Archived is a per-row
-// label, so a bundled file can be archived under one order item while another still
-// serves it, and the new record keeps the path under that owner. Claiming the copy is
-// unreferenced there sends someone looking for bytes that nothing lost.
-func archivedRecords(packFiles []packWithFiles, prev, next lockfile.Lockfile) []string {
+// Both causes are here because they leave the same thing behind, and only the sentence
+// differs: the store archiving a file is its doing, a variant_includes that no longer
+// matches is the reader's, and the copy is equally unreferenced either way. Reporting
+// only the first left someone who narrowed their filter with gigabytes on disk that
+// nothing points at and no run would ever mention.
+//
+// A fileId another owner still tracks is not one of these. Both labels are per-row, so
+// a bundled file can be declined under one order item while another still serves it,
+// and the new record keeps the path under that owner. Claiming the copy is unreferenced
+// there sends someone looking for bytes that nothing lost.
+func declinedRecords(vd verdicts, prev, next lockfile.Lockfile) []string {
 	prevByID := indexByFileID(prev)
 	referenced := map[int]bool{}
 	for _, p := range next.Packs {
@@ -1066,22 +1092,20 @@ func archivedRecords(packFiles []packWithFiles, prev, next lockfile.Lockfile) []
 			}
 		}
 	}
-	seen := map[int]bool{}
 	var w []string
-	for _, pf := range packFiles {
-		for _, f := range pf.files {
-			if !f.Archived || seen[f.FileID] || referenced[f.FileID] {
-				continue
-			}
-			p, ok := prevByID[f.FileID]
-			if !ok || !p.Tracked || p.CachePath == "" {
-				continue
-			}
-			seen[f.FileID] = true
-			w = append(w, fmt.Sprintf(
-				"%s is archived by the store (%s); it is no longer tracked and the cached copy at %s is now unreferenced",
-				f.Key(), f.Version, p.CachePath))
+	for id, why := range vd.deselected {
+		if referenced[id] {
+			continue
 		}
+		p, ok := prevByID[id]
+		if !ok || !p.Tracked || p.CachePath == "" {
+			continue
+		}
+		v := vd.live[id]
+		key := model.FileEntry{FileToken: v.fileToken, Variant: model.Variant(v.variant)}.Key()
+		w = append(w, fmt.Sprintf(
+			"%s is %s; it is no longer tracked and the cached copy at %s is now unreferenced",
+			key, why.describe(v.version), p.CachePath))
 	}
 	sort.Strings(w)
 	return w

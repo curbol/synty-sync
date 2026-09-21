@@ -2106,3 +2106,68 @@ func assertOwnersAgree(t *testing.T, in, out lockfile.File) {
 		t.Errorf("owning packs diverged over one fileId:\n  in-scope %+v\n  other    %+v", in, out)
 	}
 }
+
+// The other half of declinedRecords, and the one it was missing. Narrowing
+// variant_includes leaves exactly what archiving leaves: the pack still lists the file,
+// so its entry survives and orphanedRecords never sees it, but the entry is rebuilt
+// untracked and its cache path and sha go with it while the bytes stay on disk. Keying
+// the report on the Archived label alone meant a reader who dropped a variant was left
+// with gigabytes nothing points at and no run that would ever mention them — and the
+// pack keeps a variant that still matches, so not even the "nothing matches the filter"
+// warning fires.
+func TestNarrowingTheVariantFilterIsReportedNotSilentlyDropped(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	srv := newServer(t, serverOpts{itemHTML: func(orderItem string) (string, bool) {
+		if orderItem != "1" {
+			return "", false
+		}
+		return itemPage("POLYGON_Pirate", "Godot_4_5_1", "v1_0_0", 4242) +
+			itemPage("POLYGON_Pirate", "SourceFiles", "v1_0_0", 4243), true
+	}})
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+
+	seeded := seedRun(t, srv, lockPath, opts)
+	const key = "POLYGON_Pirate|SourceFiles"
+	before := seeded.Packs["polygon-pirate-pack"].Files[key]
+	if !before.Tracked || before.CachePath == "" {
+		t.Fatalf("seed did not track the file the run is about to decline: %+v", before)
+	}
+
+	// SourceFiles leaves variant_includes; the pack's Godot file still matches, so the
+	// pack itself has nothing to warn about.
+	opts.Filter = func(v model.Variant) bool { return strings.HasPrefix(string(v), "Godot_") }
+	rep, err := Run(context.Background(), newClient(srv.URL), seeded, lockPath, opts)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(lib, before.CachePath)); err != nil {
+		t.Fatalf("the bytes this is about are not on disk: %v", err)
+	}
+	var said bool
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, before.CachePath) && strings.Contains(w, "unreferenced") {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("the cached copy at %s lost its record with nothing said; warnings = %q", before.CachePath, rep.Warnings)
+	}
+
+	// Said once: the run after finds nothing tracked, so repeating it would nag about
+	// the same file for the life of the library.
+	again, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := Run(context.Background(), newClient(srv.URL), again, lockPath, opts)
+	if err != nil {
+		t.Fatalf("third sync: %v", err)
+	}
+	for _, w := range rep2.Warnings {
+		if strings.Contains(w, "unreferenced") {
+			t.Errorf("the declined file was reported a second time: %q", w)
+		}
+	}
+}
