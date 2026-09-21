@@ -675,6 +675,21 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 		t.Errorf("release.yml no longer builds the asset with %s; both readers want a bare %q entry at the zip root",
 			template, "synty-sync")
 	}
+	// And what "$bin" holds, which the template above cannot see. Both readers match the
+	// entry name exactly — selfupdate.extractBinary against binaryName (+ ".exe" on
+	// Windows) and install.sh against ${BINARY_NAME} — so renaming it here publishes an
+	// archive neither can open. Nothing else would notice: the label guards compare
+	// labels, install.sh never runs on Windows, and there is no Windows job in CI, so
+	// the .exe arm would fail first and only for users of the one platform nothing here
+	// executes.
+	for _, assign := range []string{
+		"bin=\"synty-sync\"",
+		"if [ \"$goos\" = \"windows\" ]; then bin=\"synty-sync.exe\"; fi",
+	} {
+		if !strings.Contains(string(raw), assign) {
+			t.Errorf("release.yml no longer contains %s; selfupdate.extractBinary and install.sh both match the zip entry by exact name", assign)
+		}
+	}
 	sh, err := os.ReadFile("install.sh")
 	if err != nil {
 		t.Fatalf("read install.sh: %v", err)
@@ -782,6 +797,25 @@ func TestReleaseRunsTheSameGateAMergeDoes(t *testing.T) {
 	}
 	if regexp.MustCompile(`continue-on-error:\s*true`).Match(release) {
 		t.Error("release.yml has a continue-on-error, which can let a failed gate through")
+	}
+
+	// And the gate itself waits on the branch check. A tag is pushed by hand and can
+	// name any commit in the repo, so without this a `git tag v1.2.3 <sha-on-a-branch>`
+	// publishes binaries from code that never landed on main: tested, but not what main
+	// carries and not what anyone reviewed. Dropping either the job or the needs leaves
+	// every other assertion here green.
+	if !regexp.MustCompile(`(?m)^  check-branch:$`).Match(release) {
+		t.Error("release.yml no longer has a check-branch job; a tag on an unmerged branch could publish")
+	}
+	if !strings.Contains(string(release), "git merge-base --is-ancestor") {
+		t.Error("check-branch no longer proves the tagged commit is an ancestor of main")
+	}
+	gates := regexp.MustCompile(`(?s)\n  test:\n(.*?)(\n  \w|\z)`).FindSubmatch(release)
+	if gates == nil {
+		t.Fatal("no test job found in release.yml")
+	}
+	if !strings.Contains(string(gates[1]), "needs: check-branch") {
+		t.Error("the test job no longer waits on check-branch; a tag off main could reach the release job")
 	}
 
 	// go.mod is the single source of the toolchain version in both files.

@@ -407,18 +407,24 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 		if !ok || pick[key] != e.Name() {
 			continue
 		}
+		// The layout copy wins, and the question is whether the layout holds this
+		// wanted file at all, not whether it holds this exact name. Asking the name
+		// leaves every equivalence the matcher grants — a (N) collision copy, a
+		// .unitypackage against a .zip, a dot- against an underscore-rendered version —
+		// pointing at a target that does not exist, so the rename proceeds and the
+		// layout ends up holding two copies of one file identity. The caller then
+		// hashes the one it just moved and records that sha, and nothing ever
+		// references the other again: the syncer prunes only the path it recorded and
+		// the sweep spares anything without the temp prefix.
+		if _, already := Locate(libraryRoot, w); already {
+			continue
+		}
 		rel := RelPath(w.FileToken, e.Name())
 		dest := filepath.Join(libraryRoot, filepath.FromSlash(w.FileToken))
 		if err := os.MkdirAll(dest, 0o755); err != nil {
 			return results, err
 		}
 		target := filepath.Join(dest, e.Name())
-		if _, err := os.Stat(target); err == nil {
-			// The layout copy wins. os.Rename would replace it silently, and the caller
-			// hashes whatever lands here and records that sha, so a stale flat file would
-			// be adopted as verified content.
-			continue
-		}
 		from := filepath.Join(libraryRoot, e.Name())
 		if err := os.Rename(from, target); err != nil {
 			return results, fmt.Errorf("migrate %s: %w", e.Name(), err)

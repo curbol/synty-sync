@@ -37,7 +37,10 @@ func TestReconcilePreservesEnabledAddsNewDisabled(t *testing.T) {
 }
 
 func TestEnabledSetAndSetEnabled(t *testing.T) {
-	m := Manifest{Packs: []Entry{{Slug: "a"}, {Slug: "b"}, {Slug: "c"}}}
+	// b starts enabled and is left out of the selection, because unchecking a pack on
+	// the select page is how it is deselected, and a SetEnabled that only ever turns
+	// packs on keeps downloading that pack every sync while the page reports it off.
+	m := Manifest{Packs: []Entry{{Slug: "a"}, {Slug: "b", Enabled: true}, {Slug: "c"}}}
 	m.SetEnabled(map[string]bool{"a": true, "c": true})
 	set := m.EnabledSet()
 	if !set["a"] || set["b"] || !set["c"] {

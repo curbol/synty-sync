@@ -66,7 +66,21 @@ func TestFailedWriteLeavesThePriorFileAndNoTemp(t *testing.T) {
 	}
 
 	boom := errors.New("encoder gave up")
-	if err := Write(path, ".tmp-*", func(io.Writer) error { return boom }); !errors.Is(err, boom) {
+	if err := Write(path, ".tmp-*", func(w io.Writer) error {
+		// The temp has to live in the destination's own directory, or the rename that
+		// finishes the write crosses a filesystem and fails with EXDEV on the ordinary
+		// Linux layout: a tmpfs /tmp and the consuming project on /home. Nothing else
+		// here can see that — t.TempDir() and $TMPDIR are the same filesystem under
+		// test, and the entry count below reads the same either way.
+		named, ok := w.(interface{ Name() string })
+		if !ok {
+			t.Fatalf("Write handed the encoder a %T, which cannot be asked where it lives", w)
+		}
+		if got := filepath.Dir(named.Name()); got != dir {
+			t.Errorf("temp is in %q, want %q; a rename out of there fails with EXDEV", got, dir)
+		}
+		return boom
+	}); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the encoder's own error", err)
 	}
 

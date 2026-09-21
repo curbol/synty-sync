@@ -21,6 +21,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/curbol/synty-sync/internal/atomicfile"
 )
 
 const binaryName = "synty-sync"
@@ -326,6 +328,10 @@ func replaceBinary(newPath, exe string) error {
 			return fmt.Errorf("installing the new binary: %w", copyErr)
 		}
 	}
+	// The new bytes were flushed before they were renamed; this flushes the name that
+	// points at them, so a crash cannot leave the directory still naming the binary
+	// this call just moved aside and removed.
+	atomicfile.SyncDir(filepath.Dir(exe))
 	// Removing the running image fails on Windows; the next update clears it.
 	os.Remove(aside)
 	return nil
@@ -404,8 +410,16 @@ func extractBinary(zipPath, dir string) (string, error) {
 			w.Close()
 			return "", err
 		}
-		// Check the close: a flush failure here would otherwise yield a silently
-		// truncated binary that the caller renames over the running executable.
+		// Sync before the close, and the close checked rather than deferred. The close
+		// catches a write error; only the sync makes the bytes durable, and the caller
+		// renames this file over the running executable. A rename is journaled ahead of
+		// the data it names, so a crash in the writeback window otherwise leaves a
+		// full-length file of zeros wearing the install path and the executable bit —
+		// and no binary left to run `update` again with.
+		if err := w.Sync(); err != nil {
+			w.Close()
+			return "", err
+		}
 		if err := w.Close(); err != nil {
 			return "", err
 		}
@@ -448,7 +462,12 @@ func copyFile(src, dst string) error {
 		out.Close()
 		return err
 	}
-	// Checked, not deferred: a flush failure here would otherwise yield a silently
-	// truncated copy that the caller renames over the running executable.
+	// Sync before the close, and the close checked rather than deferred, for the same
+	// reason extractBinary does both: the close catches a write error, the sync is what
+	// survives a crash between the rename and writeback.
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
 	return out.Close()
 }

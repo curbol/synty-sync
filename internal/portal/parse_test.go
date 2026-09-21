@@ -134,6 +134,43 @@ func TestParseItemSourceSpritesSplitLess(t *testing.T) {
 	}
 }
 
+// The variant is the last segment before " | ", so the split point is the *rightmost*
+// keyword. Every label the fixtures carry holds its keyword exactly once, which makes
+// the rule invisible: strings.Index in place of strings.LastIndex, or a break on the
+// first hit, leaves the whole suite green. A pack name that itself contains a keyword
+// is what tells them apart, and it is also what a keyword added as the suffix of an
+// existing one ("Files" beside "SourceFiles") would break.
+func TestSplitLabelTakesTheRightmostKeyword(t *testing.T) {
+	for _, tc := range []struct {
+		label                   string
+		token, variant, version string
+	}{
+		// The token repeats the keyword its own variant uses: the only shape where the
+		// rightmost rule and a leftmost one disagree, since the split point is the
+		// maximum across keywords and every other label carries each keyword once.
+		{"POLYGON_Unity_Town_Unity_2022_3 | v1_0_1", "POLYGON_Unity_Town", "Unity_2022_3", "v1_0_1"},
+		{"SIMPLE_Godot_Kit_Godot_4_5_1 | v2", "SIMPLE_Godot_Kit", "Godot_4_5_1", "v2"},
+		// The token carries a different keyword from the variant's: this is what a
+		// break on the first match would get wrong.
+		{"POLYGON_Unity_Town_SourceFiles | v1_0_1", "POLYGON_Unity_Town", "SourceFiles", "v1_0_1"},
+		{"SIMPLE_Godot_Props_Unreal_5_3 | v2", "SIMPLE_Godot_Props", "Unreal_5_3", "v2"},
+		// The two shapes the fixtures actually carry, so the rule stays pinned against
+		// the real markup as well as the synthetic case.
+		{"INTERFACE_Dark_Fantasy_HUD_SourceSprites | v3", "INTERFACE_Dark_Fantasy_HUD", "SourceSprites", "v3"},
+		{"POLYGON_PirateGodot_4_5_1 | v1_0_1", "POLYGON_Pirate", "Godot_4_5_1", "v1_0_1"},
+	} {
+		token, variant, version, ok, err := splitLabel(tc.label)
+		if err != nil || !ok {
+			t.Errorf("splitLabel(%q) = ok %v, err %v", tc.label, ok, err)
+			continue
+		}
+		if token != tc.token || variant != tc.variant || version != tc.version {
+			t.Errorf("splitLabel(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				tc.label, token, variant, version, tc.token, tc.variant, tc.version)
+		}
+	}
+}
+
 func TestParseItemArchivedFlag(t *testing.T) {
 	files, _, err := ParseItemPage(read(t, "item_2.html"), "polygon-alpine-mountain-nature-biome")
 	if err != nil {

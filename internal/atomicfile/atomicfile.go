@@ -48,17 +48,21 @@ func Write(path, tempPattern string, write func(io.Writer) error) error {
 		os.Remove(tmpName)
 		return err
 	}
-	syncDir(filepath.Dir(path))
+	SyncDir(filepath.Dir(path))
 	return nil
 }
 
-// syncDir flushes the directory entry the rename created. The Sync above makes the
+// SyncDir flushes the directory entry a rename created. Syncing the file makes the
 // new bytes durable; this is what makes the name pointing at them durable, so a crash
-// cannot leave the directory still naming the file this call replaced.
+// cannot leave the directory still naming the file the rename replaced.
+//
+// Exported because Write is not the only place that finishes with a rename: selfupdate
+// renames an extracted binary over the running one, and the durability half of that
+// contract belongs here with the rest of it rather than in a second copy that can drift.
 //
 // Best-effort on purpose: Windows does not hand out a syncable handle for a directory,
 // and a write that genuinely landed must not be reported as failed there.
-func syncDir(dir string) {
+func SyncDir(dir string) {
 	d, err := os.Open(dir)
 	if err != nil {
 		return

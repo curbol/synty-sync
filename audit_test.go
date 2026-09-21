@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,16 +221,10 @@ func TestSelectPacksWritesOnlyWhatWasChosen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				const sentinel = `<input class='sky-pilot-search-input'>`
-				if r.URL.Query().Get("line_items_page") == "1" {
-					fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-						`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate Pack</a>`+
-						`<a href='/apps/downloads/customers/1/orders/2/order_items/4' class='sky-pilot-list-item'>Dungeon Pack</a></div>`)
-					return
-				}
-				fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
-			}))
+			srv := httptest.NewServer(libraryStore([]stubPack{
+				{orderItem: 3, name: "Pirate Pack"},
+				{orderItem: 4, name: "Dungeon Pack"},
+			}, nil))
 			defer srv.Close()
 
 			manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
@@ -328,20 +323,14 @@ func TestSyncOnlyTouchesEnabledPacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var itemPageFetches int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const sentinel = `<input class='sky-pilot-search-input'>`
-		if r.URL.Query().Get("line_items_page") == "1" {
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Off</a></div>`)
-			return
-		}
-		if r.URL.Query().Get("line_items_page") != "" {
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
-			return
-		}
-		itemPageFetches++
-		http.NotFound(w, r)
-	}))
+	// The pack lists no file, so its item page is not served by the walk: a fetch of it
+	// lands here and is counted.
+	srv := httptest.NewServer(libraryStore(
+		[]stubPack{{orderItem: 3, name: "Off"}},
+		func(w http.ResponseWriter, r *http.Request) {
+			itemPageFetches++
+			http.NotFound(w, r)
+		}))
 	defer srv.Close()
 
 	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
@@ -355,6 +344,42 @@ func TestSyncOnlyTouchesEnabledPacks(t *testing.T) {
 	}
 }
 
+// --dry-run is only a promise if it survives the trip from the flag to the option.
+// isDryRun is unit-tested and runSyncOrStatus is driven with dry passed straight in,
+// so nothing followed f.dryRun through run: a flag that stopped being read would let
+// `sync --dry-run` download the entire delta and rewrite the committed lockfile while
+// the report it printed said it had only looked.
+func TestSyncDryRunDownloadsNothingAndWritesNoLockfile(t *testing.T) {
+	var downloads int32
+	serveStore(t, libraryStore(
+		[]stubPack{{orderItem: 3, name: "Pirate", token: "POLYGON_Pirate", fileID: 77, version: "v1.0.0"}},
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&downloads, 1)
+			w.Header().Set("Content-Type", "application/zip")
+			fmt.Fprint(w, "PK\x03\x04 not really a pack")
+		}))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate\"\n  name = \"Pirate\"\n  enabled = true\n")
+
+	out := &bytes.Buffer{}
+	stdoutWas := stdout
+	stdout = out
+	defer func() { stdout = stdoutWas }()
+
+	if err := run(e.args("sync", "-dry-run")); err != nil {
+		t.Fatalf("sync --dry-run: %v", err)
+	}
+	if n := atomic.LoadInt32(&downloads); n != 0 {
+		t.Errorf("--dry-run issued %d download request(s)", n)
+	}
+	if _, err := os.Stat(e.lockPath); !os.IsNotExist(err) {
+		t.Errorf("--dry-run wrote the committed lockfile at %s (stat err %v)", e.lockPath, err)
+	}
+	// And it said so, rather than reporting downloads it did not make.
+	if !strings.Contains(out.String(), "would download: 1 files") {
+		t.Errorf("the report does not read as a dry run:\n%s", out.String())
+	}
+}
+
 // A sync where the store answers downloads with a login page has to exit non-zero.
 // The files it could not fetch are the whole point of the command, and a silent
 // success is what turns a dead session into a mirror everyone believes is current.
@@ -365,24 +390,9 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 		"variant_includes = [\"Godot_*\"]\n\n[[pack]]\nslug = \"pirate\"\nname = \"Pirate\"\nenabled = true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	const sentinel = `<input class='sky-pilot-search-input'>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Query().Get("line_items_page") == "1":
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate</a></div>`)
-		case r.URL.Query().Get("line_items_page") != "":
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
-		case strings.Contains(r.URL.Path, "/order_items/"):
-			fmt.Fprint(w, `<div class='sky-pilot-list-item'>
-			  <div class='sky-pilot-file-heading'>POLYGON_Pirate_Godot_4_5_1 | v1.0.0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
-			  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/77?x=1'>Download</a></div>
-			</div>`)
-		default:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, `<!doctype html><title>Log in</title>`)
-		}
-	}))
+	srv := httptest.NewServer(libraryStore(
+		[]stubPack{{orderItem: 3, name: "Pirate", token: "POLYGON_Pirate", fileID: 77, version: "v1.0.0"}},
+		loginPage))
 	defer srv.Close()
 
 	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
@@ -497,6 +507,65 @@ func serveStore(t *testing.T, h http.Handler) {
 	prev := storeBaseURL
 	storeBaseURL = srv.URL
 	t.Cleanup(func() { storeBaseURL = prev; srv.Close() })
+}
+
+// stubPack is one pack a stubbed store lists, plus the single Godot file its item page
+// offers. The order-item id is what the library anchor and the item-page route share;
+// an empty token means the pack has no item page, so a test can prove one was never
+// fetched.
+type stubPack struct {
+	orderItem int
+	name      string
+	token     string
+	fileID    int
+	version   string
+}
+
+// libraryStore serves the enumeration walk and the item pages behind it: page 1 lists
+// packs, every later page is the empty authenticated terminator, and a pack carrying a
+// token answers its item page with one downloadable file. Everything else — the signed
+// URL a download resolves to, and an item page a test wants to count or refuse — goes
+// to rest. That last handler is the only thing that actually differs between these
+// tests, and each of them used to wrap its own copy of the walk around it.
+func libraryStore(packs []stubPack, rest http.HandlerFunc) http.HandlerFunc {
+	const sentinel = `<input class='sky-pilot-search-input'>`
+	if rest == nil {
+		rest = http.NotFound
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Query().Get("line_items_page") == "1":
+			var b strings.Builder
+			b.WriteString(`<div class='sky-pilot'>` + sentinel)
+			for _, p := range packs {
+				fmt.Fprintf(&b, `<a href='/apps/downloads/customers/1/orders/2/order_items/%d' `+
+					`class='sky-pilot-list-item'>%s</a>`, p.orderItem, p.name)
+			}
+			b.WriteString(`</div>`)
+			fmt.Fprint(w, b.String())
+		case r.URL.Query().Get("line_items_page") != "":
+			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
+		default:
+			for _, p := range packs {
+				if p.token == "" || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/order_items/%d", p.orderItem)) {
+					continue
+				}
+				fmt.Fprintf(w, `<div class='sky-pilot-list-item'>
+				  <div class='sky-pilot-file-heading'>%s_Godot_4_5_1 | %s <span class='sky-pilot-file-size'>(40 MB)</span></div>
+				  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/%d?x=1'>Download</a></div>
+				</div>`, p.token, p.version, p.fileID)
+				return
+			}
+			rest(w, r)
+		}
+	}
+}
+
+// loginPage is what the store answers a download request with once the session is
+// gone: a document where package bytes should be.
+func loginPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, `<!doctype html><title>Log in</title>`)
 }
 
 // Everything between parsing a flag and issuing a request happens in run and nowhere
@@ -658,23 +727,9 @@ func TestSyncWithAGoneFileReportsItWithoutFailingTheRun(t *testing.T) {
 		"variant_includes = [\"Godot_*\"]\n\n[[pack]]\nslug = \"pirate\"\nname = \"Pirate\"\nenabled = true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	const sentinel = `<input class='sky-pilot-search-input'>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Query().Get("line_items_page") == "1":
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate</a></div>`)
-		case r.URL.Query().Get("line_items_page") != "":
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
-		case strings.Contains(r.URL.Path, "/order_items/"):
-			fmt.Fprint(w, `<div class='sky-pilot-list-item'>
-			  <div class='sky-pilot-file-heading'>POLYGON_Pirate_Godot_4_5_1 | v1.0.0 <span class='sky-pilot-file-size'>(40 MB)</span></div>
-			  <div class='sky-pilot-actions'><a href='/apps/downloads/downloads/77?x=1'>Download</a></div>
-			</div>`)
-		default:
-			http.NotFound(w, r) // the store no longer serves this file
-		}
-	}))
+	srv := httptest.NewServer(libraryStore(
+		[]stubPack{{orderItem: 3, name: "Pirate", token: "POLYGON_Pirate", fileID: 77, version: "v1.0.0"}},
+		http.NotFound)) // the store no longer serves this file
 	defer srv.Close()
 
 	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
@@ -900,17 +955,7 @@ func TestListDoesNotNeedAReadableUserConfig(t *testing.T) {
 // wrap on the way out. Entering at selectPacks skips all of it, so a bad bind string
 // or a lost sentinel would ship with the suite green.
 func TestRunSelectServesOnTheAddressItWasGiven(t *testing.T) {
-	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// One owned pack on page 1, then the authenticated terminator. Serving the same
-		// page for every page number is a paginator that never advances, which Enumerate
-		// rightly refuses.
-		if r.URL.Query().Get("line_items_page") == "1" {
-			fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'>
-			  <a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>POLYGON - Pirate Pack</a></div>`)
-			return
-		}
-		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
-	}))
+	serveStore(t, libraryStore([]stubPack{{orderItem: 3, name: "POLYGON - Pirate Pack"}}, nil))
 	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 
 	// An ephemeral port, so the test never contends for the 8787 default. Binding and
@@ -972,9 +1017,10 @@ func TestRunSelectServesOnTheAddressItWasGiven(t *testing.T) {
 // An address already in use has to come back naming it, not as a bare syscall error:
 // 8787 is the default and something else holding it is the likeliest way select fails.
 func TestRunSelectReportsAnAddressItCannotBind(t *testing.T) {
-	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `<div class='sky-pilot'><input class='sky-pilot-search-input'></div>`)
-	}))
+	// A pack the store does own, so the manifest check below can actually fail: against
+	// an empty library, falling through to the rest of select would write nothing
+	// either, and the assertion would pass whatever run did.
+	serveStore(t, libraryStore([]stubPack{{orderItem: 3, name: "Pirate Pack"}}, nil))
 	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
 
 	held, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1094,15 +1140,7 @@ func TestSelectRefusesANonLoopbackAddr(t *testing.T) {
 // (Report.Removed); this is the same record for the file that holds the selection.
 func TestSelectNamesThePacksItDropsFromTheManifest(t *testing.T) {
 	// The library lists only the pirate pack; the manifest holds both, enabled.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const sentinel = `<input class='sky-pilot-search-input'>`
-		if r.URL.Query().Get("line_items_page") == "1" {
-			fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+
-				`<a href='/apps/downloads/customers/1/orders/2/order_items/3' class='sky-pilot-list-item'>Pirate Pack</a></div>`)
-			return
-		}
-		fmt.Fprint(w, `<div class='sky-pilot'>`+sentinel+`</div>`)
-	}))
+	srv := httptest.NewServer(libraryStore([]stubPack{{orderItem: 3, name: "Pirate Pack"}}, nil))
 	defer srv.Close()
 
 	manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
@@ -1168,5 +1206,60 @@ func TestListSaysSoWhenThereIsNoLockfileYet(t *testing.T) {
 	}
 	if strings.Contains(got, "* = downloaded") {
 		t.Errorf("printed the legend for an empty table:\n%s", got)
+	}
+}
+
+// The README tells the user to copy config.example.toml into their config dir, and
+// both loaders reject an unknown key outright. So a renamed toml tag turns the
+// committed example into a file that fails every command with "unknown key(s)", and
+// the examples are the one schema description nothing else parses.
+//
+// The commented-out keys are uncommented first: left as they ship, a plain parse
+// exercises only session_source and concurrency, and customer_id, library_path and the
+// whole [[pack]] block — the set most likely to be renamed — would go unchecked.
+func TestCommittedExamplesStillParse(t *testing.T) {
+	// A leading "# " in front of a key or a table header, and nothing else: no prose
+	// line in either file opens that way.
+	commented := regexp.MustCompile(`(?m)^#[ \t]*(\[\[pack\]\]|[a-z_]+[ \t]*=)`)
+	uncomment := func(t *testing.T, path string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return commented.ReplaceAllFunc(raw, func(line []byte) []byte {
+			return bytes.TrimLeft(line[1:], " \t")
+		})
+	}
+
+	// The environment is cleared so the assertion is about the file rather than about
+	// whatever the machine running the suite exports.
+	t.Setenv("SYNTY_CUSTOMER_ID", "")
+	t.Setenv("SYNTY_LIBRARY", "")
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), uncomment(t, "config.example.toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgDir)
+	if err != nil {
+		t.Fatalf("config.example.toml no longer parses as a config.toml: %v", err)
+	}
+	if cfg.CustomerID == "" || cfg.LibraryPath == "" || cfg.Concurrency == 0 {
+		t.Errorf("the example set no customer id, library path or concurrency: %+v", cfg)
+	}
+
+	manifestPath := filepath.Join(t.TempDir(), manifest.FileName)
+	if err := os.WriteFile(manifestPath, uncomment(t, "synty-sync.example.toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	man, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatalf("synty-sync.example.toml no longer parses as a manifest: %v", err)
+	}
+	if len(man.VariantIncludes) == 0 {
+		t.Error("the example manifest carries no variant_includes, which every sync requires")
+	}
+	if len(man.Packs) == 0 {
+		t.Error("the example manifest's [[pack]] block no longer decodes")
 	}
 }

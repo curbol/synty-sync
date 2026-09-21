@@ -105,40 +105,60 @@ func TestCachePathsAcceptOrdinaryRelativePaths(t *testing.T) {
 	}
 }
 
-// Migrate matches flat zips by name alone. When a copy is already in the layout and
-// the lockfile no longer records it, moving the flat zip over it replaces verified
-// bytes with unverified ones — and the caller then hashes the result and records
-// that sha, so a truncated download becomes permanently "verified".
+// Migrate matches flat files through the same normalizing matcher Locate uses, so the
+// layout copy has to win against every name that matcher calls equal, not just against
+// the identical one. A guard that compares the exact filename leaves the (N) collision
+// copy, the .unitypackage against a .zip, and the dot- against the underscore-rendered
+// version all pointing at a target that does not exist: the rename proceeds, the layout
+// ends up holding two copies of one file identity, and the caller hashes the one it just
+// moved and records that sha while nothing ever references the other again.
 func TestMigrateDoesNotClobberLayoutCopy(t *testing.T) {
-	lib := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(lib, "TOK"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	good := filepath.Join(lib, "TOK", "TOK_Godot_4_5_1_v1.zip")
-	if err := os.WriteFile(good, []byte("GOOD-COMPLETE-BYTES"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	flat := filepath.Join(lib, "TOK_Godot_4_5_1_v1.zip")
-	if err := os.WriteFile(flat, []byte("TRUNC"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	const layoutName = "TOK_Godot_4_5_1_v1_0_1.zip"
+	for _, flatName := range []string{
+		layoutName,                            // the identical name
+		"TOK_Godot_4_5_1_v1_0_1(1).zip",       // a second browser download
+		"TOK_Godot_4_5_1_v1_0_1.unitypackage", // the same file in the other container
+		"TOK_Godot_4_5_1_v1.0.1.zip",          // the version rendered with dots
+	} {
+		t.Run(flatName, func(t *testing.T) {
+			lib := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(lib, "TOK"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			good := filepath.Join(lib, "TOK", layoutName)
+			if err := os.WriteFile(good, []byte("GOOD-COMPLETE-BYTES"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			flat := filepath.Join(lib, flatName)
+			if err := os.WriteFile(flat, []byte("TRUNC"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(good)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "GOOD-COMPLETE-BYTES" {
-		t.Errorf("layout copy was overwritten by the flat zip: %q", got)
-	}
-	if len(res) != 0 {
-		t.Errorf("reported a migration that did not happen: %+v", res)
-	}
-	if _, err := os.Stat(flat); err != nil {
-		t.Errorf("the unmigrated flat zip should be left for the user, got %v", err)
+			res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(good)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "GOOD-COMPLETE-BYTES" {
+				t.Errorf("layout copy was overwritten by the flat file: %q", got)
+			}
+			if len(res) != 0 {
+				t.Errorf("reported a migration that did not happen: %+v", res)
+			}
+			if _, err := os.Stat(flat); err != nil {
+				t.Errorf("the unmigrated flat file should be left for the user, got %v", err)
+			}
+			entries, err := os.ReadDir(filepath.Join(lib, "TOK"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Errorf("the layout holds %d copies of one file identity, want 1: %v", len(entries), entries)
+			}
+		})
 	}
 }
 

@@ -21,23 +21,35 @@ import (
 )
 
 // A rate limit clears by waiting, unlike the other 4xx statuses, so a download must
-// keep its remaining attempts.
+// keep its remaining attempts. The two not-a-package sentinels are the opposite case:
+// no number of fetches turns a login page into a pack, so stopping on them is what
+// keeps an expired session from spending every attempt and every backoff on each file
+// in the library before reporting a failure it knew on the first byte.
 func TestRateLimitIsRetryable(t *testing.T) {
 	for _, tc := range []struct {
-		status    int
+		name      string
+		err       error
 		permanent bool
 	}{
-		{http.StatusNotFound, true},
-		{http.StatusUnauthorized, true},
-		{http.StatusGone, true},
-		{http.StatusForbidden, false},       // expired signature; a fresh Resolve re-signs
-		{http.StatusTooManyRequests, false}, // rate limit; backing off clears it
-		{http.StatusRequestTimeout, false},  // the server says the request did not finish in time
-		{http.StatusInternalServerError, false},
+		{"404", &portal.StatusError{Status: http.StatusNotFound, Op: "download T|Godot"}, true},
+		{"401", &portal.StatusError{Status: http.StatusUnauthorized, Op: "download T|Godot"}, true},
+		{"410", &portal.StatusError{Status: http.StatusGone, Op: "download T|Godot"}, true},
+		// expired signature; a fresh Resolve re-signs
+		{"403", &portal.StatusError{Status: http.StatusForbidden, Op: "download T|Godot"}, false},
+		// rate limit; backing off clears it
+		{"429", &portal.StatusError{Status: http.StatusTooManyRequests, Op: "download T|Godot"}, false},
+		// the server says the request did not finish in time
+		{"408", &portal.StatusError{Status: http.StatusRequestTimeout, Op: "download T|Godot"}, false},
+		{"500", &portal.StatusError{Status: http.StatusInternalServerError, Op: "download T|Godot"}, false},
+		// The content-type refusal and the body sniff, each as its caller wraps it.
+		{"not-a-package type", fmt.Errorf("download T|Godot: %w (Content-Type text/html)", portal.ErrNotAPackage), true},
+		{"not-a-package body", fmt.Errorf("T|Godot: %w", ErrNotAPackageBody), true},
+		// A transport failure carries no status and no sentinel, and retrying is the
+		// whole point of one.
+		{"no status", errors.New("connection reset by peer"), false},
 	} {
-		err := &portal.StatusError{Status: tc.status, Op: "download T|Godot"}
-		if got := permanentDownloadFailure(err); got != tc.permanent {
-			t.Errorf("status %d: permanent = %v, want %v", tc.status, got, tc.permanent)
+		if got := permanentDownloadFailure(tc.err); got != tc.permanent {
+			t.Errorf("%s: permanent = %v, want %v", tc.name, got, tc.permanent)
 		}
 	}
 }

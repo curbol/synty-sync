@@ -38,11 +38,13 @@ func TestDefaultsWhenNoConfig(t *testing.T) {
 func TestConfigFileThenEnv(t *testing.T) {
 	clearSyntyEnv(t)
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "config.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(`
 concurrency = 2
 customer_id = "1234567890123"
 library_path = "/from/file"
-`), 0o644)
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	c, err := Load(dir)
 	if err != nil {
@@ -57,6 +59,19 @@ library_path = "/from/file"
 	c, _ = Load(dir)
 	if c.LibraryPath != "/from/env" || c.CustomerID != "9999999999999" {
 		t.Errorf("env should override config.toml: %+v", c)
+	}
+
+	// And the expansion runs after the environment, not inside the config-file overlay.
+	// No shell expands a value exported as SYNTY_LIBRARY="~/assets" (a quoted export, a
+	// systemd unit, direnv), so moving ExpandHome up alongside the other per-field logic
+	// keeps every assertion above green while the mirror lands in a directory literally
+	// named "~" that the user will never find.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SYNTY_LIBRARY", "~/assets")
+	c, _ = Load(dir)
+	if want := filepath.Join(home, "assets"); c.LibraryPath != want {
+		t.Errorf("LibraryPath = %q, want %q; a tilde from the environment was not expanded", c.LibraryPath, want)
 	}
 }
 
