@@ -254,7 +254,19 @@ func FromBrowser(name string) (string, error) {
 		cands = append(cands, found...)
 	}
 	if len(cands) == 0 {
-		return "", errors.Join(errs...)
+		// errors.Join is nil for an empty slice, so returning it alone would hand back an
+		// empty header and no error the moment a base is ever skipped rather than
+		// reported. main puts that straight in the Cookie header, the store answers with a
+		// logged-out page, and the run blames an expired session for a profile it never
+		// found. Say what actually happened instead.
+		if err := errors.Join(errs...); err != nil {
+			return "", err
+		}
+		searched := make([]string, 0, len(bases))
+		for _, rel := range bases {
+			searched = append(searched, filepath.Join(home, rel))
+		}
+		return "", fmt.Errorf("no %s profile found under %s (set SYNTY_BROWSER_PROFILE)", name, strings.Join(searched, ", "))
 	}
 	return geckoCookieHeader(pickGeckoProfile(cands))
 }

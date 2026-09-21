@@ -476,6 +476,25 @@ func TestBrowserProfileOverrideIsHonored(t *testing.T) {
 	}
 }
 
+// FromBrowser aggregates per-base failures and hands back errors.Join, which is nil
+// for an empty slice. A base ever skipped rather than reported would return an empty
+// Cookie header with no error, and the logged-out page the store then serves comes
+// back as an expired session, sending the reader to log in again in a browser nothing
+// ever read.
+func TestFromBrowserWithNoProfileAnywhereIsAnError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
+	t.Setenv("SYNTY_BROWSER_PROFILE", "")
+	got, err := FromBrowser("firefox")
+	if err == nil {
+		t.Fatalf("FromBrowser = %q, nil; want an error naming the profiles it could not find", got)
+	}
+	if got != "" {
+		t.Errorf("Cookie header = %q, want it empty alongside the error", got)
+	}
+}
+
 // A source that is neither a browser name nor a path is far more often a mistyped
 // browser than a missing file, and the bare open error does not say so.
 func TestMistypedBrowserNamesTheOnesThatWork(t *testing.T) {
@@ -536,7 +555,9 @@ func TestTheMostSpecificHostWinsACookieName(t *testing.T) {
 func TestALiveProfileBeatsALeftoverInAnEarlierBase(t *testing.T) {
 	bases := browserBases(runtime.GOOS, "zen")
 	if len(bases) < 2 {
-		t.Fatalf("zen has %d profile base(s) on %s; this guard needs two to order", len(bases), runtime.GOOS)
+		// A skip, not a failure: the multi-base layout this guard is about only exists
+		// on Linux, and a red guard is supposed to mean a regression.
+		t.Skipf("zen has %d profile base(s) on %s; ranking across bases only arises where there are two", len(bases), runtime.GOOS)
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)

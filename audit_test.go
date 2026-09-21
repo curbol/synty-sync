@@ -1331,10 +1331,11 @@ func TestSyncNamesAManifestThatIsNotThere(t *testing.T) {
 // guardFiles are the test files that hold guard tests. Every audit_test.go by
 // convention, plus the two that cannot be one: install_test.go guards install.sh and
 // the workflows from the root package, which already has an audit_test.go, and
-// releaseyml_test.go is the whole of a package that exists only to be a guard's parser.
-// Matching on the filename alone left both outside the check that the convention is
-// what makes these files worth having.
-var guardFiles = []string{"audit_test.go", "install_test.go", "releaseyml_test.go"}
+// releaseyml_test.go is the whole of a package that exists only to be a guard's parser,
+// and guard_test.go holds the PII guards, which cannot live in internal/fixtures's own
+// suite because they are the suite. Matching on the filename alone left them outside
+// the check that the convention is what makes these files worth having.
+var guardFiles = []string{"audit_test.go", "install_test.go", "releaseyml_test.go", "guard_test.go"}
 
 // The convention is that each guard test carries a comment naming the specific failure
 // it prevents. That comment is what makes a red guard read as a regression rather than
@@ -1361,7 +1362,7 @@ func TestEveryGuardTestSaysWhatItPrevents(t *testing.T) {
 	}
 	// A wrong glob that matched nothing would pass this vacuously, and the count only
 	// ever grows.
-	if len(files) < 11 {
+	if len(files) < 13 {
 		t.Fatalf("found %d guard files (%v); the walk no longer reaches them", len(files), files)
 	}
 

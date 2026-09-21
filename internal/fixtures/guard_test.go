@@ -193,6 +193,10 @@ func TestFixtureNamesCarryNoPII(t *testing.T) {
 	}
 }
 
+// The account email rides in every download href on an item page, so a capture taken
+// without the scrub map, or a page shape the map does not cover, commits the real
+// address to git history, where deleting it later does not take it back. This is the
+// content half; TestFixtureNamesCarryNoPII is the filename half.
 func TestNoEmailExceptFake(t *testing.T) {
 	for name, content := range readFixtures(t) {
 		for _, m := range emailRe.FindAllString(content, -1) {
