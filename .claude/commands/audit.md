@@ -49,8 +49,10 @@ is a second or two.
 
 This is exactly the gate in `.github/workflows/ci.yml`, which `release.yml` calls as its
 own gate, so the bar here is the bar for merging and tagging. There is no Makefile, task
-runner, or linter config: `go vet` is the only static analysis wired up, which matters in
-Step 5 when a mechanizable class needs somewhere to live.
+runner, or linter config: `go vet` is the only static analysis wired up. So in Step 5 a
+mechanizable class has two homes: introducing a linter (`.golangci.yml`, wired into the
+`check` job in `.github/workflows/ci.yml`) or a guard test in the relevant package's
+`audit_test.go`. Say which, and what it subsumes.
 
 The suite is fully offline and hermetic: portal and web tests run against
 `net/http/httptest` servers and the committed `testdata/portal/*.html` captures, session
@@ -93,8 +95,9 @@ agents run in parallel:
   the config → session → client wiring, report printing, the exit status, and the local
   page `select` serves. What goes wrong here is a stray positional swallowing the flags
   after it, an error losing the sentinel a caller checks, a failure class that stops
-  moving the exit status, and a submission that rewrites the committed allowlist with
-  less than the user chose.
+  moving the exit status, a submission that rewrites the committed allowlist with less
+  than the user chose, and a request from off this machine or another origin reaching
+  `/save`.
 - **Distribution** — `internal/selfupdate/`, `internal/releaseyml/`, `install.sh`,
   `install_test.go`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`. How the
   binary is built, released, installed, and replaced in place. What goes wrong here is a
@@ -156,27 +159,38 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   `TestChangedBundledFileKeepsOwningPacksInAgreement`,
   `TestFailedUpdateKeepsOwningPacksInAgreement`,
   `TestFailedCacheMissingKeepsOwningPacksInAgreement`, and
-  `TestDivergentLabelsKeepInScopeOwnersInAgreementWhenNothingResolves`. The second shape is
+  `TestDivergentLabelsKeepInScopeOwnersInAgreementWhenNothingResolves`. Every entry a run
+  writes goes through one `verdicts` channel: `live` (what the store calls the file now),
+  `resolved` (bytes the run has), `unresolved` (looked for, not found), or `deselected`
+  (read and declined, against why). A verdict reaching an entry through none of them leaves
+  one `fileId` tracked under one owner and untracked under another. The second shape is
   identity taken off the row in front of a rebuild rather than out of `verdicts.live`: the
   store labels a bundled file per order item, so two in-scope owners reading their own rows
   commit two versions, two variants or two advertised sizes for one `fileId` at one sha.
   `applyResolved` hides it, so it only surfaces on the verdicts that resolve nothing.
 - **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
   `ErrExpiredSession` when a zero-anchor page lacks the logged-in sentinel, on **every**
-  page of the walk, not just page 1. `syncer.ErrEmptyLibrary` is the second half: an
-  enumeration that comes back empty while the lockfile holds packs is refused rather than
-  written. Violation: any path that writes the lockfile after an enumeration error, any
-  wrap that loses `errors.Is` identity (`%v` instead of `%w`, a string-matched error, a
-  swallowed one), and any zero-anchor page treated as the terminator without the sentinel
-  check. Trace `Enumerate` → `syncer.Run` → `main.run`; `explainSession` wraps it and must
-  keep the sentinel.
+  page of the walk, not just page 1. `ItemFiles` returns it too, for a session that expires
+  part way through the item-page fetches: a logout shell carries none of the parser's
+  selectors, so it checks `HasLibrarySentinel` before reporting a parse failure as changed
+  markup. `syncer.ErrEmptyLibrary` is the second half: an enumeration that comes back empty
+  while the lockfile holds packs is refused rather than written. Violation: any path that
+  writes the lockfile after an enumeration or item-page error, any wrap that loses
+  `errors.Is` identity (`%v` instead of `%w`, a string-matched error, a swallowed one), any
+  zero-anchor page treated as the terminator without the sentinel check, and an item-page
+  parse error returned without it. Trace `Enumerate` → `syncer.Run` → `main.run`;
+  `explainSession` wraps it and must keep the sentinel.
 - **Selection is opt-in, and never silently widened or wiped.** New packs are reconciled
   into the manifest **disabled**; `sync`/`status` act only on enabled packs, and
   `syncer.Options.PackSelected` is required rather than defaulting to "everything owned".
   `select` rewrites the committed allowlist from the page's response, so it drops slugs the
   page never offered (a stale tab) and refuses an empty submission while packs are enabled.
   Violation: a nil-selection fallback that means "all", a save path that writes a set the
-  page did not produce, or a disabled pack whose item page still gets fetched.
+  page did not produce, or a disabled pack whose item page still gets fetched. The page
+  decides the selection and nothing else: `selectPacks` re-reads the manifest once `Serve`
+  returns, because the wait is a person's and `Save` re-encodes the whole file. Saving the
+  copy loaded before the page opened silently reverts any hand edit made meanwhile (a
+  `variant_includes` change, say).
 - **Strict parsing, enforced at both layers.** A non-empty page yielding zero files is a
   loud error: `ParseItemPage` fails when rows exist but none carries a version, and
   `syncer.fetchAll` fails a pack that reaches it with no files at all. Every tracked row
@@ -184,6 +198,14 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   required field, an error path that returns `nil, nil`, or a new parse step whose failure
   mode is an empty result instead of an error. The consequence is always the same: an empty
   file list rebuilds the pack's lockfile entry as empty and discards every file it recorded.
+  One deliberate exception, which is not a finding: a row with a version and a download id
+  but a variant keyword this build does not recognize is a future engine, not broken
+  markup. `ParseItemPage` returns its label in `unknown` rather than failing, `fetchAll`
+  drops a pack whose every row is unknown so its prior record carries forward whole and
+  names it in the dropped-pack message, and `warnings` names each unknown label on a pack
+  that kept some files, so a renamed keyword that drops a tracked file is announced. The
+  violation shape here is the reverse: an unknown label that reaches no warning, or an
+  all-unknown pack rebuilt from its empty file list.
 - **A run only rewrites the packs it fetched, and nothing leaves the record silently.**
   Packs filtered out by the manifest or `--only` are carried forward from the prior lockfile
   rather than dropped, so the file stays a complete record of what is owned. A pack the
@@ -214,12 +236,14 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   run's adopt scan takes it for genuine. A download that answers with a document is refused
   twice — `portal.ErrNotAPackage` on Content-Type before streaming, `syncer.ErrNotAPackageBody`
   on the delivered bytes — and both are permanent, since no retry turns a login page into a
-  pack. Adoption runs the same sniff (`adoptable`), because it is the one path into the
-  lockfile that never consults `classify` and a cache written before these guards existed
-  can hold error pages under exactly the right names. The temp prefix is skipped by
-  `Migrate`, `Locate` and the adopt scan, since a partial transfer can normalize onto a
-  wanted name. Violation: a `Commit` before the sniff, an adopt path that hashes without
-  sniffing, a sniff loosened to accept text, or a scan that stops skipping `tempPrefix`.
+  pack. Adoption (`adoptable`) runs the same sniff plus `wholeArchive`, a zip
+  end-of-central-directory check, because it is the one path into the lockfile that never
+  consults `classify`, a cache written before these guards existed can hold error pages
+  under exactly the right names, and a copy that stopped part way still begins with an
+  archive's magic. The temp prefix is skipped by `Migrate`, `Locate` and the adopt scan,
+  since a partial transfer can normalize onto a wanted name. Violation: a `Commit` before the sniff, an adopt path that hashes without
+  sniffing or without `wholeArchive`, a sniff loosened to accept text, or a scan that stops
+  skipping `tempPrefix`.
 - **A failed download fails its file, not the run.** The lockfile is still written —
   aborting would throw away the record of everything the run did download. Only failures a
   later run could clear move the exit status: `Report.ActionableFailures` excludes
@@ -318,11 +342,12 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   dropped where the run should abort. Tier 1 if it hides a failed download or a corrupt
   write. `drainClose` deliberately discards, which is correct; a new one may not be.
 - `context.Context` threaded through every HTTP call and download, and cancellation honored.
-  A download carries no whole-request deadline (a pack runs to gigabytes), so the two bounds
-  that stand in for it must both survive: `Limits.PageTimeout` per page attempt, and
-  `Limits.StallTimeout` on silence inside a body, reset by every byte. Removing either
-  leaves a run that hangs indefinitely, and the retry that would re-sign an expired
-  CloudFront URL never runs. The same applies to every path in `portal.Resolve` that
+  A download carries no whole-request deadline (a pack runs to gigabytes), so the bounds
+  that stand in for it must all survive: `Limits.PageTimeout` per page attempt,
+  `Limits.HeaderTimeout` until the response headers arrive (the stall guard only starts
+  after them, so nothing else covers that phase), and `Limits.StallTimeout` on silence
+  inside a body, reset by every byte. Removing any leaves a run that hangs indefinitely,
+  and the retry that would re-sign an expired CloudFront URL never runs. The same applies to every path in `portal.Resolve` that
   discards a body rather than returning it: `drainClose` bounds bytes, not time, so those go
   through `drainCloseBounded`, or a server that sends part of a refusal and goes quiet
   blocks the read for good. Tier 1/2.
@@ -445,6 +470,17 @@ OS pick the port — so flag anything that reintroduces either.
   stay minimal (`contents: read` for CI, `write` only for the release job). Tier 1 for
   anything that lets an untested commit reach a release.
 
+**Selection page (CLI & selection page area only)**
+
+- `/save` rewrites a committed file, so `web.Serve` holds three guards and each covers a
+  case the others miss: the per-invocation form token (compared from `PostForm`, never the
+  query string), the peer address checked before the `Host` header (on a wildcard bind a
+  remote client can claim a loopback `Host`), and the `Host` check itself (a page that
+  points its own name at a loopback address is otherwise same-origin with this server).
+  `main.listenLocal` refuses a non-loopback `--addr` to match. Violation: a handler that
+  skips any of the three, a token accepted from `Form`, or a bind that can reach a
+  non-loopback interface. Tier 1.
+
 **Cross-boundary consistency (flag here, synthesized in Step 4)**
 
 When reviewing an area, note any exported API that looks easy to misuse (parameter order,
@@ -471,12 +507,17 @@ no single agent could do:
 3. **Opt-in selection.** Trace a newly-owned pack from `Enumerate` through
    `manifest.Reconcile` (added disabled), `EnabledSet`, `syncer.Options.PackSelected`, and
    `filterPacks`. Then trace the write-back path: `web.Serve`'s `known`-slug filter →
-   `selectPacks`'s empty-submission refusal → `manifest.SetEnabled` → `manifest.Save`, and
-   confirm no route rewrites the allowlist with anything other than what the user chose.
+   `selectPacks`'s empty-submission refusal → the post-`Serve` `manifest.Load` →
+   `manifest.SetEnabled` → `manifest.Save`, and confirm no route rewrites the allowlist
+   with anything other than what the user chose, or any other field with anything other
+   than what the file held when the page returned.
 4. **Strict parsing at both layers.** Read `ParseItemPage`'s row and version guards,
    `HasLibrarySentinel`, and `fetchAll`'s zero-files check together. Confirm there is no
    route by which a markup change produces an empty file list with a nil error, and that
-   `buildLockfile` could not rebuild a pack from one if there were.
+   `buildLockfile` could not rebuild a pack from one if there were. Then follow an
+   unknown-variant row from `ParseItemPage`'s `unknown` through `ItemFiles` and `fetchAll`
+   into either the dropped-pack message or `warnings`, confirm every label reaches one of
+   them, and that an all-unknown pack is carried forward rather than rebuilt.
 5. **Unfetched packs keep their records, and losses are announced.** Compare `filterPacks`'
    output against `buildLockfile`'s `inScope` map. Confirm every prior pack is either
    rebuilt from live data or carried forward, that no partial or cancelled `fetchAll` result
@@ -518,11 +559,8 @@ For every finding from an area agent or from the cross-cutting analysis:
    every occurrence, not just the one an agent happened to open.
 3. **Mechanize what widens.** If a class has many instances and a tool could decide it,
    report one automation proposal instead of N findings: enable the lint rule, add the
-   check, add a guard test. Check the lint configuration first, since a rule that exists but
-   is disabled or not wired into CI is the cheapest fix available. This repo has no linter
-   config at all, so the options are introducing one (`.golangci.yml`, wired into the
-   `check` job in `.github/workflows/ci.yml`) or adding a guard test to the relevant
-   package's `audit_test.go`. Say which, and what it subsumes.
+   check, add a guard test. Check the lint configuration first, since a rule that exists
+   but is disabled or not wired into CI is the cheapest fix available.
 4. **Drop non-actionable observations.** Anything amounting to "noting this but it is fine"
    comes out.
 5. **Deduplicate.** Merge findings that different agents reached from different angles into
