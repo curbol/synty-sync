@@ -37,7 +37,7 @@ func TestDefaultLibraryLivesInDataNotCache(t *testing.T) {
 				t.Setenv("XDG_DATA_HOME", "")
 			}
 
-			c, err := Load(t.TempDir())
+			c, err := Load(t.TempDir(), Flags{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func TestLoadExpandsHomeInSessionSource(t *testing.T) {
 		[]byte("session_source = \"~/synty.curl\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(dir)
+	c, err := Load(dir, Flags{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestLoadReportsAConfigItCannotRead(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "nowhere", "config.toml"), filepath.Join(dir, "config.toml")); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
-	if _, err := Load(dir); err == nil {
+	if _, err := Load(dir, Flags{}); err == nil {
 		t.Error("a config.toml that could not be read was silently skipped")
 	}
 }
@@ -199,7 +199,93 @@ func TestANamedConfigDirMustExistAndBeADirectory(t *testing.T) {
 	if err := os.WriteFile(clash, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(clash); err == nil {
+	if _, err := Load(clash, Flags{}); err == nil {
 		t.Error("Load read a regular file as a config directory with nothing in it")
+	}
+}
+
+// With no home and no XDG_DATA_HOME there is nowhere to put a multi-gigabyte mirror,
+// and the answer used to be a relative "synty-library" under whatever directory the
+// user happened to run from. An error naming the ways to say where it goes is better.
+func TestNoHomeAndNoXDGRefusesRatherThanPickingARelativeLibrary(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("SYNTY_LIBRARY", "")
+
+	_, err := Load(t.TempDir(), Flags{})
+	if err == nil {
+		t.Fatal("Load invented a library path with no home directory to put one under")
+	}
+	for _, way := range []string{"XDG_DATA_HOME", "SYNTY_LIBRARY", "library_path", "--library"} {
+		if !strings.Contains(err.Error(), way) {
+			t.Errorf("error %q does not name %s", err, way)
+		}
+	}
+
+	// A run that says where its library is has no use for a home directory at all.
+	c, err := Load(t.TempDir(), Flags{LibraryPath: "/mnt/big/synty"})
+	if err != nil {
+		t.Fatalf("Load with --library still needed a home: %v", err)
+	}
+	if c.LibraryPath != "/mnt/big/synty" {
+		t.Errorf("LibraryPath = %q, want the flag's value", c.LibraryPath)
+	}
+}
+
+// Zero is how the merge spells "not set", so a concurrency = 0 the user wrote was
+// replaced by the default without a word. It is not a number of simultaneous fetches,
+// and the flag refuses it, so the file does too; an absent key stays the ordinary case.
+func TestAConcurrencyBelowOneInConfigIsRefused(t *testing.T) {
+	clearSyntyEnv(t)
+	for _, v := range []string{"0", "-2"} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("concurrency = "+v+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(dir, Flags{})
+		if err == nil {
+			t.Errorf("concurrency = %s was accepted", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), "concurrency") {
+			t.Errorf("error %q does not name the key", err)
+		}
+	}
+}
+
+// The chain is defaults, file, environment, flags, and the flag layer is the one a
+// test of the file or the environment alone never reaches. A quoted --library
+// "~/assets" also arrives with its tilde, and without the expansion the other layers
+// get, the mirror lands in a directory literally named "~".
+func TestFlagsAreTheLastLayer(t *testing.T) {
+	clearSyntyEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"),
+		[]byte("customer_id = \"from-file\"\nlibrary_path = \"/from/file\"\nconcurrency = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNTY_LIBRARY", "/from/env")
+	t.Setenv("SYNTY_CUSTOMER_ID", "from-env")
+
+	c, err := Load(dir, Flags{LibraryPath: "~/assets", CustomerID: "from-flag", Concurrency: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "assets"); c.LibraryPath != want {
+		t.Errorf("LibraryPath = %q, want the expanded flag %q", c.LibraryPath, want)
+	}
+	if c.CustomerID != "from-flag" || c.Concurrency != 8 {
+		t.Errorf("flags did not win: %+v", c)
+	}
+
+	// An unset flag leaves the layer beneath it alone.
+	c, err = Load(dir, Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LibraryPath != "/from/env" || c.CustomerID != "from-env" || c.Concurrency != 2 {
+		t.Errorf("empty flags changed the config: %+v", c)
 	}
 }

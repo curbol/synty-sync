@@ -82,27 +82,42 @@ func named(dir, source string) (string, error) {
 // defaultLibraryPath is the cache location when nothing overrides it:
 // $XDG_DATA_HOME/synty-sync, else ~/.local/share/synty-sync. App data, not
 // ~/.cache, so an OS cache-cleaner won't wipe a multi-GB library.
-func defaultLibraryPath() string {
+//
+// It refuses rather than falling back to a relative path: writing a multi-gigabyte
+// mirror into whatever directory the user happened to run from is worse than an error
+// naming the ways to say where it goes.
+func defaultLibraryPath() (string, error) {
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-		return filepath.Join(v, "synty-sync")
+		return filepath.Join(v, "synty-sync"), nil
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "synty-sync")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("no home directory to put the library under (%w): set XDG_DATA_HOME "+
+			"or SYNTY_LIBRARY, put library_path in config.toml, or pass --library", err)
 	}
-	return "synty-library"
+	return filepath.Join(home, ".local", "share", "synty-sync"), nil
 }
 
 func defaults() Config {
 	return Config{
-		LibraryPath:   defaultLibraryPath(),
 		Concurrency:   4,
 		SessionSource: "firefox",
 	}
 }
 
-// Load merges built-in defaults, an optional config.toml in dir, then environment
-// overrides (SYNTY_CUSTOMER_ID, SYNTY_LIBRARY). A missing config.toml is fine.
-func Load(dir string) (Config, error) {
+// Flags are the command-line overrides, the highest-precedence layer. A zero field is
+// one the user did not pass. They are applied here rather than by the caller so every
+// layer gets the same treatment: the library default is resolved only when no layer
+// supplied one, and a quoted --library "~/assets" is expanded like the others.
+type Flags struct {
+	LibraryPath string
+	CustomerID  string
+	Concurrency int
+}
+
+// Load merges built-in defaults, an optional config.toml in dir, environment overrides
+// (SYNTY_CUSTOMER_ID, SYNTY_LIBRARY), then flags. A missing config.toml is fine.
+func Load(dir string, f Flags) (Config, error) {
 	c := defaults()
 	// Asked of dir itself rather than read off the errno of opening a file through it:
 	// Windows answers a path that runs through a regular file with ERROR_PATH_NOT_FOUND,
@@ -131,6 +146,13 @@ func Load(dir string) (Config, error) {
 			}
 			return Config{}, fmt.Errorf("%s: unknown key(s): %s", p, strings.Join(keys, ", "))
 		}
+		// overlay cannot tell a zero someone wrote from a key nobody wrote, so the
+		// metadata is asked: an absent key is the ordinary case, a written zero is not a
+		// number of simultaneous fetches.
+		if md.IsDefined("concurrency") && fc.Concurrency < 1 {
+			return Config{}, fmt.Errorf("%s: concurrency = %d is not a number of simultaneous fetches; "+
+				"set 1 or more, or remove the key to use the default", p, fc.Concurrency)
+		}
 		overlay(&c, fc)
 	}
 	if v := os.Getenv("SYNTY_CUSTOMER_ID"); v != "" {
@@ -138,6 +160,24 @@ func Load(dir string) (Config, error) {
 	}
 	if v := os.Getenv("SYNTY_LIBRARY"); v != "" {
 		c.LibraryPath = v
+	}
+	if f.LibraryPath != "" {
+		c.LibraryPath = f.LibraryPath
+	}
+	if f.CustomerID != "" {
+		c.CustomerID = f.CustomerID
+	}
+	if f.Concurrency > 0 {
+		c.Concurrency = f.Concurrency
+	}
+	// Last, and only when no layer supplied one: the default needs a home directory, and
+	// a run that names its own library has no use for one.
+	if c.LibraryPath == "" {
+		lib, err := defaultLibraryPath()
+		if err != nil {
+			return Config{}, err
+		}
+		c.LibraryPath = lib
 	}
 	c.LibraryPath = ExpandHome(c.LibraryPath)
 	c.SessionSource = ExpandHome(c.SessionSource)
@@ -160,8 +200,8 @@ func overlay(c *Config, fc fileConfig) {
 }
 
 // ExpandHome resolves a leading ~ to the user's home directory. It is exported
-// because the --library flag is applied after Load returns and needs the same
-// treatment as the config-file and environment paths.
+// because --manifest and --cookies are resolved outside this package and need the same
+// treatment as the paths inside it.
 func ExpandHome(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {

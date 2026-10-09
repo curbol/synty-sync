@@ -485,33 +485,14 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 	}
 }
 
-// Flags are the last layer over config.toml and the environment, and the shell
-// leaves a quoted ~ alone. Without the same expansion the other layers get, a quoted
-// --library "~/assets" puts a multi-gigabyte mirror in a directory named "~".
-func TestApplyFlagsIsTheLastLayer(t *testing.T) {
+// --cookies is applied by resolveCookie rather than through config.Flags, and the shell
+// leaves a quoted "~/session.curl" alone, so it arrives with the tilde intact. Without
+// the expansion every other path gets, a session source resolving to a directory named
+// "~" is reported as a missing file rather than as the path the user typed.
+func TestCookiesFlagExpandsATilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	base := config.Config{LibraryPath: "/from/env", Concurrency: 4, CustomerID: "from-env"}
-
-	got := applyFlags(base, "~/assets", "from-flag", 8)
-	if got.LibraryPath != filepath.Join(home, "assets") {
-		t.Errorf("LibraryPath = %q, want the expanded %q", got.LibraryPath, filepath.Join(home, "assets"))
-	}
-	if got.CustomerID != "from-flag" || got.Concurrency != 8 {
-		t.Errorf("flags did not win: %+v", got)
-	}
-
-	// An unset flag leaves the layer beneath it alone.
-	unchanged := applyFlags(base, "", "", 0)
-	if unchanged != base {
-		t.Errorf("empty flags changed the config: %+v, want %+v", unchanged, base)
-	}
-
-	// --cookies is applied by resolveCookie rather than applyFlags, and needs the same
-	// treatment for the same reason: a quoted "~/session.curl" arrives with the tilde
-	// intact, and a session source resolving to a directory named "~" is reported as a
-	// missing file rather than as the path the user typed.
 	curl := filepath.Join(home, "session.curl")
 	if err := os.WriteFile(curl, []byte(`curl 'https://syntystore.com' -H 'Cookie: sid=abc'`), 0o600); err != nil {
 		t.Fatal(err)
@@ -522,6 +503,25 @@ func TestApplyFlagsIsTheLastLayer(t *testing.T) {
 	}
 	if cookie != "sid=abc" {
 		t.Errorf("cookie = %q, want the one in %s", cookie, curl)
+	}
+}
+
+// Zero is how the config chain spells "not supplied", so --concurrency 0 ran at the
+// configured default and said nothing. A typed zero or a negative is not a number of
+// simultaneous fetches, so it is refused before the store is contacted.
+func TestConcurrencyBelowOneIsRefused(t *testing.T) {
+	reached := false
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	for _, n := range []string{"0", "-1"} {
+		err := run(e.args("status", "-concurrency", n))
+		if err == nil || !strings.Contains(err.Error(), "--concurrency") {
+			t.Errorf("--concurrency %s: err = %v, want it refused by name", n, err)
+		}
+	}
+	if reached {
+		t.Error("the store was contacted with a concurrency that was refused")
 	}
 }
 
@@ -996,7 +996,7 @@ func TestListDoesNotNeedAReadableUserConfig(t *testing.T) {
 	t.Setenv("SYNTY_CONFIG_DIR", cfgDir)
 
 	// The config really is broken, so this test cannot pass by the file being ignored.
-	if _, err := config.Load(cfgDir); err == nil {
+	if _, err := config.Load(cfgDir, config.Flags{}); err == nil {
 		t.Fatal("this config was meant to be rejected; the test proves nothing as written")
 	}
 
@@ -1278,7 +1278,7 @@ func TestCommittedExamplesStillParse(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), uncomment(t, "config.example.toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(cfgDir)
+	cfg, err := config.Load(cfgDir, config.Flags{})
 	if err != nil {
 		t.Fatalf("config.example.toml no longer parses as a config.toml: %v", err)
 	}
