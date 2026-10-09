@@ -11,7 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -48,9 +48,20 @@ func (c Class) String() string {
 		return "cache-missing"
 	case Adopted:
 		return "adopted"
-	default:
+	case Unchanged:
 		return "unchanged"
+	default:
+		return fmt.Sprintf("class(%d)", int(c))
 	}
+}
+
+// Classes is every class, in the order a summary lists them: what a run has to fetch,
+// then what it took from disk, then what needed nothing.
+//
+// The summary is one list, and spelling it out a second time at the call site let a
+// class added here drop out of the tally while still counting toward the total.
+func Classes() []Class {
+	return []Class{New, Changed, DownloadNow, CacheMissing, Adopted, Unchanged}
 }
 
 // classify decides the outcome for a file given its prior lockfile record (looked
@@ -298,9 +309,14 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		return Report{}, fmt.Errorf("syncer: Filter is required (variant_includes has no default)")
 	}
 	if opts.OnlyGlob != "" {
-		if _, err := filepath.Match(opts.OnlyGlob, ""); err != nil {
+		if _, err := path.Match(opts.OnlyGlob, ""); err != nil {
 			return Report{}, fmt.Errorf("bad --only pattern %q: %w", opts.OnlyGlob, err)
 		}
+	}
+	// Before the sweep and everything after it, so a record the run cannot act on is
+	// refused while nothing has been touched.
+	if err := checkFileIDs(lf); err != nil {
+		return Report{}, err
 	}
 	if opts.Now == "" {
 		// Now stamps generatedAt and every downloadedAt in a committed file, so an
@@ -966,6 +982,8 @@ func progressLine(read, total int64) string {
 	return humanBytes(read)
 }
 
+// humanBytes renders a byte count. The units run to exbibytes because an int64 does:
+// the count comes off the store's own size label, which is whatever the page says.
 func humanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -976,7 +994,7 @@ func humanBytes(n int64) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // downloadWithRetry retries a download with bounded exponential backoff, resolving
@@ -1298,6 +1316,28 @@ func orphanedRecords(prev, next lockfile.Lockfile) []string {
 	return w
 }
 
+// checkFileIDs refuses a prior lockfile holding an entry with no fileId. Every lookup a
+// run makes goes through the fileId, and no file the store lists has id 0, so such an
+// entry is never classified: its pack rebuilds it away, orphanedRecords reports its copy
+// as unreferenced, and the same file is fetched again under its real id. It arrives by a
+// hand edit or a merge, and the entry is named so it can be fixed.
+func checkFileIDs(lf lockfile.Lockfile) error {
+	slugs := make([]string, 0, len(lf.Packs))
+	for slug := range lf.Packs {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		for _, key := range sortedKeys(lf.Packs[slug].Files) {
+			if lf.Packs[slug].Files[key].FileID == 0 {
+				return fmt.Errorf("the lockfile entry %s in pack %s has no fileId, so no run can match it "+
+					"to a file the store lists; restore its fileId or delete the entry", key, slug)
+			}
+		}
+	}
+	return nil
+}
+
 // indexByFileID picks one prior record per fileId. Packs are visited in slug order
 // rather than map order: a hand-merged lockfile can hold the same fileId tracked at
 // two versions under two packs, and whichever record wins decides between Unchanged
@@ -1391,8 +1431,10 @@ func filterPacks(packs []model.Pack, glob string, selected func(string) bool) []
 		if !selected(p.Slug) {
 			continue
 		}
+		// path.Match, because a slug is not a file path: filepath.Match reads a
+		// backslash as a separator on Windows and as an escape everywhere else.
 		if glob != "" {
-			if ok, _ := filepath.Match(glob, p.Slug); !ok {
+			if ok, _ := path.Match(glob, p.Slug); !ok {
 				continue
 			}
 		}

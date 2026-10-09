@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -765,24 +766,119 @@ func TestProgressReportsTransferredBytes(t *testing.T) {
 
 // A pack that leaves the library (refunded, delisted) is otherwise carried forward
 // forever with nobody told.
+//
+// The record kept has to be the whole record, with its bytes: a pack carried forward as
+// a key with its files stripped, or with its copy pruned, is erased in all but name.
 func TestDeOwnedPackIsReported(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()
-	prior := lockfile.New()
-	prior.Packs["a-pack-i-no-longer-own"] = lockfile.Pack{
-		DisplayName: "A Pack I No Longer Own",
-		Files:       map[string]lockfile.File{"T|Godot_4_5_1": {FileToken: "T", Variant: "Godot_4_5_1", Version: "v1", FileID: 999}},
+	body := packageBytes("T_Godot_4_5_1_v1.zip")
+	p, err := cache.Store(lib, "T", "T_Godot_4_5_1_v1.zip", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	const slug, key = "a-pack-i-no-longer-own", "T|Godot_4_5_1"
+	entry := lockfile.File{
+		FileToken: "T", Variant: "Godot_4_5_1", Version: "v1", FileID: 999, Tracked: true,
+		SHA256: p.SHA256, SizeBytes: p.Size, CachePath: p.RelPath, DownloadedAt: "2026-01-01T00:00:00Z",
+	}
+	prior := lockfile.New()
+	prior.Packs[slug] = lockfile.Pack{DisplayName: "A Pack I No Longer Own", Files: map[string]lockfile.File{key: entry}}
 
 	rep, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Removed) != 1 || rep.Removed[0] != "a-pack-i-no-longer-own" {
+	if len(rep.Removed) != 1 || rep.Removed[0] != slug {
 		t.Errorf("Removed = %v, want the de-owned pack", rep.Removed)
 	}
-	if _, ok := rep.NewLockfile.Packs["a-pack-i-no-longer-own"]; !ok {
-		t.Error("the de-owned pack was dropped from the lockfile; one enumeration is not enough to erase a record")
+	kept, ok := rep.NewLockfile.Packs[slug]
+	if !ok {
+		t.Fatal("the de-owned pack was dropped from the lockfile; one enumeration is not enough to erase a record")
+	}
+	if got := kept.Files[key]; got != entry {
+		t.Errorf("the de-owned pack's record changed:\n got %+v\nwant %+v", got, entry)
+	}
+	if !cache.Verify(lib, entry.CachePath, entry.SizeBytes) {
+		t.Errorf("the de-owned pack's copy at %s is gone", entry.CachePath)
+	}
+}
+
+// humanBytes formats the store's own size label inside a download goroutine, and the
+// label is whatever the page says. Indexing a four-letter unit table panicked at a
+// pebibyte and took the whole run down with it.
+func TestHumanBytesNamesEveryInt64(t *testing.T) {
+	for n, want := range map[int64]string{
+		-5:            "-5 B",
+		0:             "0 B",
+		1023:          "1023 B",
+		1 << 10:       "1.0 KB",
+		1 << 40:       "1.0 TB",
+		1 << 50:       "1.0 PB",
+		1 << 60:       "1.0 EB",
+		math.MaxInt64: "8.0 EB",
+	} {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// The summary is one list of classes, and String's default arm answered "unchanged",
+// so a class added without a name tallied as a no-op. Classes is the list a caller
+// prints from, and every class in it has to say what it is.
+func TestEveryClassHasItsOwnName(t *testing.T) {
+	seen := map[string]Class{}
+	for _, c := range Classes() {
+		name := c.String()
+		if strings.HasPrefix(name, "class(") {
+			t.Errorf("class %d has no name", int(c))
+		}
+		if other, dup := seen[name]; dup {
+			t.Errorf("classes %d and %d are both called %q", int(other), int(c), name)
+		}
+		seen[name] = c
+	}
+	// Every value String names is in the list, so a new class cannot be named and still
+	// drop out of the tally.
+	for c := Class(0); c < 64; c++ {
+		if _, listed := seen[c.String()]; !listed && !strings.HasPrefix(c.String(), "class(") {
+			t.Errorf("class %q is not in Classes()", c)
+		}
+	}
+}
+
+// A lockfile entry with no fileId is filed under 0 by the index every lookup goes
+// through, and nothing the store lists has that id: it is never classified, its pack
+// rebuilds it away, and orphanedRecords then reports its copy as unreferenced while the
+// same file is fetched again under its real id. It arrives by a hand edit or a merge, so
+// it is refused before the run touches anything, with the entry named.
+func TestAnEntryWithNoFileIDIsRefused(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.FileID = 0 })
+
+	for _, dry := range []bool{true, false} {
+		_, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, runOpts(lib, dry))
+		if err == nil || !strings.Contains(err.Error(), pirateKey) {
+			t.Errorf("dry=%v: err = %v, want a refusal naming %s", dry, err, pirateKey)
+		}
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a refused run rewrote the lockfile")
 	}
 }
 
