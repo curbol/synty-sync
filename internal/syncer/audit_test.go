@@ -2255,3 +2255,146 @@ func TestABundledFileTakesItsLabelsFromEnumerationOrderNotResponseOrder(t *testi
 		t.Errorf("advertisedSize = %d, want %d: the file was labelled by the page that answered first, not the pack listed first", got, wantSize)
 	}
 }
+
+// twoFileServer serves Pirate (fileId 4242, at *pirateVersion) and Dungeon (fileId 5353,
+// fixed at v1_0_0) as one-file item pages, each file downloading under the name
+// pirateName or its Synty-style default gives it. A test changes *pirateVersion between
+// runs to make Pirate's file classify Changed.
+func twoFileServer(t *testing.T, pirateVersion *string, pirateName func(version string) string) *httptest.Server {
+	t.Helper()
+	return newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1":
+				return itemPage("POLYGON_Pirate", "Godot_4_5_1", *pirateVersion, 4242), true
+			case "4":
+				return itemPage("POLYGON_Dungeon", "Godot_4_5_1", "v1_0_0", 5353), true
+			}
+			return "", false
+		},
+		downloadName: func(fileID string) (string, bool) {
+			switch fileID {
+			case "4242":
+				return pirateName(*pirateVersion), true
+			case "5353":
+				return "POLYGON_Dungeon_Godot_4_5_1_v1_0_0.zip", true
+			}
+			return "", false
+		},
+	})
+}
+
+func twoPackOpts(lib string) Options {
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool {
+		return slug == "polygon-pirate-pack" || slug == "polygon-dungeon-pack"
+	}
+	return opts
+}
+
+const pirateKey = "POLYGON_Pirate|Godot_4_5_1"
+
+// withPirateEntry returns lf with the Pirate pack's one entry rewritten by edit.
+func withPirateEntry(lf lockfile.Lockfile, edit func(*lockfile.File)) lockfile.Lockfile {
+	pirate := lf.Packs["polygon-pirate-pack"]
+	f := pirate.Files[pirateKey]
+	edit(&f)
+	pirate.Files[pirateKey] = f
+	lf.Packs["polygon-pirate-pack"] = pirate
+	return lf
+}
+
+// The prior copy of a Changed file is pruned when the new one lands elsewhere, and
+// "elsewhere" was decided by comparing the lockfile's string against the derived one.
+// The lockfile is committed and hand-editable, so "./TOK/f.zip" names the file
+// "TOK/f.zip" does; compared raw, a re-download to the same filename was deleted moments
+// after it was committed, recorded with a digest for a path holding nothing, and
+// re-fetched in full on the next run.
+func TestAPruneNeverDeletesTheFileItJustDownloaded(t *testing.T) {
+	const name = "POLYGON_Pirate_Godot_4_5_1.zip" // one name across versions
+	const rel = "POLYGON_Pirate/" + name
+	for _, spelling := range []string{"./" + rel, "POLYGON_Pirate//" + name, "POLYGON_Pirate/x/../" + name} {
+		t.Run(spelling, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			srv := twoFileServer(t, &version, func(string) string { return name })
+			opts := twoPackOpts(lib)
+			lf := withPirateEntry(seedRun(t, srv, lockPath, opts), func(f *lockfile.File) { f.CachePath = spelling })
+
+			version = "v2_0_0"
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rep.Downloaded) != 1 {
+				t.Fatalf("downloaded %+v, want the one Changed file", rep.Downloaded)
+			}
+			got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+			if !cacheFileExists(lib, got.CachePath) {
+				t.Errorf("the run deleted the file it just downloaded to %s, recorded as %s", got.CachePath, spelling)
+			}
+		})
+	}
+}
+
+// Nothing stops a hand-merged lockfile recording one file's bytes as another fileId's
+// prior copy. The prune then deletes a file the lockfile still records for its real
+// owner, which classifies Unchanged this run and CacheMissing the next.
+func TestAPruneNeverDeletesAPathAnotherFileRecords(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+
+	dungeon := lf.Packs["polygon-dungeon-pack"].Files["POLYGON_Dungeon|Godot_4_5_1"]
+	if !dungeon.Tracked || !cacheFileExists(lib, dungeon.CachePath) {
+		t.Fatalf("seed did not leave Dungeon's file on disk: %+v", dungeon)
+	}
+	// A second spelling, so a raw comparison against Dungeon's path cannot see it either.
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.CachePath = "./" + dungeon.CachePath })
+
+	version = "v2_0_0"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Asked of the run, not only of the disk: Dungeon classifies after Pirate, so a
+	// deleted copy is re-downloaded as CacheMissing and is back by the time this looks.
+	for _, d := range rep.Downloaded {
+		if d.FileID == dungeon.FileID {
+			t.Errorf("Dungeon's file was re-downloaded: pruning Pirate's prior copy deleted %s", dungeon.CachePath)
+		}
+	}
+	if !cacheFileExists(lib, dungeon.CachePath) {
+		t.Fatalf("pruning Pirate's prior copy deleted %s, which fileId %d still records", dungeon.CachePath, dungeon.FileID)
+	}
+	if len(warnContaining(rep.Warnings, dungeon.CachePath)) == 0 {
+		t.Errorf("the refused prune was not reported: %v", rep.Warnings)
+	}
+}
+
+// SamePath cannot see two spellings that a case-insensitive filesystem calls one file,
+// so the prune asks the filesystem too. A hard link stands in for that here: two names
+// the filesystem reports as one file, on a platform where case alone would not be.
+func TestRemoveSupersededSparesAPathTheFilesystemCallsTheSameFile(t *testing.T) {
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "TOK")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.zip"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(dir, "new.zip"), filepath.Join(dir, "Old.zip")); err != nil {
+		t.Skipf("cannot hard-link here: %v", err)
+	}
+	if w := removeSuperseded(lib, "TOK/Old.zip", "TOK/new.zip", nil); w != "" {
+		t.Errorf("warning = %q", w)
+	}
+	if !cacheFileExists(lib, "TOK/Old.zip") {
+		t.Error("removeSuperseded deleted a name the filesystem reports as the current file")
+	}
+}

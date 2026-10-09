@@ -425,11 +425,9 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 				}
 				continue
 			}
-			if fd.Class == Changed && prior.CachePath != "" && prior.CachePath != r.cachePath {
-				// Best-effort, but not silent: a prune that fails leaves the prior
-				// version in the cache with nothing recording it.
-				if err := cache.Remove(opts.LibraryRoot, prior.CachePath); err != nil {
-					pruneWarnings = append(pruneWarnings, fmt.Sprintf("could not remove the prior %s: %v", prior.CachePath, err))
+			if fd.Class == Changed {
+				if w := removeSuperseded(opts.LibraryRoot, prior.CachePath, r.cachePath, claimedPaths(lf, vd.resolved, id)); w != "" {
+					pruneWarnings = append(pruneWarnings, w)
 				}
 			}
 			r.version, r.variant = rep.Version, string(rep.Variant)
@@ -1171,6 +1169,53 @@ func cacheChecker(opts Options) func(lockfile.File) bool {
 		}
 	}
 	return func(f lockfile.File) bool { return cache.Verify(opts.LibraryRoot, f.CachePath, f.SizeBytes) }
+}
+
+// removeSuperseded deletes the prior copy a fileId's new bytes replace, returning a
+// warning rather than failing the file over housekeeping: a prune that does not happen
+// leaves the prior version in the cache with nothing recording it, which is worth
+// saying and not worth losing the download over.
+//
+// The paths are compared canonically and then by the filesystem, never as strings. old
+// comes out of the lockfile, which is committed and hand-editable, so "./TOK/f.zip"
+// names the file "TOK/f.zip" does, and on a case-insensitive filesystem so does
+// "tok/f.zip". Comparing raw deletes the file the run just downloaded.
+//
+// claimed is every path an entry for some other fileId records. Nothing refuses two
+// entries naming one path in a hand-merged lockfile, and pruning one of them deletes
+// bytes the other still records as present.
+func removeSuperseded(root, old, current string, claimed []string) string {
+	if old == "" || cache.SamePath(old, current) || cache.SameFile(root, old, current) {
+		return ""
+	}
+	for _, c := range claimed {
+		if cache.SamePath(old, c) || cache.SameFile(root, old, c) {
+			return fmt.Sprintf("not removing the prior %s: the lockfile records that path for another file (%s)", old, c)
+		}
+	}
+	if err := cache.Remove(root, old); err != nil {
+		return fmt.Sprintf("could not remove the prior %s: %v", old, err)
+	}
+	return ""
+}
+
+// claimedPaths is every cache path recorded for a fileId other than id, in the prior
+// lockfile or among what this run has resolved so far.
+func claimedPaths(prev lockfile.Lockfile, resolvedByID map[int]resolved, id int) []string {
+	var out []string
+	for _, p := range prev.Packs {
+		for _, f := range p.Files {
+			if f.FileID != id && f.CachePath != "" {
+				out = append(out, f.CachePath)
+			}
+		}
+	}
+	for other, r := range resolvedByID {
+		if other != id && r.cachePath != "" {
+			out = append(out, r.cachePath)
+		}
+	}
+	return out
 }
 
 func filterPacks(packs []model.Pack, glob string, selected func(string) bool) []model.Pack {
