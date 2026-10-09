@@ -2604,6 +2604,80 @@ func TestAnIntactCopyBesideARefusedOneIsAdopted(t *testing.T) {
 	}
 }
 
+// library_path is user-scoped while the lockfile is project-scoped, so two projects share
+// one library. Once one of them has synced a file to v2, the other, whose lockfile still
+// says v1, classified Changed and re-transferred the whole pack over a v2 copy already
+// sitting at <fileToken>/ under the name the store gives v2. New and DownloadNow already
+// asked the layout first; Changed was the one class that never did.
+func TestAChangedFileAdoptsTheNewVersionAnotherProjectFetched(t *testing.T) {
+	lib := t.TempDir()
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	projectA := filepath.Join(t.TempDir(), "a.lock.json")
+	projectB := filepath.Join(t.TempDir(), "b.lock.json")
+	lfA := seedRun(t, srv, projectA, opts)
+	lfB := seedRun(t, srv, projectB, opts)
+
+	version = "v2_0_0"
+	if _, err := Run(context.Background(), newClient(srv.URL), lfA, projectA, opts); err != nil {
+		t.Fatal(err)
+	}
+	afterA, err := lockfile.Load(projectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := afterA.Packs["polygon-pirate-pack"].Files[pirateKey]
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lfB, projectB, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("project B re-downloaded %+v though project A had already fetched v2 into the shared library", rep.Downloaded)
+	}
+	got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+	if got.Version != "v2_0_0" || got.CachePath != fetched.CachePath || got.SHA256 != fetched.SHA256 {
+		t.Errorf("project B recorded %+v, want the v2 copy project A fetched: %+v", got, fetched)
+	}
+}
+
+// The adopt probe matches on name, and the prior record's own path is the one copy whose
+// bytes are known to be another version: the lockfile hashed them as that version. A
+// record whose path already carries the new version's name is a hand edit or a stale
+// merge, and taking those bytes as the new version on the strength of their name would
+// record the old version's content under the new version's number.
+func TestAChangedFileNeverAdoptsItsOwnPriorCopy(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+
+	// Move the v1 bytes to the name v2 would have, and record them there, still as v1.
+	prior := lf.Packs["polygon-pirate-pack"].Files[pirateKey]
+	renamed := "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v2_0_0.zip"
+	if err := os.Rename(filepath.Join(lib, filepath.FromSlash(prior.CachePath)), filepath.Join(lib, filepath.FromSlash(renamed))); err != nil {
+		t.Fatal(err)
+	}
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.CachePath = "./" + renamed })
+
+	version = "v2_0_0"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range rep.Adopted {
+		if a.FileID == prior.FileID {
+			t.Fatal("the prior copy was adopted as the new version on the strength of its name")
+		}
+	}
+	if got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]; got.SHA256 == prior.SHA256 {
+		t.Errorf("v2 is recorded with v1's sha: %+v", got)
+	}
+}
+
 // SamePath cannot see two spellings that a case-insensitive filesystem calls one file,
 // so the prune asks the filesystem too. A hard link stands in for that here: two names
 // the filesystem reports as one file, on a platform where case alone would not be.

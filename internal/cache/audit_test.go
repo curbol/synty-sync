@@ -689,7 +689,7 @@ func TestTheMatchersTryTheNextCopyWhenThePreferredOneIsRefused(t *testing.T) {
 	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
 	const canonical = "TOK_Godot_4_5_1_v1_0_1.zip"
 	const collision = "TOK_Godot_4_5_1_v1_0_1(1).zip"
-	refuseCanonical := func(rel string) bool { return path.Base(rel) != canonical }
+	refuseCanonical := func(_ Wanted, rel string) bool { return path.Base(rel) != canonical }
 
 	t.Run("Locate", func(t *testing.T) {
 		root := t.TempDir()
@@ -708,7 +708,7 @@ func TestTheMatchersTryTheNextCopyWhenThePreferredOneIsRefused(t *testing.T) {
 		if rel, ok := Locate(root, w, nil); !ok || rel != RelPath(w.FileToken, canonical) {
 			t.Errorf("Locate with no check = %q, %v; want the canonical %q", rel, ok, canonical)
 		}
-		if rel, ok := Locate(root, w, func(string) bool { return false }); ok {
+		if rel, ok := Locate(root, w, func(Wanted, string) bool { return false }); ok {
 			t.Errorf("Locate returned %q though every copy was refused", rel)
 		}
 	})

@@ -584,16 +584,16 @@ func inPreferenceOrder(names []string) {
 }
 
 // firstAccepted returns the first of names, in preference order, whose root-relative
-// path (dir joined with the name) accept takes. A nil accept takes anything.
+// path (dir joined with the name) accept takes for w. A nil accept takes anything.
 //
 // The caller's checks go into the selection rather than being run on what comes back:
 // run afterwards, they refused the preferred copy while another that would have passed
 // sat unexamined beside it, so a truncated canonical name masked an intact "(1)" and the
 // file re-downloaded in full.
-func firstAccepted(dir string, names []string, accept func(relPath string) bool) (string, bool) {
+func firstAccepted(w Wanted, dir string, names []string, accept func(w Wanted, relPath string) bool) (string, bool) {
 	inPreferenceOrder(names)
 	for _, n := range names {
-		if accept == nil || accept(path.Join(dir, n)) {
+		if accept == nil || accept(w, path.Join(dir, n)) {
 			return n, true
 		}
 	}
@@ -624,11 +624,11 @@ func candidate(e fs.DirEntry) bool {
 // extension and (N) differences don't block a match). Unmatched files are left
 // untouched and will simply re-download. It is best-effort and idempotent.
 //
-// accept is the caller's check on a flat file, given its root-relative path, before it
-// moves; a copy it refuses stays flat and the next match is tried. nil takes anything.
+// accept is the caller's check on a flat file, given the wanted file it would stand in
+// for and its root-relative path, before it moves; a copy it refuses stays flat and the next match is tried. nil takes anything.
 // Moves go through the root, so a <fileToken>/ that is a symlink out of the library
 // cannot carry a file with it. An interrupt stops it between files.
-func Migrate(ctx context.Context, libraryRoot string, wanted []Wanted, accept func(relPath string) bool) ([]MigrateResult, error) {
+func Migrate(ctx context.Context, libraryRoot string, wanted []Wanted, accept func(w Wanted, relPath string) bool) ([]MigrateResult, error) {
 	rt, err := os.OpenRoot(libraryRoot)
 	if errors.Is(err, fs.ErrNotExist) {
 		// A root that does not exist yet holds no flat files to fold in. The first run
@@ -692,7 +692,7 @@ func Migrate(ctx context.Context, libraryRoot string, wanted []Wanted, accept fu
 		if _, already := Locate(libraryRoot, w, nil); already {
 			continue
 		}
-		name, ok := firstAccepted(".", names[k], accept)
+		name, ok := firstAccepted(w, ".", names[k], accept)
 		if !ok {
 			continue
 		}
@@ -717,7 +717,7 @@ func Migrate(ctx context.Context, libraryRoot string, wanted []Wanted, accept fu
 //
 // accept is the caller's check on each match, in preference order, and the first it
 // takes is returned; nil takes the preferred match.
-func Locate(libraryRoot string, w Wanted, accept func(relPath string) bool) (relPath string, ok bool) {
+func Locate(libraryRoot string, w Wanted, accept func(w Wanted, relPath string) bool) (relPath string, ok bool) {
 	if safeName("file token", w.FileToken) != nil {
 		return "", false
 	}
@@ -740,7 +740,7 @@ func Locate(libraryRoot string, w Wanted, accept func(relPath string) bool) (rel
 			names = append(names, e.Name())
 		}
 	}
-	name, ok := firstAccepted(w.FileToken, names, accept)
+	name, ok := firstAccepted(w, w.FileToken, names, accept)
 	if !ok {
 		return "", false
 	}

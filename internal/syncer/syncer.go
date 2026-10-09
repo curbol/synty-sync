@@ -366,6 +366,18 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	adoptedByID, adoptWarnings := adoptAll(ctx, opts, adoptCandidates(selOrder, selectedByID, priorByID))
 
 	var pruneWarnings []string
+	// takeAdopted records an adoption and prunes the prior copy it supersedes, the way a
+	// download does. Only a Changed file reaches here with a tracked prior, and adopting
+	// its new version otherwise leaves the old version's bytes with nothing recording them.
+	takeAdopted := func(id int, r resolved) {
+		rep := selectedByID[id][0].file
+		recordAdopted(&report, vd, FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}, rep, r)
+		if prior, ok := priorByID[id]; ok && prior.Tracked && !opts.DryRun {
+			if w := removeSuperseded(opts.LibraryRoot, prior.CachePath, r.cachePath, claimedPaths(lf, vd.resolved, id)); w != "" {
+				pruneWarnings = append(pruneWarnings, w)
+			}
+		}
+	}
 	// reached is every fileId the pass below gave a verdict. An interrupt leaves the rest
 	// without one, and they are carried forward rather than rebuilt from nothing.
 	reached := map[int]bool{}
@@ -380,7 +392,7 @@ pass:
 		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}
 
 		if r, ok := adoptedByID[id]; ok {
-			recordAdopted(&report, vd, fd, rep, r)
+			takeAdopted(id, r)
 			reached[id] = true
 			continue
 		}
@@ -454,7 +466,7 @@ pass:
 		if opts.DryRun {
 			return Report{}, interrupted
 		}
-		carryUnreached(&report, vd, selOrder, selectedByID, reached, adoptedByID, priorByID)
+		carryUnreached(vd, selOrder, reached, adoptedByID, priorByID, takeAdopted)
 	}
 
 	buildLockfile(&report, packFiles, opts, vd, lf)
@@ -501,15 +513,14 @@ func priorCopy(prior lockfile.File) resolved {
 // what the prior lockfile already said of it; anything else reaches no channel and is
 // rebuilt untracked, as the prior record had it. None of them goes to unresolved, which
 // would drop a copy this run never looked at from every owner.
-func carryUnreached(report *Report, vd verdicts, order []int, byID map[int][]selection,
-	reached map[int]bool, adopted map[int]resolved, prior map[int]lockfile.File) {
+func carryUnreached(vd verdicts, order []int, reached map[int]bool, adopted map[int]resolved,
+	prior map[int]lockfile.File, takeAdopted func(int, resolved)) {
 	for _, id := range order {
 		if reached[id] {
 			continue
 		}
-		rep := byID[id][0].file
 		if r, ok := adopted[id]; ok {
-			recordAdopted(report, vd, FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}, rep, r)
+			takeAdopted(id, r)
 			continue
 		}
 		if p, ok := prior[id]; ok && p.Tracked && p.CachePath != "" {
@@ -711,19 +722,39 @@ type selection struct {
 	file model.FileEntry
 }
 
-// adoptCandidates returns the representative file for every selected fileId with no
-// tracked prior — the precondition both adoption paths share. A file the lockfile
-// already tracks is excluded because the cache matches on name alone: adopting one
-// would move unverified content over a verified copy and repoint the lockfile at it
-// without ever consulting classify. Stating it once is the point; the two paths held
+// adoptCandidate is a selected file the adopt passes may look for on disk. notAt is a
+// path no copy of it may be taken from: the prior record's own copy, whose bytes the
+// lockfile hashed as another version.
+type adoptCandidate struct {
+	file  model.FileEntry
+	notAt string
+}
+
+// adoptCandidates returns the representative file for every selected fileId that is
+// either untracked or tracked at a version other than the live one — the precondition
+// both adoption paths share. Stating it once is the point; the two paths held
 // hand-copied versions of it, and they had already drifted apart once.
-func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfile.File) []model.FileEntry {
-	var out []model.FileEntry
+//
+// A file tracked at the live version is classify's (Unchanged or CacheMissing): the
+// cache matches on name alone, so adopting one would put unverified content in place of
+// a verified copy without ever consulting classify. A file tracked at another version
+// is the one that would classify Changed, and its new version can already be on disk:
+// library_path is user-scoped and the lockfile project-scoped, so another project, or
+// this one before a branch switch reverted its record, may have fetched it. The match
+// key carries the version, so a copy found under the new version's name is taken on the
+// same terms as for an untracked file, except that the prior record's own path is
+// refused: those bytes are the old version whatever they are named.
+func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfile.File) []adoptCandidate {
+	var out []adoptCandidate
 	for _, id := range order {
-		if p, has := prior[id]; has && p.Tracked {
-			continue // classify handles tracked files (Unchanged / Changed / CacheMissing)
+		f := byID[id][0].file
+		p, has := prior[id]
+		switch {
+		case !has || !p.Tracked:
+			out = append(out, adoptCandidate{file: f})
+		case p.Version != f.Version:
+			out = append(out, adoptCandidate{file: f, notAt: p.CachePath})
 		}
-		out = append(out, byID[id][0].file)
 	}
 	return out
 }
@@ -734,7 +765,7 @@ func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfi
 //
 // An interrupt stops both passes. An adoption it cut short is the run's outcome rather
 // than the file's, so it is neither reported as a refusal nor recorded.
-func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[int]resolved, []string) {
+func adoptAll(ctx context.Context, opts Options, cands []adoptCandidate) (map[int]resolved, []string) {
 	adopted := map[int]resolved{}
 	// A file the flat-file pass moved and then failed to hash is sitting in the layout,
 	// where the scan below finds it again. Without this it would be refused a second time
@@ -742,14 +773,23 @@ func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[i
 	refused := map[int]bool{}
 	var warnings []string
 	wanted := make([]cache.Wanted, 0, len(cands))
-	for _, f := range cands {
+	notAt := map[int]string{}
+	for _, c := range cands {
+		f := c.file
 		wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
+		if c.notAt != "" {
+			notAt[f.FileID] = c.notAt
+		}
 	}
 	// The bytes checks go to the matchers rather than being run on what they return,
 	// because each picks one copy out of every name that matches a wanted file: checked
 	// afterwards, a truncated canonical name masked an intact "(1)" copy beside it and
 	// the file re-downloaded in full. Every copy refused is still reported.
-	accept := func(rel string) bool {
+	accept := func(w cache.Wanted, rel string) bool {
+		if not := notAt[w.FileID]; not != "" &&
+			(cache.SamePath(rel, not) || cache.SameFile(opts.LibraryRoot, rel, not)) {
+			return false
+		}
 		if err := adoptable(opts.LibraryRoot, rel); err != nil {
 			warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
 			return false
@@ -786,7 +826,8 @@ func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[i
 	// or degraded lockfile does not force a full re-download. Read-only, so it runs
 	// for status too.
 	progress := opts.progressSink()
-	for i, f := range cands {
+	for i, c := range cands {
+		f := c.file
 		if ctx.Err() != nil {
 			break
 		}
