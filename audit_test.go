@@ -1348,6 +1348,43 @@ func TestSelectNamesThePacksItDropsFromTheManifest(t *testing.T) {
 	}
 }
 
+// A session signed into a different account enumerates a real, non-empty library, so
+// the zero-pack refusal never fires, and Reconcile would drop every pack the user had
+// enabled. Refused before the page goes up, and the manifest is left as it was.
+func TestSelectRefusesALibraryThatOwnsNoneOfTheEnabledPacks(t *testing.T) {
+	srv := httptest.NewServer(libraryStore([]stubPack{{orderItem: 3, name: "Pirate Pack"}}, nil))
+	defer srv.Close()
+
+	manifestPath := filepath.Join(t.TempDir(), "synty-sync.toml")
+	seed := "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"dungeon-pack\"\n  name = \"Dungeon Pack\"\n  enabled = true\n"
+	if err := os.WriteFile(manifestPath, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	client := &portal.Client{HTTP: http.DefaultClient, BaseURL: srv.URL, CustomerID: "1", Cookie: "x=y"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = selectPacks(ctx, client, manifestPath, ln)
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("select served the page for a library that owns none of its enabled packs: %v", err)
+	}
+	if !strings.Contains(err.Error(), "dungeon-pack") {
+		t.Errorf("refusal does not name the enabled packs it could not find: %v", err)
+	}
+	got, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != seed {
+		t.Errorf("the committed manifest was rewritten:\n%s", got)
+	}
+}
+
 // lockfile.Load returns an empty lockfile for a path that does not exist, so `list`
 // before the first sync printed nothing but the legend under an empty table, which
 // reads as a broken command rather than an empty record.

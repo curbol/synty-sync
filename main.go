@@ -18,12 +18,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/config"
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/manifest"
+	"github.com/curbol/synty-sync/internal/model"
 	"github.com/curbol/synty-sync/internal/portal"
 	"github.com/curbol/synty-sync/internal/selfupdate"
 	"github.com/curbol/synty-sync/internal/session"
@@ -449,6 +451,13 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 	if len(packs) == 0 && len(man.Packs) > 0 {
 		return fmt.Errorf("the library listed no packs while %s holds %d; refusing to rewrite it", manifestPath, len(man.Packs))
 	}
+	// A session signed into another account enumerates a real library that owns none
+	// of what this manifest enables, and Reconcile would drop every one of them. A
+	// library that owns at least one enabled pack is an ordinary partial change.
+	if enabled := man.EnabledSet(); len(enabled) > 0 && !ownsAny(packs, enabled) {
+		return fmt.Errorf("the library owns none of the %d packs %s enables (%s); refusing to rewrite it. Is the session signed into the right account?",
+			len(enabled), manifestPath, strings.Join(sortedKeys(enabled), ", "))
+	}
 	// Compared against what the page actually offered, not against what was enabled
 	// before: a pack that has left the library is dropped by Reconcile, so measuring
 	// against the prior set would refuse an honest empty submission naming a pack the
@@ -501,6 +510,15 @@ func selectPacks(ctx context.Context, client *portal.Client, manifestPath string
 		fmt.Fprintf(stdout, "note: %s has no variant_includes yet — add your engine's variants, e.g.\n  variant_includes = [\"Godot_*\", \"SourceFiles\"]\nbefore `synty-sync sync`.\n", manifestPath)
 	}
 	return nil
+}
+
+func ownsAny(packs []model.Pack, slugs map[string]bool) bool {
+	for _, p := range packs {
+		if slugs[p.Slug] {
+			return true
+		}
+	}
+	return false
 }
 
 func printVersion() {
