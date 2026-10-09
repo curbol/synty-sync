@@ -414,39 +414,44 @@ func TestSyncOnlyTouchesEnabledPacks(t *testing.T) {
 	}
 }
 
-// --dry-run is only a promise if it survives the trip from the flag to the option.
-// isDryRun is unit-tested and runSyncOrStatus is driven with dry passed straight in,
-// so nothing followed f.dryRun through run: a flag that stopped being read would let
-// `sync --dry-run` download the entire delta and rewrite the committed lockfile while
-// the report it printed said it had only looked.
-func TestSyncDryRunDownloadsNothingAndWritesNoLockfile(t *testing.T) {
-	var downloads int32
-	serveStore(t, libraryStore(
-		[]stubPack{{orderItem: 3, name: "Pirate", token: "POLYGON_Pirate", fileID: 77, version: "v1.0.0"}},
-		func(w http.ResponseWriter, r *http.Request) {
-			atomic.AddInt32(&downloads, 1)
-			w.Header().Set("Content-Type", "application/zip")
-			fmt.Fprint(w, "PK\x03\x04 not really a pack")
-		}))
-	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate\"\n  name = \"Pirate\"\n  enabled = true\n")
+// A dry run is only a promise if it survives the trip from the command line to the
+// option. isDryRun is unit-tested and runSyncOrStatus is driven with dry passed straight
+// in, so nothing followed either way of asking for one through run: a --dry-run that
+// stopped being read, or a status dispatched on the flag alone, would download the
+// entire delta and rewrite the committed lockfile while the report said it had only
+// looked. status is the one users run to look before they leap.
+func TestDryRunsDownloadNothingAndWriteNoLockfile(t *testing.T) {
+	for _, args := range [][]string{{"sync", "-dry-run"}, {"status"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var downloads int32
+			serveStore(t, libraryStore(
+				[]stubPack{{orderItem: 3, name: "Pirate", token: "POLYGON_Pirate", fileID: 77, version: "v1.0.0"}},
+				func(w http.ResponseWriter, r *http.Request) {
+					atomic.AddInt32(&downloads, 1)
+					w.Header().Set("Content-Type", "application/zip")
+					fmt.Fprint(w, "PK\x03\x04 not really a pack")
+				}))
+			e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n\n[[pack]]\n  slug = \"pirate\"\n  name = \"Pirate\"\n  enabled = true\n")
 
-	out := &bytes.Buffer{}
-	stdoutWas := stdout
-	stdout = out
-	defer func() { stdout = stdoutWas }()
+			out := &bytes.Buffer{}
+			stdoutWas := stdout
+			stdout = out
+			defer func() { stdout = stdoutWas }()
 
-	if err := run(e.args("sync", "-dry-run")); err != nil {
-		t.Fatalf("sync --dry-run: %v", err)
-	}
-	if n := atomic.LoadInt32(&downloads); n != 0 {
-		t.Errorf("--dry-run issued %d download request(s)", n)
-	}
-	if _, err := os.Stat(e.lockPath); !os.IsNotExist(err) {
-		t.Errorf("--dry-run wrote the committed lockfile at %s (stat err %v)", e.lockPath, err)
-	}
-	// And it said so, rather than reporting downloads it did not make.
-	if !strings.Contains(out.String(), "would download: 1 files") {
-		t.Errorf("the report does not read as a dry run:\n%s", out.String())
+			if err := run(e.args(args[0], args[1:]...)); err != nil {
+				t.Fatalf("%v: %v", args, err)
+			}
+			if n := atomic.LoadInt32(&downloads); n != 0 {
+				t.Errorf("%v issued %d download request(s)", args, n)
+			}
+			if _, err := os.Stat(e.lockPath); !os.IsNotExist(err) {
+				t.Errorf("%v wrote the committed lockfile at %s (stat err %v)", args, e.lockPath, err)
+			}
+			// And it said so, rather than reporting downloads it did not make.
+			if !strings.Contains(out.String(), "would download: 1 files") {
+				t.Errorf("the report does not read as a dry run:\n%s", out.String())
+			}
+		})
 	}
 }
 
@@ -485,33 +490,14 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 	}
 }
 
-// Flags are the last layer over config.toml and the environment, and the shell
-// leaves a quoted ~ alone. Without the same expansion the other layers get, a quoted
-// --library "~/assets" puts a multi-gigabyte mirror in a directory named "~".
-func TestApplyFlagsIsTheLastLayer(t *testing.T) {
+// --cookies is applied by resolveCookie rather than through config.Flags, and the shell
+// leaves a quoted "~/session.curl" alone, so it arrives with the tilde intact. Without
+// the expansion every other path gets, a session source resolving to a directory named
+// "~" is reported as a missing file rather than as the path the user typed.
+func TestCookiesFlagExpandsATilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	base := config.Config{LibraryPath: "/from/env", Concurrency: 4, CustomerID: "from-env"}
-
-	got := applyFlags(base, "~/assets", "from-flag", 8)
-	if got.LibraryPath != filepath.Join(home, "assets") {
-		t.Errorf("LibraryPath = %q, want the expanded %q", got.LibraryPath, filepath.Join(home, "assets"))
-	}
-	if got.CustomerID != "from-flag" || got.Concurrency != 8 {
-		t.Errorf("flags did not win: %+v", got)
-	}
-
-	// An unset flag leaves the layer beneath it alone.
-	unchanged := applyFlags(base, "", "", 0)
-	if unchanged != base {
-		t.Errorf("empty flags changed the config: %+v, want %+v", unchanged, base)
-	}
-
-	// --cookies is applied by resolveCookie rather than applyFlags, and needs the same
-	// treatment for the same reason: a quoted "~/session.curl" arrives with the tilde
-	// intact, and a session source resolving to a directory named "~" is reported as a
-	// missing file rather than as the path the user typed.
 	curl := filepath.Join(home, "session.curl")
 	if err := os.WriteFile(curl, []byte(`curl 'https://syntystore.com' -H 'Cookie: sid=abc'`), 0o600); err != nil {
 		t.Fatal(err)
@@ -522,6 +508,25 @@ func TestApplyFlagsIsTheLastLayer(t *testing.T) {
 	}
 	if cookie != "sid=abc" {
 		t.Errorf("cookie = %q, want the one in %s", cookie, curl)
+	}
+}
+
+// Zero is how the config chain spells "not supplied", so --concurrency 0 ran at the
+// configured default and said nothing. A typed zero or a negative is not a number of
+// simultaneous fetches, so it is refused before the store is contacted.
+func TestConcurrencyBelowOneIsRefused(t *testing.T) {
+	reached := false
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+
+	for _, n := range []string{"0", "-1"} {
+		err := run(e.args("status", "-concurrency", n))
+		if err == nil || !strings.Contains(err.Error(), "--concurrency") {
+			t.Errorf("--concurrency %s: err = %v, want it refused by name", n, err)
+		}
+	}
+	if reached {
+		t.Error("the store was contacted with a concurrency that was refused")
 	}
 }
 
@@ -693,6 +698,89 @@ func TestRunWithoutACustomerIDStopsBeforeTheStore(t *testing.T) {
 	}
 }
 
+// The config package's tests cover ResolveDir and Load in isolation, and every run()
+// test passes --library and --customer, so nothing drove a real config.toml through
+// run. Handing Load the raw --config value instead of ResolveDir's answer reads a stray
+// ./config.toml when no flag is given (Load("") joins to a bare "config.toml"), and
+// dropping a field from the Flags literal lets the file beat the flag; either mirrors
+// into a library the user did not name, said only by the "library:" line printed after
+// the downloads.
+func TestRunReadsTheConfigFileItResolves(t *testing.T) {
+	var gotPath string
+	serveStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `<html><body><input class="sky-pilot-search-input"></body></html>`)
+	}))
+	t.Setenv("SYNTY_LIBRARY", "")
+	t.Setenv("SYNTY_CUSTOMER_ID", "")
+	t.Setenv("SYNTY_CONFIG_DIR", "")
+
+	writeConfig := func(t *testing.T, dir, library string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := fmt.Sprintf("customer_id = \"5550001112223\"\nlibrary_path = %q\n", library)
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	libraryOf := func(t *testing.T, args ...string) string {
+		t.Helper()
+		e := newRunEnv(t, "variant_includes = [\"Godot_*\"]\n")
+		var out bytes.Buffer
+		prev := stdout
+		stdout = &out
+		defer func() { stdout = prev }()
+		args = append(args, "-manifest", e.manifestPath, "-cookies", e.cookiesPath)
+		if err := run(append([]string{"status"}, args...)); err != nil {
+			t.Fatalf("status %v: %v", args, err)
+		}
+		for line := range strings.SplitSeq(out.String(), "\n") {
+			if rest, ok := strings.CutPrefix(line, "library: "); ok {
+				return rest
+			}
+		}
+		t.Fatalf("the summary printed no library line:\n%s", out.String())
+		return ""
+	}
+
+	t.Run("a named config dir", func(t *testing.T) {
+		dir, want := t.TempDir(), filepath.Join(t.TempDir(), "from-named-config")
+		writeConfig(t, dir, want)
+		if got := libraryOf(t, "-config", dir); got != want {
+			t.Errorf("library = %q, want %q from the config.toml --config names", got, want)
+		}
+		if !strings.Contains(gotPath, "/5550001112223") {
+			t.Errorf("request path = %q, want the customer id from config.toml", gotPath)
+		}
+	})
+
+	t.Run("the resolved config dir when no flag names one", func(t *testing.T) {
+		xdg, want := t.TempDir(), filepath.Join(t.TempDir(), "from-resolved-config")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		writeConfig(t, filepath.Join(xdg, "synty-sync"), want)
+		// A config.toml in the working directory is what Load("") would read instead.
+		wd := t.TempDir()
+		writeConfig(t, wd, filepath.Join(wd, "from-the-working-directory"))
+		t.Chdir(wd)
+		if got := libraryOf(t); got != want {
+			t.Errorf("library = %q, want %q: the resolved config dir was not the one read", got, want)
+		}
+	})
+
+	t.Run("flags beat the file", func(t *testing.T) {
+		dir, want := t.TempDir(), filepath.Join(t.TempDir(), "from-the-flag")
+		writeConfig(t, dir, filepath.Join(t.TempDir(), "from-the-file"))
+		if got := libraryOf(t, "-config", dir, "-library", want, "-customer", "9990001112223"); got != want {
+			t.Errorf("library = %q, want the --library value %q", got, want)
+		}
+		if !strings.Contains(gotPath, "/9990001112223") {
+			t.Errorf("request path = %q, want the customer id from --customer", gotPath)
+		}
+	})
+}
+
 // An expired session has to keep its sentinel all the way out of run, where the exit
 // status and the "log in again" hint are decided. Both subcommands that reach the
 // store have their own explainSession wrap, so both are checked: select's is the one
@@ -782,6 +870,35 @@ func TestPrintReportNamesEveryOutcome(t *testing.T) {
 	}
 	if strings.Contains(wet.String(), "would download") {
 		t.Errorf("sync report hedges about work it already did:\n%s", wet.String())
+	}
+}
+
+// A session for a different account enumerates a library disjoint from the lockfile,
+// so every pack it records comes back "no longer in your library": hundreds of
+// consecutive lines that bury the failures and warnings printed around them. A few is
+// the ordinary case and each is still named; past that, the rest is counted.
+func TestTheNoLongerInYourLibraryListIsCapped(t *testing.T) {
+	var removed []string
+	for i := range 300 {
+		removed = append(removed, fmt.Sprintf("pack-%03d", i))
+	}
+	var out bytes.Buffer
+	printReport(&out, true, config.Config{}, syncer.Report{Removed: removed})
+	got := out.String()
+	if n := strings.Count(got, "no longer in your library"); n > 20 {
+		t.Errorf("the summary printed %d no-longer-in-your-library lines", n)
+	}
+	if !strings.Contains(got, "pack-000") {
+		t.Errorf("the capped list names none of the packs:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("and %d more", 300-maxListed)) {
+		t.Errorf("the summary does not account for the packs it did not name:\n%s", got)
+	}
+
+	out.Reset()
+	printReport(&out, true, config.Config{}, syncer.Report{Removed: removed[:maxListed]})
+	if got := out.String(); strings.Count(got, "no longer in your library") != maxListed || strings.Contains(got, "more") {
+		t.Errorf("a list at the cap was truncated:\n%s", got)
 	}
 }
 
@@ -996,7 +1113,7 @@ func TestListDoesNotNeedAReadableUserConfig(t *testing.T) {
 	t.Setenv("SYNTY_CONFIG_DIR", cfgDir)
 
 	// The config really is broken, so this test cannot pass by the file being ignored.
-	if _, err := config.Load(cfgDir); err == nil {
+	if _, err := config.Load(cfgDir, config.Flags{}); err == nil {
 		t.Fatal("this config was meant to be rejected; the test proves nothing as written")
 	}
 
@@ -1278,12 +1395,39 @@ func TestCommittedExamplesStillParse(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), uncomment(t, "config.example.toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(cfgDir)
+	cfg, err := config.Load(cfgDir, config.Flags{})
 	if err != nil {
 		t.Fatalf("config.example.toml no longer parses as a config.toml: %v", err)
 	}
-	if cfg.CustomerID == "" || cfg.LibraryPath == "" || cfg.Concurrency == 0 {
-		t.Errorf("the example set no customer id, library path or concurrency: %+v", cfg)
+	// Measured against what Load gives with no file at all: a non-empty library path
+	// and a non-zero concurrency are what the defaults already supply, so asserting
+	// only that passes with the example's keys never read.
+	defaults, err := config.Load(t.TempDir(), config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CustomerID == defaults.CustomerID || cfg.LibraryPath == defaults.LibraryPath {
+		t.Errorf("the example's customer_id or library_path did not reach the config: %+v", cfg)
+	}
+	// concurrency and session_source ship at their default values, so one read from the
+	// file and one never read look the same. Changing the values, not the keys, still
+	// holds the example's own key names to decoding.
+	raw := uncomment(t, "config.example.toml")
+	for _, sub := range []struct{ key, value string }{{"concurrency", "7"}, {"session_source", `"zen"`}} {
+		line := regexp.MustCompile(`(?m)^` + sub.key + `[ \t]*=.*$`)
+		if !line.Match(raw) {
+			t.Errorf("config.example.toml no longer sets %s", sub.key)
+		}
+		raw = line.ReplaceAll(raw, []byte(sub.key+" = "+sub.value))
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = config.Load(cfgDir, config.Flags{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Concurrency != 7 || cfg.SessionSource != "zen" {
+		t.Errorf("the example's concurrency or session_source key did not reach the config: %+v", cfg)
 	}
 
 	manifestPath := filepath.Join(t.TempDir(), manifest.FileName)

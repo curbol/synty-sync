@@ -3,9 +3,12 @@ package web
 import (
 	"context"
 	"errors"
+	"html/template"
+	"io"
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -267,6 +270,13 @@ func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T)
 		{"loopback bind, local browser", "127.0.0.1:8787", "127.0.0.1:8787", "127.0.0.1:51000", true},
 		{"loopback bind, rebound name", "127.0.0.1:8787", "evil.example:8787", "127.0.0.1:51000", false},
 		{"loopback bind, wrong port", "127.0.0.1:8787", "127.0.0.1:9999", "127.0.0.1:51000", false},
+		// A browser omits the port when it is the scheme's default, so a page bound to
+		// :80 arrives with a bare name and was answered 421 on every request.
+		{"port 80 bind, browser omits the port", "127.0.0.1:80", "localhost", "127.0.0.1:51000", true},
+		{"port 80 bind, bare loopback literal", "127.0.0.1:80", "127.0.0.1", "127.0.0.1:51000", true},
+		{"port 80 IPv6 bind, bare bracketed literal", "[::1]:80", "[::1]", "[::1]:51000", true},
+		{"port 80 bind, rebound bare name", "127.0.0.1:80", "evil.example", "127.0.0.1:51000", false},
+		{"other port, bare name", "127.0.0.1:8787", "localhost", "127.0.0.1:51000", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &http.Request{Host: tc.host, RemoteAddr: tc.peer}
@@ -275,6 +285,26 @@ func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T)
 					got, tc.want, tc.bound, tc.host, tc.peer)
 			}
 		})
+	}
+}
+
+// template.Must runs Parse, not html/template's escape analysis or the field lookups,
+// which wait for the first Execute. A template edit that fails there used to serve a
+// 200 with whatever had been written before the failure, often nothing, while the
+// terminal said nothing: a blank page and no diagnostic anywhere.
+func TestAPageThatFailsToRenderIsAnErrorNotABlankPage(t *testing.T) {
+	prev := page
+	page = template.Must(template.New("select").Parse(`<p>{{.Count}}</p>{{.NoSuchField}}`))
+	t.Cleanup(func() { page = prev })
+
+	base, _ := serving(t, []model.Pack{{Slug: "a", DisplayName: "A"}}, nil)
+	resp, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("a page that failed to render returned %d, want 500", resp.StatusCode)
 	}
 }
 
@@ -296,5 +326,193 @@ func TestPageCountsTheBoxesItRenders(t *testing.T) {
 	}
 	if !strings.Contains(body, `<span id="n">1</span>`) {
 		t.Errorf("the header count is not the one box the page ticked:\n%s", body)
+	}
+}
+
+// postSave submits a selection straight to h, the way the page's form would from a
+// browser on this machine.
+func postSave(t *testing.T, h *handler, slugs ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"csrf": {h.token}, "pack": slugs}
+	r := httptest.NewRequest(http.MethodPost, "/save", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Host = h.bound.String()
+	r.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+// Two tabs on the page share the run's token, so both can submit. Serve takes one
+// selection, and the second was answered "Got your selection" and then either dropped
+// in a channel nobody read again or left its handler blocked on a full one: the user
+// was told a selection was taken that never reached the manifest.
+func TestASecondSaveIsRefusedRatherThanDropped(t *testing.T) {
+	packs := []model.Pack{{Slug: "a", DisplayName: "A"}, {Slug: "b", DisplayName: "B"}}
+	h, err := newHandler(boundAddr("127.0.0.1:8787"), packs, map[string]bool{"a": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := postSave(t, h, "a"); rec.Code != http.StatusOK {
+		t.Fatalf("the first save returned %d, want 200", rec.Code)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postSave(t, h, "b") }()
+	var second *httptest.ResponseRecorder
+	select {
+	case second = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second save never got an answer")
+	}
+	if second.Code == http.StatusOK || strings.Contains(second.Body.String(), "Got your selection") {
+		t.Errorf("the second save was told it was taken: %d %q", second.Code, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "select") {
+		t.Errorf("the refusal does not say how to change the selection: %q", second.Body.String())
+	}
+	if got := <-h.result; !maps.Equal(got, map[string]bool{"a": true}) {
+		t.Errorf("Serve would receive %v, want the first save", got)
+	}
+	select {
+	case got := <-h.result:
+		t.Errorf("a second selection %v was queued behind the first", got)
+	default:
+	}
+}
+
+// A save is queued before its handler answers the browser, so an interrupt landing in
+// that window leaves Serve with both cases ready, and Go picks between ready cases at
+// random. Returning the interrupt there drops a selection the page said it had.
+func TestASaveAlreadyAcceptedSurvivesAnInterrupt(t *testing.T) {
+	packs := []model.Pack{{Slug: "a", DisplayName: "A"}, {Slug: "b", DisplayName: "B"}}
+	for round := range 50 {
+		h, err := newHandler(boundAddr("127.0.0.1:8787"), packs, map[string]bool{"a": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec := postSave(t, h, "b"); rec.Code != http.StatusOK {
+			t.Fatalf("round %d: the save returned %d", round, rec.Code)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		got, err := serveHandler(ctx, listen(t), h)
+		if err != nil || !got["b"] {
+			t.Fatalf("round %d: Serve returned %v, %v; want the accepted selection", round, got, err)
+		}
+	}
+}
+
+// The window one step earlier: the interrupt lands while the handler is still reading
+// the POST body. Serve takes the cancellation with nothing queued, its shutdown waits
+// for that handler, and the handler goes on to accept the save and answer the browser.
+// Returning the interrupt there tells the user their selection was taken while the
+// manifest keeps the old one.
+func TestASaveAcceptedWhileTheInterruptLandsIsStillReturned(t *testing.T) {
+	packs := []model.Pack{{Slug: "a", DisplayName: "A"}, {Slug: "b", DisplayName: "B"}}
+	ln := listen(t)
+	addr := ln.Addr().String()
+	h, err := newHandler(ln.Addr(), packs, map[string]bool{"a": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		sel map[string]bool
+		err error
+	}
+	served := make(chan result, 1)
+	go func() {
+		sel, err := serveHandler(ctx, ln, h)
+		served <- result{sel, err}
+	}()
+	waitUp(t, "http://"+addr)
+
+	// A declared length and a body that arrives in two parts, so the handler is
+	// demonstrably mid-read when the interrupt lands.
+	form := url.Values{"csrf": {h.token}, "pack": {"b"}}.Encode()
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/save", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ContentLength = int64(len(form))
+	answered := make(chan int, 1)
+	go func() {
+		resp, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+		if err != nil {
+			answered <- 0
+			return
+		}
+		resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	if _, err := pw.Write([]byte(form[:len(form)-3])); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	// Shutdown closes the listener first, so a refused dial is the sign Serve has taken
+	// the cancellation with nothing queued and is now waiting on the handler.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			break
+		}
+		c.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("Serve never began shutting down after the interrupt")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := pw.Write([]byte(form[len(form)-3:])); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+
+	if code := <-answered; code != http.StatusOK {
+		t.Fatalf("the in-flight save was answered %d; this test cannot tell us anything", code)
+	}
+	r := <-served
+	if r.err != nil || !r.sel["b"] {
+		t.Errorf("Serve returned %v, %v after the page told the user their selection was taken", r.sel, r.err)
+	}
+}
+
+// The icon URL comes from the store and lands in an src attribute, a URL context where
+// escaping the quotes is not enough: the scheme has to be filtered. html/template does
+// that, rendering anything but http, https and mailto as "#ZgotmplZ". A developer who
+// sees that string in a broken thumbnail finds one suggested fix, retyping the field as
+// template.URL, which switches the filter off for every row; the attribute-breakout
+// test above stays green through it, because quoting still works.
+func TestIconURLSchemesAreFiltered(t *testing.T) {
+	packs := []model.Pack{
+		{Slug: "a", DisplayName: "A", IconURL: "javascript:alert(document.cookie)"},
+		{Slug: "b", DisplayName: "B", IconURL: "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="},
+		{Slug: "c", DisplayName: "C", IconURL: "https://cdn.example/c.png"},
+	}
+	h, err := newHandler(boundAddr("127.0.0.1:8787"), packs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Host = "127.0.0.1:8787"
+	r.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	body := rec.Body.String()
+
+	for _, scheme := range []string{"javascript:", "data:text/html"} {
+		if strings.Contains(body, scheme) {
+			t.Errorf("an icon URL with scheme %q reached the page:\n%s", scheme, body)
+		}
+	}
+	// Present, so the assertion above is about filtering rather than about the icons
+	// having been dropped altogether.
+	if !strings.Contains(body, `src="https://cdn.example/c.png"`) {
+		t.Errorf("an https icon URL did not reach the page:\n%s", body)
 	}
 }

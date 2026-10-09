@@ -105,6 +105,16 @@ func Load(path string) (Manifest, error) {
 		}
 		return Manifest{}, fmt.Errorf("%s: unknown key(s): %s", path, strings.Join(keys, ", "))
 	}
+	// A duplicate arrives from a merge that kept both sides, and the readers disagree
+	// over it: EnabledSet enables the pack if either block does, Reconcile keeps the
+	// last block, so a save from the select page silently disables it.
+	seen := map[string]bool{}
+	for _, e := range m.Packs {
+		if seen[e.Slug] {
+			return Manifest{}, fmt.Errorf("%s: two [[pack]] entries for %q; delete the stale one", path, e.Slug)
+		}
+		seen[e.Slug] = true
+	}
 	return m, nil
 }
 

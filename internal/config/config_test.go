@@ -19,7 +19,7 @@ func clearSyntyEnv(t *testing.T) {
 
 func TestDefaultsWhenNoConfig(t *testing.T) {
 	clearSyntyEnv(t)
-	c, err := Load(t.TempDir())
+	c, err := Load(t.TempDir(), Flags{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ library_path = "/from/file"
 		t.Fatal(err)
 	}
 
-	c, err := Load(dir)
+	c, err := Load(dir, Flags{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ library_path = "/from/file"
 
 	t.Setenv("SYNTY_LIBRARY", "/from/env")
 	t.Setenv("SYNTY_CUSTOMER_ID", "9999999999999")
-	c, _ = Load(dir)
+	c, _ = Load(dir, Flags{})
 	if c.LibraryPath != "/from/env" || c.CustomerID != "9999999999999" {
 		t.Errorf("env should override config.toml: %+v", c)
 	}
@@ -69,7 +69,7 @@ library_path = "/from/file"
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SYNTY_LIBRARY", "~/assets")
-	c, _ = Load(dir)
+	c, _ = Load(dir, Flags{})
 	if want := filepath.Join(home, "assets"); c.LibraryPath != want {
 		t.Errorf("LibraryPath = %q, want %q; a tilde from the environment was not expanded", c.LibraryPath, want)
 	}
@@ -84,7 +84,7 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 		[]byte("customer-id = \"1234567890123\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Load(dir)
+	_, err := Load(dir, Flags{})
 	if err == nil {
 		t.Fatal("a misspelled key was accepted and dropped")
 	}

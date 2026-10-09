@@ -88,3 +88,24 @@ func TestSaveIsByteStableAcrossRuns(t *testing.T) {
 		t.Errorf("two Saves of the same selection differ:\n--- a ---\n%s\n--- b ---\n%s", ab, bb)
 	}
 }
+
+// This file is committed and hand-edited, so a duplicate [[pack]] arrives from a merge
+// that kept both sides. The two readers then disagree: EnabledSet enables the pack if
+// either block says so, so sync mirrors it, while Reconcile keeps the last block, so the
+// select page renders it unchecked. Saving from that page collapses the pair to disabled
+// and the pack silently stops being mirrored.
+func TestTwoEntriesForOnePackAreRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	body := "[[pack]]\n  slug = \"polygon-pirate-pack\"\n  name = \"Pirate\"\n  enabled = true\n\n" +
+		"[[pack]]\n  slug = \"polygon-pirate-pack\"\n  name = \"Pirate\"\n  enabled = false\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("a manifest with two entries for one pack loaded without complaint")
+	}
+	if !strings.Contains(err.Error(), "polygon-pirate-pack") {
+		t.Errorf("error %q does not name the duplicated slug", err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Write replaces path with whatever write emits. The temp lives in path's own
@@ -20,7 +21,10 @@ import (
 // concurrent reader but says nothing about durability, so without it a crash between
 // this call and writeback can leave a full-length file of zeros where the committed
 // record was — and the record is what the bytes on disk are named by.
+//
+// It first sweeps stale temps of the same pattern beside path: see sweepTemps.
 func Write(path, tempPattern string, write func(io.Writer) error) error {
+	sweepTemps(filepath.Dir(path), tempPattern, staleTempAge)
 	tmp, err := os.CreateTemp(filepath.Dir(path), tempPattern)
 	if err != nil {
 		return err
@@ -69,6 +73,39 @@ func SyncDir(dir string) {
 	}
 	_ = d.Sync()
 	_ = d.Close()
+}
+
+// staleTempAge is how old a temp must be before a write treats it as orphaned. A write
+// holds its temp only for an encode and a flush, so this clears any concurrent one by a
+// wide margin.
+const staleTempAge = time.Hour
+
+// sweepTemps removes temps matching tempPattern in dir that have gone untouched for at
+// least minAge. Every error path in Write unlinks its own, but a SIGKILL or a power cut
+// between the create and the rename cannot, and the leftover sits in the directory the
+// user commits with nothing else ever removing it.
+//
+// Housekeeping only, so nothing here fails: a write must not be refused over a temp it
+// could not read or remove.
+func sweepTemps(dir, tempPattern string, minAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	olderThan := time.Now().Add(-minAge)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if ok, _ := filepath.Match(tempPattern, e.Name()); !ok {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || !fi.ModTime().Before(olderThan) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
 }
 
 // modeOf is the mode a rewritten committed file keeps: whatever it already had, or a

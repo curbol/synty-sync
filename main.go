@@ -158,6 +158,12 @@ func run(args []string) error {
 		}
 		return err
 	}
+	// Zero is how the config chain spells "not supplied", so a typed --concurrency 0
+	// would otherwise run at the configured default and say nothing.
+	if flagGiven(fs, "concurrency") && f.concurrency < 1 {
+		return fmt.Errorf("--concurrency %d is not a number of simultaneous fetches; "+
+			"pass 1 or more, or omit it to use the configured default", f.concurrency)
+	}
 
 	manifestPath, err := resolveManifestPath(f.manifestFlag, cmd)
 	if err != nil {
@@ -189,12 +195,18 @@ func run(args []string) error {
 		defer func() { _ = ln.Close() }()
 	}
 
-	authDir := config.ResolveDir(f.cfgDir)
-	cfg, err := config.Load(authDir)
+	authDir, err := config.ResolveDir(f.cfgDir)
 	if err != nil {
 		return err
 	}
-	cfg = applyFlags(cfg, f.library, f.customer, f.concurrency)
+	cfg, err := config.Load(authDir, config.Flags{
+		LibraryPath: f.library,
+		CustomerID:  f.customer,
+		Concurrency: f.concurrency,
+	})
+	if err != nil {
+		return err
+	}
 
 	if cfg.CustomerID == "" {
 		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
@@ -300,21 +312,17 @@ func isDryRun(cmd string, dryRun bool) bool {
 	return cmd == "status" || dryRun
 }
 
-// applyFlags layers the command-line overrides on last, after config.Load has
-// merged the built-in defaults, config.toml, and the environment. The library path
-// is expanded here as well as in Load: the shell leaves a quoted --library
-// "~/assets" alone, which would otherwise put the mirror in a directory named "~".
-func applyFlags(cfg config.Config, library, customer string, concurrency int) config.Config {
-	if library != "" {
-		cfg.LibraryPath = config.ExpandHome(library)
-	}
-	if concurrency > 0 {
-		cfg.Concurrency = concurrency
-	}
-	if customer != "" {
-		cfg.CustomerID = customer
-	}
-	return cfg
+// flagGiven reports whether a flag was passed on the command line, as opposed to
+// holding its zero default. A numeric flag whose zero also means "not supplied" cannot
+// answer that from its value.
+func flagGiven(fs *flag.FlagSet, name string) bool {
+	given := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
 }
 
 // resolveManifestPath locates the project manifest. An explicit --manifest is honored
@@ -503,6 +511,10 @@ func resolveCookie(cfg config.Config, override string) (string, error) {
 	return session.Resolve(src)
 }
 
+// maxListed is how many entries of a per-pack list the summary names before counting
+// the rest.
+const maxListed = 10
+
 func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 	counts := map[syncer.Class]int{}
 	for _, d := range rep.Diffs {
@@ -531,7 +543,13 @@ func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 		}
 		fmt.Fprintf(w, "  %s: %s %s: %s\n", what, f.PackSlug, f.Key, f.Err)
 	}
-	for _, slug := range rep.Removed {
+	// Capped: a session for another account lists a library disjoint from the lockfile,
+	// and one line per recorded pack buries everything printed around it.
+	for i, slug := range rep.Removed {
+		if i == maxListed {
+			fmt.Fprintf(w, "  …and %d more no longer in your library (their lockfile records are kept)\n", len(rep.Removed)-maxListed)
+			break
+		}
 		fmt.Fprintf(w, "  no longer in your library: %s (its lockfile record is kept)\n", slug)
 	}
 	for _, warning := range rep.Warnings {

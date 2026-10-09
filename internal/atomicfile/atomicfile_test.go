@@ -7,7 +7,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// Every error path in Write unlinks its temp, but a SIGKILL or a power cut between the
+// create and the rename cannot, and the temp sits in the directory the user commits.
+// Nothing else would ever remove it, so the next write of the same file does — sparing
+// one young enough to be a concurrent run's write in flight, and anything that is not
+// this file's temp.
+func TestWriteSweepsTempsAKilledWriteLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "synty-sync.lock.json")
+	orphan := filepath.Join(dir, ".synty-lock-123456")
+	inflight := filepath.Join(dir, ".synty-lock-654321")
+	otherFile := filepath.Join(dir, ".synty-sync-777777")
+	for _, p := range []string{orphan, inflight, otherFile} {
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	for _, p := range []string{orphan, otherFile} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := Write(path, ".synty-lock-*", write("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Error("the orphaned temp survived a write of the file it belonged to")
+	}
+	if _, err := os.Stat(inflight); err != nil {
+		t.Error("a temp younger than the threshold was swept: a concurrent write in flight")
+	}
+	if _, err := os.Stat(otherFile); err != nil {
+		t.Error("a write swept another file's temp")
+	}
+}
 
 func write(s string) func(io.Writer) error {
 	return func(w io.Writer) error {
