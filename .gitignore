@@ -12,8 +12,10 @@ cookies.txt
 synty-sync.toml
 synty-sync.lock.json
 
-# Built binary.
+# Built binaries. Named rather than globbed: `go build ./cmd/scrubfixtures` writes
+# ./scrubfixtures into the working directory.
 /synty-sync
+/scrubfixtures
 
 # Raw portal captures and the real->fake scrub map they are scrubbed through are
 # account PII. cmd/scrubfixtures reads both from here by default.
