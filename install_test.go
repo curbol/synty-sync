@@ -568,6 +568,45 @@ func TestInstallerChecksMacMagicOnADarwinHost(t *testing.T) {
 	}
 }
 
+// check_executable's case has to close on a refusal. detect_platform is what admits an
+// OS, so reaching the signature check with one it does not know means a platform was
+// added there and not here, and a case with no closing arm then passes anything at all:
+// an error page shipped as the asset is chmod +x'd over the working binary. The uname
+// here admits Linux to detect_platform and then answers for an OS the check has no
+// table for, which is that drift in one run.
+func TestInstallerRefusesWhenNoSignatureIsKnownForTheOS(t *testing.T) {
+	home := t.TempDir()
+	srv := stubReleaseLabeled(t, installerZip(t, []byte("\x7fELF a linux binary")), "linux-intel", assetShape{}, nil)
+
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  -s) if [ -e %[1]q ]; then echo Drift; else : > %[1]q; echo Linux; fi ;;
+  -m) echo x86_64 ;;
+esac
+`, calls)
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL,
+		"PATH="+dir+":"+ghStub(t, "")+":/usr/bin:/bin")
+	if err == nil {
+		t.Fatalf("the installer succeeded on an OS it holds no signature for:\n%s", out)
+	}
+	if !strings.Contains(out, "INFO: platform: linux-intel") {
+		t.Fatalf("the stub did not admit the run past detect_platform, so nothing reached the check:\n%s", out)
+	}
+	if !strings.Contains(out, "no executable signature is known for Drift") {
+		t.Errorf("the refusal did not name the missing signature:\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".local", "bin", "synty-sync")); statErr == nil {
+		t.Errorf("an unchecked asset was installed:\n%s", out)
+	}
+}
+
 // assertNoStagingLeft checks the install directory holds the binary and nothing else.
 // The trap that removes the staging directory fires on every exit, so this belongs on
 // the failure paths as much as the success one — those are the ones that depend on the

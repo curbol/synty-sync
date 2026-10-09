@@ -121,6 +121,10 @@ check_executable() {
         cffaedfe|cefaedfe|cafebabe) ;;
         *) err "the downloaded file is not a macOS executable"; exit 1 ;;
       esac ;;
+    # No silent fall-through. detect_platform refuses an OS this does not build for, so
+    # reaching here means a platform was added there and not here, and the check before
+    # the move would then pass on anything at all.
+    *) err "no executable signature is known for $(uname -s)"; exit 1 ;;
   esac
 }
 
@@ -159,6 +163,11 @@ install_binary() {
   [[ -f "${STAGE}/${BINARY_NAME}" ]] || { err "${file} contains no ${BINARY_NAME}"; exit 1; }
   check_executable "${STAGE}/${BINARY_NAME}"
   chmod +x "${STAGE}/${BINARY_NAME}"
+  # Flushed before the rename, the way selfupdate flushes before its own. The rename is
+  # durable ahead of the data it publishes, so a crash inside the writeback window leaves
+  # a truncated binary on PATH, and the smoke test below has already run by then. macOS's
+  # sync takes no operand, hence the fallback.
+  sync "${STAGE}/${BINARY_NAME}" 2>/dev/null || sync
   mv "${STAGE}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   log "installed to ${INSTALL_DIR}/${BINARY_NAME}"
 }

@@ -646,6 +646,24 @@ func TestExecutableMagicPerPlatform(t *testing.T) {
 	}
 }
 
+// checkMagic lets a GOOS with no table through, so an unlisted platform stays updatable.
+// That fail-open is only safe while every platform the release actually builds has a
+// signature: adding one to release.yml and to assetSuffix without one here turns the last
+// guard before the rename into a no-op on that platform alone, and an error page shipped
+// as the asset is renamed over the working binary and reported as an update.
+func TestEveryReleasedPlatformHasAnExecutableSignature(t *testing.T) {
+	for _, p := range releasePlatforms(t) {
+		if len(executableMagic[p.GOOS]) == 0 {
+			t.Errorf("release.yml builds %s/%s but executableMagic has no signature for %s, "+
+				"so checkExecutable would accept anything there", p.GOOS, p.GOARCH, p.GOOS)
+			continue
+		}
+		if err := checkMagic(p.GOOS, []byte("<!doctype html>")); err == nil {
+			t.Errorf("%s accepted an HTML error page as a binary", p.GOOS)
+		}
+	}
+}
+
 // An asset request to api.github.com is answered with a 302 to a CDN host whose query
 // carries a signature: a live bearer credential for a private release asset.
 // net/http reports a failure on a redirected request against the last URL it tried,
