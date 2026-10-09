@@ -87,7 +87,7 @@ type Client struct {
 	HTTP       *http.Client
 	BaseURL    string // e.g. https://syntystore.com (no trailing slash)
 	CustomerID string
-	Cookie     string
+	Cookie     Credential
 	UserAgent  string
 	Limits     Limits
 
@@ -105,9 +105,26 @@ func New(httpClient *http.Client, baseURL, customerID, cookie string) *Client {
 		HTTP:       httpClient,
 		BaseURL:    strings.TrimRight(baseURL, "/"),
 		CustomerID: customerID,
-		Cookie:     cookie,
+		Cookie:     Credential(cookie),
 	}
 }
+
+// Credential is a Cookie header: the user's live session. It goes into a request and
+// nowhere else. The Client holding it is a struct that a %v in a log line or a wrapped
+// error walks field by field, so every way of rendering one prints a placeholder;
+// string(c) is the header itself.
+type Credential string
+
+const redacted = "[redacted]"
+
+// Format covers every verb, not only the ones a String method reaches: %#v goes to
+// GoString, and a verb that does not fit a string (%d) prints the value inside its
+// bad-verb marker.
+func (Credential) Format(f fmt.State, _ rune) { io.WriteString(f, redacted) }
+
+// MarshalText closes the encoders, which walk an exported field without consulting
+// Format.
+func (Credential) MarshalText() ([]byte, error) { return []byte(redacted), nil }
 
 // base is the BaseURL every request builds on. Request URLs are assembled by
 // concatenation, so a trailing slash would produce "//apps/downloads/..." — normalized
@@ -165,7 +182,7 @@ func (c *Client) get(ctx context.Context, rawURL string) (*http.Response, error)
 	req.Header.Set("User-Agent", c.ua())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
 	if c.Cookie != "" {
-		req.Header.Set("Cookie", c.Cookie)
+		req.Header.Set("Cookie", string(c.Cookie))
 	}
 	return c.httpClient().Do(req)
 }

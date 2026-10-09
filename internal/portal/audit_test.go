@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1161,5 +1162,39 @@ func TestResolveRefusalsDoNotHangOnABodyThatStopsArriving(t *testing.T) {
 					"and StallTimeout (%s) never reaches it", c.Limits.StallTimeout)
 			}
 		})
+	}
+}
+
+// The Cookie field is the user's live session, and the Client is a struct a %v or %+v
+// in a log line or a wrapped error walks field by field. Nothing prints one today; the
+// route is closed before there is something to find. Every verb is covered, not just
+// the Stringer ones: %d on a string type prints the value inside its bad-verb marker.
+func TestPrintingAClientDoesNotPrintTheSession(t *testing.T) {
+	const secret = "_shopify_essential=the-session"
+	c := New(nil, "https://example.test", "1", secret)
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {
+		for _, v := range []any{c, c.Cookie} {
+			if got := fmt.Sprintf(verb, v); strings.Contains(got, "the-session") || strings.Contains(got, fmt.Sprintf("%x", "the-session")) {
+				t.Errorf("Sprintf(%s, %T) rendered the live session: %q", verb, v, got)
+			}
+		}
+	}
+	if b, err := json.Marshal(c); err != nil || strings.Contains(string(b), "the-session") {
+		t.Errorf("json.Marshal(client) = %s, %v; rendered the live session", b, err)
+	}
+
+	// Still the header it is, or the redaction would have broken every request.
+	var sent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent = r.Header.Get("Cookie")
+		fmt.Fprint(w, `<input class='sky-pilot-search-input'>`)
+	}))
+	defer srv.Close()
+	c.BaseURL, c.HTTP = srv.URL, srv.Client()
+	if _, err := c.Enumerate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sent != secret {
+		t.Errorf("Cookie header sent = %q, want %q", sent, secret)
 	}
 }
