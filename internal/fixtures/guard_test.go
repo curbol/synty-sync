@@ -9,10 +9,12 @@ import (
 	"testing"
 )
 
-// testdataDir is the committed fixture tree, relative to this package dir. The whole
-// tree is walked rather than one directory of one extension, so a capture committed
-// in a new format or a new subdirectory is guarded too.
-const testdataDir = "../../testdata"
+// repoRoot is the repository, relative to this package dir. Every testdata directory in
+// it is walked, not only the one at the root: a package-local testdata/ is where Go puts
+// fixtures by default, so it is where a captured page or a copied cookie database would
+// land, and whatever the walk misses is committed and permanent. Every file under each
+// is read, whatever its extension, so a capture in a new format is guarded too.
+const repoRoot = "../.."
 
 // These guards never reference real PII. They assert that any PII-shaped value in
 // committed testdata is one of the synthetic placeholders, so a missed scrub of a
@@ -77,22 +79,7 @@ var (
 // to git exactly as the bytes do.
 func readFixtures(t *testing.T) map[string]string {
 	t.Helper()
-	out := map[string]string{}
-	err := filepath.WalkDir(testdataDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(testdataDir, p)
-		if err != nil {
-			return err
-		}
-		out[filepath.ToSlash(rel)] = string(b)
-		return nil
-	})
+	out, err := testdataFiles(repoRoot)
 	if err != nil {
 		t.Fatalf("read testdata: %v", err)
 	}
@@ -100,6 +87,130 @@ func readFixtures(t *testing.T) map[string]string {
 		t.Fatal("no fixtures found")
 	}
 	return out
+}
+
+// testdataFiles returns every file under any testdata directory beneath root, keyed by
+// its root-relative slash path. It does not descend into a directory Go itself ignores
+// (a leading "." or "_"), which keeps .git and the git-excluded raw captures out, nor
+// into a nested checkout: a worktree kept inside the repo carries its own copy of every
+// fixture, which is that checkout's to guard.
+func testdataFiles(root string) (map[string]string, error) {
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if rel == "." {
+				return nil
+			}
+			if strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_") {
+				return filepath.SkipDir
+			}
+			if _, err := os.Lstat(filepath.Join(p, ".git")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasPrefix(rel, "testdata/") && !strings.Contains(rel, "/testdata/") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[rel] = string(b)
+		return nil
+	})
+	return out, err
+}
+
+// The walk's filter is what decides which files are guarded at all, and a mistake in it
+// narrows the guard silently: the repo has one testdata directory today, so a walk that
+// read only that one would pass every other test here. Hold it to a tree that has the
+// shapes it has to tell apart.
+func TestTheGuardWalksEveryTestdataDirectory(t *testing.T) {
+	root := t.TempDir()
+	tree := map[string]bool{
+		"testdata/portal/page.html":          true,
+		"internal/session/testdata/x.sqlite": true,
+		"cmd/tool/testdata/deep/nested.txt":  true,
+		"internal/session/session_test.go":   false,
+		"testdata.go":                        false,
+		".longrun/testdata/raw.html":         false,
+		"_scratch/testdata/raw.html":         false,
+		"nested-checkout/testdata/copy.html": false,
+		// A worktree's .git is a file rather than a directory, so that is the spelling
+		// that marks the checkout above as nested.
+		"nested-checkout/.git": false,
+	}
+	for path := range tree {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(path), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := testdataFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range tree {
+		if _, walked := got[path]; walked != want {
+			t.Errorf("%s walked = %v, want %v", path, walked, want)
+		}
+	}
+}
+
+// browserDatabases are the leading bytes of the files a browser keeps cookies in. The
+// session package reads a Gecko cookies.sqlite and copies its -wal sidecar beside it,
+// and the natural way to get a realistic fixture for that is to drop a real one into
+// testdata. The suite builds every database it needs in a temp dir, so a committed one
+// is never legitimate whatever it holds, and its pages are not text the patterns above
+// can be trusted to read.
+var browserDatabases = []struct {
+	kind  string
+	magic string
+}{
+	{"an SQLite database", "SQLite format 3\x00"},
+	{"an SQLite write-ahead log", "\x37\x7f\x06\x82"},
+	{"an SQLite write-ahead log", "\x37\x7f\x06\x83"},
+}
+
+func browserDatabase(body string) string {
+	for _, db := range browserDatabases {
+		if strings.HasPrefix(body, db.magic) {
+			return db.kind
+		}
+	}
+	return ""
+}
+
+// A copied cookies.sqlite is the realistic fixture someone reaches for, and committing
+// one publishes a live session for every site the browser was signed in to.
+func TestNoBrowserDatabaseIsCommitted(t *testing.T) {
+	for name, body := range readFixtures(t) {
+		if kind := browserDatabase(body); kind != "" {
+			t.Errorf("%s is %s, which carries the session cookies of every site the browser "+
+				"was signed in to; build it in a temp dir instead", name, kind)
+		}
+	}
+	// And the refusal has to fire, or the loop above passes over everything.
+	for _, db := range browserDatabases {
+		if browserDatabase(db.magic+"\x10\x00\x01\x01 page bytes") == "" {
+			t.Errorf("%s is not recognised by its own magic", db.kind)
+		}
+	}
+	if browserDatabase("<!doctype html>") != "" {
+		t.Error("an HTML fixture was taken for a browser database")
+	}
 }
 
 // The guard is only worth having if its patterns actually fire. A synthetic leak of
