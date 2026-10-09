@@ -506,6 +506,9 @@ func (c *Client) ItemFiles(ctx context.Context, pack model.Pack) (files []model.
 // to a bare "attachment", so the filename is taken from the final URL path
 // basename, with the Content-Disposition filename as a fallback. The caller must
 // close the returned body.
+//
+// A document refusal carries ErrNotAPackage, and ErrExpiredSession as well when
+// CheckSession finds the session logged out.
 func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.ReadCloser, filename string, err error) {
 	// Only a body handed back to the caller keeps the request alive, so every path
 	// that returns without one releases it here instead.
@@ -534,6 +537,9 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 	}
 	if mt, isDoc := documentMediaType(resp.Header.Get("Content-Type")); isDoc {
 		drainCloseBounded(resp, cancel, stall)
+		if errors.Is(c.CheckSession(ctx), ErrExpiredSession) {
+			return nil, "", fmt.Errorf("download %s: %w (%w, Content-Type %s)", file.Key(), ErrExpiredSession, ErrNotAPackage, mt)
+		}
 		return nil, "", fmt.Errorf("download %s: %w (Content-Type %s)", file.Key(), ErrNotAPackage, mt)
 	}
 	filename = filenameFromURL(resp.Request.URL)
@@ -545,6 +551,30 @@ func (c *Client) Resolve(ctx context.Context, file model.FileEntry) (body io.Rea
 		return nil, "", fmt.Errorf("download %s: could not determine filename", file.Key())
 	}
 	return newStallGuard(resp.Body, stall, cancel), filename, nil
+}
+
+// CheckSession reports whether the session is still logged in, by the sentinel on the
+// first library page: ErrExpiredSession when the page lacks it, nil when it has it, and
+// the fetch's own error when the page could not be read, which is no verdict.
+//
+// A download that answers with a document cannot say why on its own. A session that
+// expired part way through the download pass serves a login page there, and a CDN
+// refusal serves an error document; neither carries the sentinel, which only an
+// authenticated library page does, so the question is put to the page that can answer it.
+func (c *Client) CheckSession(ctx context.Context) error {
+	u := withShop(fmt.Sprintf("%s/apps/downloads/orders/%s?line_items_page=1", c.base(), c.CustomerID))
+	body, err := c.getBody(ctx, u)
+	if err != nil {
+		return err
+	}
+	ok, err := HasLibrarySentinel(body)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrExpiredSession
+	}
+	return nil
 }
 
 // ErrStalled marks a transfer that stopped delivering bytes.

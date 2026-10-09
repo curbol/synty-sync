@@ -1126,6 +1126,12 @@ func TestResolveRefusalsDoNotHangOnABodyThatStopsArriving(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			release := make(chan struct{})
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The library page a document refusal is checked against answers at
+				// once: what is under test is the download's discard, not that probe.
+				if strings.HasPrefix(r.URL.Path, "/apps/downloads/orders/") {
+					fmt.Fprint(w, `<input class='sky-pilot-search-input'>`)
+					return
+				}
 				w.Header().Set("Content-Type", tc.contentType)
 				// Promises far more than it sends, so the drain's byte bound is never
 				// reached and only a time bound can end the read.
@@ -1196,5 +1202,53 @@ func TestPrintingAClientDoesNotPrintTheSession(t *testing.T) {
 	}
 	if sent != secret {
 		t.Errorf("Cookie header sent = %q, want %q", sent, secret)
+	}
+}
+
+// A session that expires during the download pass answers each remaining download href
+// with a login page. Read only as ErrNotAPackage, every file left fails on its own and
+// the run ends blaming the store's bytes; the actionable answer is to refresh the
+// session. The document alone cannot say which it is, since a CDN refusal is a document
+// too, so the verdict comes from the logged-in sentinel on a library page.
+func TestResolveTellsAnExpiredSessionFromARefusedDownload(t *testing.T) {
+	shell := read(t, "library_logout_shell.html")
+	loggedIn := read(t, "library_empty_authenticated.html")
+	for _, tc := range []struct {
+		name        string
+		library     func(w http.ResponseWriter)
+		wantExpired bool
+	}{
+		{"the library page is logged out", func(w http.ResponseWriter) { w.Write(shell) }, true},
+		{"the library page is logged in", func(w http.ResponseWriter) { w.Write(loggedIn) }, false},
+		// A probe that cannot answer is no verdict: the refusal stands as it was.
+		{"the library page fails", func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/apps/downloads/orders/") {
+					tc.library(w)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Write(shell)
+			}))
+			defer srv.Close()
+
+			c := &Client{Limits: testLimits(), HTTP: srv.Client(), BaseURL: srv.URL, CustomerID: "1"}
+			body, _, err := c.Resolve(context.Background(), model.FileEntry{
+				FileToken: "T", Variant: "Godot_4_5_1", DownloadHref: "/apps/downloads/downloads/1"})
+			if err == nil {
+				body.Close()
+				t.Fatal("Resolve accepted a login page as package bytes")
+			}
+			if got := errors.Is(err, ErrExpiredSession); got != tc.wantExpired {
+				t.Errorf("errors.Is(err, ErrExpiredSession) = %v, want %v: %v", got, tc.wantExpired, err)
+			}
+			// Still a document refusal either way, so a caller that only knows that
+			// sentinel keeps treating it as permanent.
+			if !errors.Is(err, ErrNotAPackage) {
+				t.Errorf("error = %v; want it to carry ErrNotAPackage too", err)
+			}
+		})
 	}
 }
