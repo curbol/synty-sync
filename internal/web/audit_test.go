@@ -481,3 +481,38 @@ func TestASaveAcceptedWhileTheInterruptLandsIsStillReturned(t *testing.T) {
 		t.Errorf("Serve returned %v, %v after the page told the user their selection was taken", r.sel, r.err)
 	}
 }
+
+// The icon URL comes from the store and lands in an src attribute, a URL context where
+// escaping the quotes is not enough: the scheme has to be filtered. html/template does
+// that, rendering anything but http, https and mailto as "#ZgotmplZ". A developer who
+// sees that string in a broken thumbnail finds one suggested fix, retyping the field as
+// template.URL, which switches the filter off for every row; the attribute-breakout
+// test above stays green through it, because quoting still works.
+func TestIconURLSchemesAreFiltered(t *testing.T) {
+	packs := []model.Pack{
+		{Slug: "a", DisplayName: "A", IconURL: "javascript:alert(document.cookie)"},
+		{Slug: "b", DisplayName: "B", IconURL: "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="},
+		{Slug: "c", DisplayName: "C", IconURL: "https://cdn.example/c.png"},
+	}
+	h, err := newHandler(boundAddr("127.0.0.1:8787"), packs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Host = "127.0.0.1:8787"
+	r.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	body := rec.Body.String()
+
+	for _, scheme := range []string{"javascript:", "data:text/html"} {
+		if strings.Contains(body, scheme) {
+			t.Errorf("an icon URL with scheme %q reached the page:\n%s", scheme, body)
+		}
+	}
+	// Present, so the assertion above is about filtering rather than about the icons
+	// having been dropped altogether.
+	if !strings.Contains(body, `src="https://cdn.example/c.png"`) {
+		t.Errorf("an https icon URL did not reach the page:\n%s", body)
+	}
+}

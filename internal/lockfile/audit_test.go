@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -150,5 +152,51 @@ func TestSaveWritesNamesAsTheyAreAndKeepsItsFormatting(t *testing.T) {
 	}
 	if string(got) != string(want)+"\n" {
 		t.Errorf("the encoding changed beyond the escaping:\n%s\n--- want ---\n%s\n", got, want)
+	}
+}
+
+// A file the run declined has no bytes behind it, so its entry carries no digest,
+// on-disk size, cache path or download time. Written as zero values they read as a
+// record of an empty file at the root of the cache, and every untracked entry in the
+// committed file grows lines of noise. Nothing else asserts the omitempty tags: dropping
+// them keeps every round trip green, since the zero values decode to the same struct.
+func TestAnUntrackedEntryCarriesOnlyItsIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synty-sync.lock.json")
+	if err := Save(path, sample()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Packs map[string]struct {
+			Files map[string]map[string]any `json:"files"`
+		} `json:"packs"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	files := doc.Packs["polygon-pirate-pack"].Files
+
+	keys := func(m map[string]any) []string {
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	untracked := keys(files["POLYGON_Pirate|Unity_2022_3"])
+	if want := []string{"fileId", "fileToken", "tracked", "variant", "version"}; !slices.Equal(untracked, want) {
+		t.Errorf("untracked entry keys = %v, want only %v", untracked, want)
+	}
+	// The tracked entry still carries what it set, so the check above cannot pass by
+	// reading an entry that lost everything.
+	tracked := files["POLYGON_Pirate|Godot_4_5_1"]
+	for _, k := range []string{"sha256", "sizeBytes", "cachePath"} {
+		if _, ok := tracked[k]; !ok {
+			t.Errorf("tracked entry is missing %q: %v", k, keys(tracked))
+		}
 	}
 }
