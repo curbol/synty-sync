@@ -536,7 +536,7 @@ func TestCookieDBWithNoStoreCookies(t *testing.T) {
 func TestEveryReleasedPlatformHasAProfileLocation(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		for _, name := range browserNames {
-			if len(browserBases(goos, name)) == 0 {
+			if len(browserBases(goos, name, "home", "appdata", "localappdata")) == 0 {
 				t.Errorf("no %s profile base for %s", name, goos)
 			}
 		}
@@ -587,6 +587,8 @@ func TestFromBrowserWithNoProfileAnywhereIsAnError(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
 	t.Setenv("SYNTY_BROWSER_PROFILE", "")
 	got, err := FromBrowser("firefox")
 	if err == nil {
@@ -655,21 +657,23 @@ func TestTheMostSpecificHostWinsACookieName(t *testing.T) {
 // old, so the run reports an expired session and the live profile is never opened.
 // Every base's profiles have to be ranked together.
 func TestALiveProfileBeatsALeftoverInAnEarlierBase(t *testing.T) {
-	bases := browserBases(runtime.GOOS, "zen")
+	home := t.TempDir()
+	bases := browserBases(runtime.GOOS, "zen", home, "", "")
 	if len(bases) < 2 {
 		// A skip, not a failure: the multi-base layout this guard is about only exists
 		// on Linux, and a red guard is supposed to mean a regression.
 		t.Skipf("zen has %d profile base(s) on %s; ranking across bases only arises where there are two", len(bases), runtime.GOOS)
 	}
-	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
 	t.Setenv("SYNTY_BROWSER_PROFILE", "")
 
 	// The leftover goes in the base that is searched first, the live one in a later
 	// base, which is the arrangement an upgrade leaves behind.
 	plant := func(base, value string, age time.Duration) string {
-		dir := filepath.Join(home, base, "abc.default-release")
+		dir := filepath.Join(base, "abc.default-release")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -710,8 +714,69 @@ func TestLinuxBasesCoverSandboxedBrowsers(t *testing.T) {
 		{"firefox", filepath.Join(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox")},
 		{"zen", filepath.Join(".var", "app", "app.zen_browser.zen", ".zen")},
 	} {
-		if !slices.Contains(browserBases("linux", tc.browser), tc.want) {
-			t.Errorf("linux %s bases do not include %q: %v", tc.browser, tc.want, browserBases("linux", tc.browser))
+		bases := browserBases("linux", tc.browser, "home", "", "")
+		if want := filepath.Join("home", tc.want); !slices.Contains(bases, want) {
+			t.Errorf("linux %s bases do not include %q: %v", tc.browser, want, bases)
+		}
+	}
+}
+
+// %APPDATA% is a Windows known folder, not a fixed place under the profile: Folder
+// Redirection, ordinary on a domain-joined machine, moves it elsewhere entirely.
+// Rebuilding it as <home>/AppData/Roaming reports "no profile found" to a user with a
+// signed-in browser, naming directories that do not exist. The variables are only
+// rebuilt from home when they are unset.
+func TestWindowsBasesFollowTheRedirectableFolders(t *testing.T) {
+	home := filepath.Join("C:", "Users", "u")
+	appData := filepath.Join("R:", "redirected", "Roaming")
+	localAppData := filepath.Join("L:", "redirected", "Local")
+	for _, tc := range []struct {
+		browser string
+		want    []string
+	}{
+		{"firefox", []string{
+			filepath.Join(appData, "Mozilla", "Firefox"),
+			filepath.Join(localAppData, "Packages", "Mozilla.Firefox_*", "LocalCache", "Roaming", "Mozilla", "Firefox"),
+		}},
+		{"zen", []string{filepath.Join(appData, "zen")}},
+	} {
+		bases := browserBases("windows", tc.browser, home, appData, localAppData)
+		for _, want := range tc.want {
+			if !slices.Contains(bases, want) {
+				t.Errorf("windows %s bases do not include %q: %v", tc.browser, want, bases)
+			}
+		}
+		for _, b := range bases {
+			if strings.HasPrefix(b, home) {
+				t.Errorf("windows %s base %q is under home rather than the folder variables", tc.browser, b)
+			}
+		}
+	}
+
+	unset := browserBases("windows", "firefox", home, "", "")
+	if want := filepath.Join(home, "AppData", "Roaming", "Mozilla", "Firefox"); !slices.Contains(unset, want) {
+		t.Errorf("with %%APPDATA%% unset, bases %v do not fall back to %q", unset, want)
+	}
+}
+
+// The Microsoft Store build of Firefox is a packaged app, and a packaged app's %APPDATA%
+// writes are redirected into its package container, so that install has nothing under
+// %APPDATA%\Mozilla\Firefox. The container is named for a publisher hash Mozilla
+// documents nowhere, so the base is a pattern, and it has to resolve to the directory
+// that is actually there.
+func TestTheStoreFirefoxContainerIsFound(t *testing.T) {
+	localAppData := t.TempDir()
+	root := filepath.Join(localAppData, "Packages", "Mozilla.Firefox_n80bbvh6b1yt2", "LocalCache", "Roaming", "Mozilla", "Firefox")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bases := expandBases(browserBases("windows", "firefox", t.TempDir(), t.TempDir(), localAppData))
+	if !slices.Contains(bases, root) {
+		t.Errorf("expanded bases %v do not include the Store container %q", bases, root)
+	}
+	for _, b := range bases {
+		if strings.ContainsRune(b, '*') {
+			t.Errorf("an unexpanded pattern survived: %q", b)
 		}
 	}
 }

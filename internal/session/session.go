@@ -154,49 +154,85 @@ func isCurlPaste(content string) bool {
 // Firefox fork, so its cookies.sqlite reads identically.
 var browserNames = []string{"firefox", "zen"}
 
-// browserBases maps a session source name to its Gecko profile base dirs, relative to
-// home, for the platform in hand. Releases ship macOS and Windows binaries, so the
-// Linux paths alone would leave the zero-paste default broken out of the box on two
-// of the three.
+// browserBases maps a session source name to its Gecko profile base dirs for the
+// platform in hand. Releases ship macOS and Windows binaries, so the Linux paths alone
+// would leave the zero-paste default broken out of the box on two of the three.
 //
 // Every base is searched and the profiles found under all of them are ranked together,
 // so listing one that does not exist costs nothing. On Linux a browser is as likely to
 // be sandboxed as native: Ubuntu has shipped Firefox as a snap since 22.04, and a
 // flatpak keeps its home under .var/app. Without those, the documented default fails
-// with "no such file or directory" for a browser that is installed and logged in.
-func browserBases(goos, name string) []string {
+// with "no such file or directory" for a browser that is installed and logged in. The
+// Linux and macOS paths hang off home because the browsers hardcode them there.
+//
+// The Windows ones do not. %APPDATA% and %LOCALAPPDATA% are known folders, and Folder
+// Redirection, ordinary on a domain-joined machine, moves them off the profile
+// entirely, so they are taken from the variables and rebuilt under home only when one
+// is unset. The Microsoft Store build of Firefox is a packaged app whose %APPDATA%
+// writes are redirected into its package container, so it has nothing under
+// %APPDATA%\Mozilla\Firefox; its base is a pattern (see expandBases) because the
+// container is named for a publisher hash Mozilla documents nowhere.
+func browserBases(goos, name, home, appData, localAppData string) []string {
 	switch goos {
 	case "darwin":
 		switch name {
 		case "firefox":
-			return []string{filepath.Join("Library", "Application Support", "Firefox")}
+			return []string{filepath.Join(home, "Library", "Application Support", "Firefox")}
 		case "zen":
-			return []string{filepath.Join("Library", "Application Support", "zen")}
+			return []string{filepath.Join(home, "Library", "Application Support", "zen")}
 		}
 	case "windows":
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
 		switch name {
 		case "firefox":
-			return []string{filepath.Join("AppData", "Roaming", "Mozilla", "Firefox")}
+			return []string{
+				filepath.Join(appData, "Mozilla", "Firefox"),
+				filepath.Join(localAppData, "Packages", "Mozilla.Firefox_*", "LocalCache", "Roaming", "Mozilla", "Firefox"),
+			}
 		case "zen":
-			return []string{filepath.Join("AppData", "Roaming", "zen")}
+			return []string{filepath.Join(appData, "zen")}
 		}
 	default:
 		switch name {
 		case "firefox":
 			return []string{
-				filepath.Join(".mozilla", "firefox"),
-				filepath.Join("snap", "firefox", "common", ".mozilla", "firefox"),
-				filepath.Join(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
+				filepath.Join(home, ".mozilla", "firefox"),
+				filepath.Join(home, "snap", "firefox", "common", ".mozilla", "firefox"),
+				filepath.Join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
 			}
 		case "zen":
 			return []string{
-				filepath.Join(".config", "zen"),
-				filepath.Join(".zen"),
-				filepath.Join(".var", "app", "app.zen_browser.zen", ".zen"),
+				filepath.Join(home, ".config", "zen"),
+				filepath.Join(home, ".zen"),
+				filepath.Join(home, ".var", "app", "app.zen_browser.zen", ".zen"),
 			}
 		}
 	}
 	return nil
+}
+
+// expandBases replaces any base that is a pattern with the directories it matches. A
+// pattern matching nothing contributes nothing, which is what a missing directory
+// already does.
+func expandBases(bases []string) []string {
+	var out []string
+	for _, b := range bases {
+		if !strings.ContainsRune(b, '*') {
+			out = append(out, b)
+			continue
+		}
+		matches, err := filepath.Glob(b)
+		if err != nil {
+			continue
+		}
+		out = append(out, matches...)
+	}
+	return out
 }
 
 func knownBrowser(name string) bool {
@@ -234,7 +270,7 @@ func FromBrowser(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	bases := browserBases(runtime.GOOS, name)
+	bases := browserBases(runtime.GOOS, name, home, os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA"))
 	if len(bases) == 0 {
 		return "", fmt.Errorf("no known %s profile location on %s (set SYNTY_BROWSER_PROFILE)", name, runtime.GOOS)
 	}
@@ -245,8 +281,8 @@ func FromBrowser(name string) (string, error) {
 	// run would report an expired session against cookies that are simply months old.
 	var errs []error
 	var cands []geckoProfile
-	for _, rel := range bases {
-		found, err := geckoCandidates(filepath.Join(home, rel))
+	for _, base := range expandBases(bases) {
+		found, err := geckoCandidates(base)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -262,11 +298,7 @@ func FromBrowser(name string) (string, error) {
 		if err := errors.Join(errs...); err != nil {
 			return "", err
 		}
-		searched := make([]string, 0, len(bases))
-		for _, rel := range bases {
-			searched = append(searched, filepath.Join(home, rel))
-		}
-		return "", fmt.Errorf("no %s profile found under %s (set SYNTY_BROWSER_PROFILE)", name, strings.Join(searched, ", "))
+		return "", fmt.Errorf("no %s profile found under %s (set SYNTY_BROWSER_PROFILE)", name, strings.Join(bases, ", "))
 	}
 	return geckoCookieHeader(pickGeckoProfile(cands))
 }
