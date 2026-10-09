@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/curbol/synty-sync/internal/model"
@@ -80,6 +81,28 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 </script>
 </body></html>`))
 
+// msgAlreadySaved answers a save after the first. Two tabs on the page share the run's
+// token, so the second one's form is perfectly current: telling it the form is foreign
+// or stale would be false, and Serve has already taken a selection.
+const msgAlreadySaved = "another tab already saved, and this run takes one selection; " +
+	"run `synty-sync select` again to change it"
+
+// handler is one run's selection page: the rendered rows, the token its form carries
+// back, and the one selection it accepts.
+type handler struct {
+	mux   *http.ServeMux
+	bound net.Addr
+	token string
+
+	// One save, enforced rather than assumed. Serve reads one selection and stops, so
+	// a second accepted save would be answered as taken while it sat in a channel
+	// nobody reads again.
+	once   sync.Once
+	result chan map[string]bool
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+
 // Serve runs the selection page on ln until the user clicks Save (or ctx is
 // cancelled), returning the chosen set of enabled slugs. It takes a bound listener
 // rather than an address so the caller decides where the page lives and a test can
@@ -89,6 +112,16 @@ var page = template.Must(template.New("select").Parse(`<!doctype html>
 // machine: the page is the account's whole library and the form rewrites a committed
 // file, so it is not something to hand to the network even when asked to.
 func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map[string]bool) (map[string]bool, error) {
+	h, err := newHandler(ln.Addr(), packs, enabled)
+	if err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return serveHandler(ctx, ln, h)
+}
+
+// newHandler builds the page for one run, answering only requests addressed to bound.
+func newHandler(bound net.Addr, packs []model.Pack, enabled map[string]bool) (*handler, error) {
 	rows := make([]row, 0, len(packs))
 	known := make(map[string]bool, len(packs))
 	// Counted off the rows rather than off enabled, so the number in the header is the
@@ -114,16 +147,19 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 	// never chose. Only a form this server rendered carries the token.
 	token, err := newToken()
 	if err != nil {
-		ln.Close()
 		return nil, err
 	}
 
-	result := make(chan map[string]bool, 1)
-	mux := http.NewServeMux()
+	h := &handler{
+		mux:    http.NewServeMux(),
+		bound:  bound,
+		token:  token,
+		result: make(chan map[string]bool, 1),
+	}
 	// The root pattern is anchored with {$} so it matches only "/" and does not
 	// swallow a non-POST /save, which must fail rather than render the page.
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		if !localRequest(r, ln.Addr()) {
+	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		if !localRequest(r, bound) {
 			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
 			return
 		}
@@ -141,8 +177,8 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 	})
 	// POST only: this endpoint persists the whole pack selection, and any page the
 	// user visits while select is open can reach localhost with a GET.
-	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
-		if !localRequest(r, ln.Addr()) {
+	h.mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
+		if !localRequest(r, bound) {
 			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
 			return
 		}
@@ -166,25 +202,51 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 				chosen[slug] = true
 			}
 		}
+		accepted := false
+		h.once.Do(func() {
+			accepted = true
+			h.result <- chosen
+		})
+		if !accepted {
+			http.Error(w, msgAlreadySaved, http.StatusConflict)
+			return
+		}
 		// The caller decides whether this selection is written — it refuses an empty
 		// submission, and the save itself can fail — so the page reports only what it
 		// knows, and the terminal reports the outcome.
 		fmt.Fprintf(w, "Got your selection (%d packs). Return to the terminal.", len(chosen))
-		result <- chosen
 	})
+	return h, nil
+}
 
-	srv := &http.Server{Handler: mux}
+// serveHandler serves h on ln until it accepts a selection or ctx ends.
+func serveHandler(ctx context.Context, ln net.Listener, h *handler) (chosen map[string]bool, err error) {
+	srv := &http.Server{Handler: h}
 	go srv.Serve(ln)
+	// A cancelled run still drains the result once shutdown has waited for every
+	// in-flight handler. A save accepted as ctx ended, whether already queued (both
+	// cases below ready, and Go picks at random) or still reading its body, has told
+	// the browser it was taken, so it wins over the interrupt.
+	defer func() {
+		shutdown(srv)
+		if err == nil {
+			return
+		}
+		select {
+		case sel := <-h.result:
+			chosen, err = sel, nil
+		default:
+		}
+	}()
+
 	url := "http://" + ln.Addr().String()
 	fmt.Fprintf(os.Stderr, "select packs at %s  (Ctrl-C to cancel)\n", url)
 	OpenBrowser(url)
 
 	select {
-	case chosen := <-result:
-		shutdown(srv)
+	case chosen := <-h.result:
 		return chosen, nil
 	case <-ctx.Done():
-		shutdown(srv)
 		return nil, ctx.Err()
 	}
 }
