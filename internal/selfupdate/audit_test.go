@@ -570,7 +570,7 @@ func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
 		name    string
 		tag     string
 		current string
-		target  string
+		target  Requested
 		want    string
 		// wantPath is the release the request has to ask GitHub for. fetchRelease adds
 		// the v itself, and nothing read the URL, so routing a targeted update at

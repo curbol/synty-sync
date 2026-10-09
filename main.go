@@ -149,7 +149,7 @@ func run(args []string) error {
 		if fs.NArg() > 1 {
 			return fmt.Errorf("update takes at most one version argument, got %d", fs.NArg())
 		}
-		return selfupdate.Run(ctx, version, fs.Arg(0))
+		return selfupdate.Run(ctx, version, selfupdate.Requested(fs.Arg(0)))
 	}
 	if fs.NArg() > 0 {
 		err := fmt.Errorf("%s takes no positional arguments (got %q)", cmd, fs.Arg(0))
