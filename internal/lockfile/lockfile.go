@@ -1,9 +1,10 @@
 // Package lockfile reads and writes the committed record of owned packs and the
-// versions currently mirrored. encoding/json sorts map keys, so MarshalIndent
+// versions currently mirrored. encoding/json sorts map keys, so the indented encoding
 // yields a stable, minimally-diffing file across runs.
 package lockfile
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,13 +71,18 @@ func Load(path string) (Lockfile, error) {
 	return lf, nil
 }
 
-// Save writes the lockfile atomically with sorted keys and a trailing newline.
+// Save writes the lockfile atomically with sorted keys and a trailing newline. HTML
+// escaping is off: it exists for embedding in a script tag, and here it only turns the
+// "&" in a pack name into "&" in a file whose diff is read like a changelog.
 func Save(path string, lf Lockfile) error {
-	raw, err := json.MarshalIndent(lf, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(lf); err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
+	raw := buf.Bytes()
 	return atomicfile.Write(path, ".synty-lock-*", func(w io.Writer) error {
 		_, err := w.Write(raw)
 		return err

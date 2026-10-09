@@ -1,6 +1,7 @@
 package lockfile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,5 +114,41 @@ func TestSaveIsByteStableAcrossRuns(t *testing.T) {
 	}
 	if !strings.HasSuffix(out, "}\n") {
 		t.Error("no trailing newline; every run would rewrite the last line")
+	}
+}
+
+// encoding/json escapes &, < and > by default, which is for embedding in a script tag
+// and does nothing for a file on disk. Synty names packs with ampersands, so "Forge &
+// Armory" was committed as "Forge & Armory" in the one file whose diff is meant to
+// read like a changelog. The rest of the formatting is the indented encoding the file
+// has always had, byte for byte, or the first run after the change rewrites every line.
+func TestSaveWritesNamesAsTheyAreAndKeepsItsFormatting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synty-sync.lock.json")
+	lf := sample()
+	lf.Packs["forge"] = Pack{DisplayName: "STYLIZED Forge & Armory <Beta>", Files: map[string]File{}}
+	if err := Save(path, lf); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"STYLIZED Forge & Armory <Beta>"`) {
+		t.Errorf("the display name was escaped:\n%s", raw)
+	}
+
+	want, err := json.MarshalIndent(sample(), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, sample()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want)+"\n" {
+		t.Errorf("the encoding changed beyond the escaping:\n%s\n--- want ---\n%s\n", got, want)
 	}
 }
