@@ -1,13 +1,16 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // storeCommitted writes body into the layout and commits it, which seven tests need
@@ -28,6 +31,7 @@ func storeCommitted(t *testing.T, root, token, filename, body string) *Pending {
 // A download that dies mid-stream must not leave its partial temp file behind.
 func TestStoreCleansUpAfterFailedCopy(t *testing.T) {
 	root := t.TempDir()
+	storeCommitted(t, root, "TOKEN", "other.zip", "bytes")
 	_, err := Store(root, "TOKEN", "pack.zip", io.MultiReader(
 		strings.NewReader("partial"), errReader{errors.New("connection reset")}))
 	if err == nil {
@@ -38,7 +42,9 @@ func TestStoreCleansUpAfterFailedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		t.Errorf("left behind %q after a failed download", e.Name())
+		if e.Name() != "other.zip" {
+			t.Errorf("left behind %q after a failed download", e.Name())
+		}
 	}
 }
 
@@ -61,15 +67,15 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, rel := range []string{"../outside.key", "a/../../outside.key", "/etc/passwd", "..", ""} {
+	for _, rel := range []string{"../outside.key", "a/../../outside.key", "/etc/passwd", "..", "", `Z:..\..\outside.key`} {
 		t.Run(rel, func(t *testing.T) {
 			if Verify(root, rel, 5) {
 				t.Errorf("Verify accepted %q outside the root", rel)
 			}
-			if VerifyDeep(root, rel, "whatever") {
+			if VerifyDeep(context.Background(), root, rel, "whatever") {
 				t.Errorf("VerifyDeep accepted %q outside the root", rel)
 			}
-			if _, _, err := Hash(root, rel); err == nil {
+			if _, _, err := Hash(context.Background(), root, rel); err == nil {
 				t.Errorf("Hash accepted %q outside the root", rel)
 			}
 			if err := Remove(root, rel); err == nil {
@@ -94,10 +100,10 @@ func TestCachePathsAcceptOrdinaryRelativePaths(t *testing.T) {
 	root := t.TempDir()
 	p := storeCommitted(t, root, "TOKEN", "pack.zip", "bytes")
 	rel := p.RelPath
-	if !Verify(root, rel, p.Size) || !VerifyDeep(root, rel, p.SHA256) {
+	if !Verify(root, rel, p.Size) || !VerifyDeep(context.Background(), root, rel, p.SHA256) {
 		t.Errorf("a stored file at %q is not visible to Verify/VerifyDeep", rel)
 	}
-	if _, _, err := Hash(root, rel); err != nil {
+	if _, _, err := Hash(context.Background(), root, rel); err != nil {
 		t.Errorf("Hash(%q): %v", rel, err)
 	}
 	if err := Remove(root, rel); err != nil {
@@ -134,7 +140,7 @@ func TestMigrateDoesNotClobberLayoutCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}})
+			res, err := Migrate(context.Background(), lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +178,7 @@ func TestMigrateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(temp, []byte("PARTIAL"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
+	res, err := Migrate(context.Background(), lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +205,7 @@ func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, tempPrefix+name), []byte("half a pack"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if rel, ok := Locate(lib, want); ok {
+	if rel, ok := Locate(lib, want, nil); ok {
 		t.Fatalf("Locate adopted an in-flight download at %s", rel)
 	}
 
@@ -207,7 +213,7 @@ func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("the whole pack"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rel, ok := Locate(lib, want)
+	rel, ok := Locate(lib, want, nil)
 	if !ok {
 		t.Fatal("Locate missed the real file sitting beside a temp")
 	}
@@ -232,7 +238,7 @@ func TestSweepTempsOnAMissingRoot(t *testing.T) {
 // enumerated, so a fresh install could never download anything.
 func TestMigrateOnAMissingRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "not-created-yet")
-	got, err := Migrate(root, []Wanted{{FileID: 1, FileToken: "T", Variant: "Godot_4_5_1", Version: "v1"}})
+	got, err := Migrate(context.Background(), root, []Wanted{{FileID: 1, FileToken: "T", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
 	if err != nil {
 		t.Errorf("Migrate on a root that does not exist yet: %v", err)
 	}
@@ -300,7 +306,7 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			moved, err := Migrate(root, []Wanted{w})
+			moved, err := Migrate(context.Background(), root, []Wanted{w}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,7 +320,7 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(layout, w.FileToken, name), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, locateMatched := Locate(layout, w)
+			_, locateMatched := Locate(layout, w, nil)
 
 			if migrateMatched != locateMatched {
 				t.Errorf("Migrate matched=%v but Locate matched=%v for %q; one key, two answers",
@@ -405,7 +411,7 @@ func TestLocatePrefersTheCanonicalNameOverACollisionCopy(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			rel, ok := Locate(root, w)
+			rel, ok := Locate(root, w, nil)
 			if !ok {
 				t.Fatal("Locate found neither copy")
 			}
@@ -434,7 +440,7 @@ func TestMigrateFoldsOneCopyOfACollisionPairAndLeavesTheOther(t *testing.T) {
 		}
 	}
 
-	moved, err := Migrate(root, []Wanted{w})
+	moved, err := Migrate(context.Background(), root, []Wanted{w}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +500,7 @@ func TestHashAgreesWithWhatStoreRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sha, size, err := Hash(root, pending.RelPath)
+	sha, size, err := Hash(context.Background(), root, pending.RelPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +510,272 @@ func TestHashAgreesWithWhatStoreRecorded(t *testing.T) {
 	if size != pending.Size || size != int64(len(body)) {
 		t.Errorf("Hash size = %d, Store recorded %d, body is %d", size, pending.Size, len(body))
 	}
-	if !VerifyDeep(root, pending.RelPath, sha) {
+	if !VerifyDeep(context.Background(), root, pending.RelPath, sha) {
 		t.Error("VerifyDeep rejects the digest Hash just produced")
+	}
+}
+
+// Every segment of a recorded path can be an ordinary name and still leave the library,
+// when one of them is a symlink: a link is followed like any other directory. The
+// lexical check sees nothing wrong with "link/secret.key", so confinement has to be the
+// filesystem's, enforced by the call that acts on the path.
+func TestASymlinkedSegmentCannotCarryAPathOutOfTheRoot(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "library")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	victim := filepath.Join(outside, "secret.key")
+	if err := os.WriteFile(victim, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	const rel = "link/secret.key"
+
+	if Verify(root, rel, 6) {
+		t.Error("Verify followed a symlink out of the root")
+	}
+	if _, _, err := Hash(context.Background(), root, rel); err == nil {
+		t.Error("Hash followed a symlink out of the root")
+	}
+	if _, err := Head(root, rel, 16); err == nil {
+		t.Error("Head followed a symlink out of the root")
+	}
+	if _, err := Tail(root, rel, 16); err == nil {
+		t.Error("Tail followed a symlink out of the root")
+	}
+	if err := Remove(root, rel); err == nil {
+		t.Error("Remove followed a symlink out of the root")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("a file outside the library root was deleted through a link: %v", err)
+	}
+
+	// The write half has to be no weaker than the read half: a pack stored through the
+	// link would be recorded, then refused by every check above, and re-download forever.
+	if _, err := Store(root, "link", "pack.zip", strings.NewReader("x")); err == nil {
+		t.Error("Store wrote through a symlink out of the root")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Store left %d entries outside the root, want only the victim: %v", len(entries), entries)
+	}
+}
+
+// The lexical check has to answer the same way on every platform, because the lockfile
+// travels between machines. filepath.Clean keeps a Windows volume name and resolves ".."
+// after it, so "Z:..\..\x" passes a leading-".." test there; and a backslash is a
+// separator on one machine and an ordinary byte on another. Both are refused outright.
+func TestCanonicalRefusesWhatOnlyOnePlatformWouldResolve(t *testing.T) {
+	for _, rel := range []string{
+		`Z:..\..\outside.key`,
+		`Z:../outside.key`,
+		`a\..\..\outside.key`,
+		`C:/Windows/win.ini`,
+		`TOK/con.zip`,
+		`NUL/pack.zip`,
+		"./TOK/../../outside.key",
+	} {
+		if got, err := Canonical(rel); err == nil {
+			t.Errorf("Canonical(%q) = %q, want a refusal", rel, got)
+		}
+		if err := Remove(t.TempDir(), rel); err == nil {
+			t.Errorf("Remove accepted %q", rel)
+		}
+	}
+	for rel, want := range map[string]string{
+		"TOK/pack.zip":      "TOK/pack.zip",
+		"./TOK/pack.zip":    "TOK/pack.zip",
+		"TOK//pack.zip":     "TOK/pack.zip",
+		"TOK/x/../pack.zip": "TOK/pack.zip",
+		"TOK/console.zip":   "TOK/console.zip",
+		"TOK/con_extra.zip": "TOK/con_extra.zip",
+	} {
+		if got, err := Canonical(rel); err != nil || got != want {
+			t.Errorf("Canonical(%q) = %q, %v; want %q", rel, got, err, want)
+		}
+	}
+}
+
+// A library big enough to move onto another disk is exactly the one whose root becomes a
+// symlink. WalkDir over the path Lstats the root, sees a link rather than a directory,
+// and descends nothing, so abandoned temps were never reclaimed there, silently.
+func TestSweepTempsDescendsASymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	stale := filepath.Join(real, "TOK", tempPrefix+"abandoned")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "library")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	if count, _ := SweepTemps(link, time.Hour); count != 1 {
+		t.Errorf("SweepTemps through a symlinked root removed %d temps, want 1", count)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("the abandoned temp under a symlinked root survived the sweep")
+	}
+}
+
+// Store creates <fileToken>/ for the temp. A file whose download never succeeds would
+// otherwise leave an empty directory behind on every attempt, in a tree quarry walks and
+// nothing ever prunes.
+func TestARejectedStoreLeavesNoDirectoryBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reject func(t *testing.T, root string)
+	}{
+		{"the copy fails", func(t *testing.T, root string) {
+			_, err := Store(root, "TOKEN", "pack.zip", io.MultiReader(
+				strings.NewReader("partial"), errReader{errors.New("connection reset")}))
+			if err == nil {
+				t.Fatal("expected the copy failure to surface")
+			}
+		}},
+		{"the caller discards", func(t *testing.T, root string) {
+			p, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("rejected"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Discard(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tc.reject(t, root)
+			if _, err := os.Stat(filepath.Join(root, "TOKEN")); !os.IsNotExist(err) {
+				t.Errorf("an empty <fileToken>/ was left behind: %v", err)
+			}
+		})
+	}
+
+	// A directory that already holds a cached file is not Store's to remove.
+	root := t.TempDir()
+	storeCommitted(t, root, "TOKEN", "kept.zip", "bytes")
+	p, err := Store(root, "TOKEN", "pack.zip", strings.NewReader("rejected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "TOKEN", "kept.zip")); err != nil {
+		t.Errorf("Discard took a populated directory with it: %v", err)
+	}
+}
+
+// Both matchers pick one copy out of every name that normalizes onto a wanted file, and
+// the caller's checks used to run on that one copy afterwards. A truncated canonical
+// name then masked an intact "(1)" beside it: the preferred copy was refused, the other
+// was never examined, and the file re-downloaded in full. The checks go into the
+// selection, in preference order, so the first acceptable copy wins.
+func TestTheMatchersTryTheNextCopyWhenThePreferredOneIsRefused(t *testing.T) {
+	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	const canonical = "TOK_Godot_4_5_1_v1_0_1.zip"
+	const collision = "TOK_Godot_4_5_1_v1_0_1(1).zip"
+	refuseCanonical := func(_ Wanted, rel string) bool { return path.Base(rel) != canonical }
+
+	t.Run("Locate", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, w.FileToken)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{canonical, collision} {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if rel, ok := Locate(root, w, refuseCanonical); !ok || rel != RelPath(w.FileToken, collision) {
+			t.Errorf("Locate = %q, %v; want the acceptable %q", rel, ok, collision)
+		}
+		if rel, ok := Locate(root, w, nil); !ok || rel != RelPath(w.FileToken, canonical) {
+			t.Errorf("Locate with no check = %q, %v; want the canonical %q", rel, ok, canonical)
+		}
+		if rel, ok := Locate(root, w, func(Wanted, string) bool { return false }); ok {
+			t.Errorf("Locate returned %q though every copy was refused", rel)
+		}
+	})
+	t.Run("Migrate", func(t *testing.T) {
+		root := t.TempDir()
+		for _, n := range []string{canonical, collision} {
+			if err := os.WriteFile(filepath.Join(root, n), []byte(n), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		moved, err := Migrate(context.Background(), root, []Wanted{w}, refuseCanonical)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(moved) != 1 || moved[0].From != collision {
+			t.Fatalf("Migrate moved %+v, want only the acceptable %q", moved, collision)
+		}
+		// The refused copy is left flat, where the user can see it; moving it into the
+		// layout would put bytes nothing records where the adopt scan looks.
+		if _, err := os.Stat(filepath.Join(root, canonical)); err != nil {
+			t.Errorf("the refused copy was moved: %v", err)
+		}
+	})
+}
+
+// Migrate moves files through the root like every other write here, so a <fileToken>/
+// that is a symlink out of the library cannot take a flat file with it.
+func TestMigrateCannotMoveAFileOutThroughASymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "library")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "TOK")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	const name = "TOK_Godot_4_5_1_v1.zip"
+	if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := Migrate(context.Background(), root, []Wanted{{FileID: 1, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
+	if len(moved) != 0 {
+		t.Errorf("Migrate reported moving %+v through a link out of the root", moved)
+	}
+	if _, err := os.Stat(filepath.Join(outside, name)); err == nil {
+		t.Error("Migrate moved a flat file out of the library through a symlink")
+	}
+}
+
+// A full verify reads the whole library back, one multi-gigabyte pack per call, so an
+// interrupt has to land inside a hash rather than after it.
+func TestHashStopsWhenTheRunDoes(t *testing.T) {
+	root := t.TempDir()
+	p := storeCommitted(t, root, "TOK", "pack.zip", strings.Repeat("x", 1<<20))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := Hash(ctx, root, p.RelPath); !errors.Is(err, context.Canceled) {
+		t.Errorf("Hash on a cancelled run = %v, want context.Canceled", err)
+	}
+	if VerifyDeep(ctx, root, p.RelPath, p.SHA256) {
+		t.Error("VerifyDeep vouched for a file it was told to stop reading")
 	}
 }

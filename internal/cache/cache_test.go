@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -25,6 +26,12 @@ func TestStoreRejectsUnsafePathComponents(t *testing.T) {
 		{"token traversal", "../escaped", "pack.zip"},
 		{"token nested", "a/b", "pack.zip"},
 		{"token empty", "", "pack.zip"},
+		{"filename with a colon", "TOKEN", "Z:pack.zip"},
+		{"token with a colon", "Z:..", "pack.zip"},
+		{"filename a device", "TOKEN", "CON"},
+		{"filename a device with an extension", "TOKEN", "nul.zip"},
+		{"token a device", "com1", "pack.zip"},
+		{"token a device with an extension", "LPT9.pack", "pack.zip"},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			base := t.TempDir()
@@ -67,10 +74,10 @@ func TestStoreAndVerify(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(p.RelPath))); string(got) != "hello" {
 		t.Errorf("stored content = %q", got)
 	}
-	if !Verify(lib, p.RelPath, p.Size) || !VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if !Verify(lib, p.RelPath, p.Size) || !VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Error("a freshly stored file should pass both checks")
 	}
-	if VerifyDeep(lib, p.RelPath, "deadbeef") {
+	if VerifyDeep(context.Background(), lib, p.RelPath, "deadbeef") {
 		t.Error("VerifyDeep should fail on sha mismatch")
 	}
 	if err := Remove(lib, p.RelPath); err != nil || Verify(lib, p.RelPath, p.Size) {
@@ -103,7 +110,7 @@ func TestMigrateNormalizedMatch(t *testing.T) {
 		{FileID: 2, FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_0"},
 		{FileID: 3, FileToken: "POLYGON_Dungeon", Variant: "Godot_4_5_1", Version: "v1_0_1"},
 	}
-	results, err := Migrate(lib, wanted)
+	results, err := Migrate(context.Background(), lib, wanted, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +159,7 @@ func TestLocate(t *testing.T) {
 		{"missing dir", Wanted{FileToken: "NOPE", Variant: "Godot_4_5_1", Version: "v1"}, ""},
 	}
 	for _, c := range cases {
-		rel, ok := Locate(lib, c.w)
+		rel, ok := Locate(lib, c.w, nil)
 		if c.want == "" {
 			if ok {
 				t.Errorf("%s: located %q, want not found", c.name, rel)
@@ -259,7 +266,7 @@ func TestVerifyCatchesTruncationWithoutHashing(t *testing.T) {
 func TestVerifyDeepCatchesCorruptionThatKeptTheSize(t *testing.T) {
 	lib := t.TempDir()
 	p := storeCommitted(t, lib, "TOKEN", "pack.zip", "original")
-	if !VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if !VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Fatal("VerifyDeep rejected an intact file")
 	}
 	if err := os.WriteFile(filepath.Join(lib, "TOKEN", "pack.zip"), []byte("corrupti"), 0o644); err != nil {
@@ -268,7 +275,7 @@ func TestVerifyDeepCatchesCorruptionThatKeptTheSize(t *testing.T) {
 	if Verify(lib, p.RelPath, p.Size) != true {
 		t.Fatal("the corruption changed the size, so this no longer tests what it means to")
 	}
-	if VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Error("VerifyDeep accepted a same-size corruption")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/curbol/synty-sync/internal/cache"
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/model"
 	"github.com/curbol/synty-sync/internal/portal"
@@ -44,6 +46,7 @@ func TestRateLimitIsRetryable(t *testing.T) {
 		// The content-type refusal and the body sniff, each as its caller wraps it.
 		{"not-a-package type", fmt.Errorf("download T|Godot: %w (Content-Type text/html)", portal.ErrNotAPackage), true},
 		{"not-a-package body", fmt.Errorf("T|Godot: %w", ErrNotAPackageBody), true},
+		{"truncated archive", fmt.Errorf("T|Godot: %w", ErrTruncatedArchive), true},
 		// A transport failure carries no status and no sentinel, and retrying is the
 		// whole point of one.
 		{"no status", errors.New("connection reset by peer"), false},
@@ -526,9 +529,14 @@ func cachedFiles(t *testing.T, libraryRoot string) []string {
 // bytes must never occupy a cache path and a login page's digest must never be
 // recorded as a pack's verified content, or every later Verify compares them against
 // themselves and finds them intact forever.
-func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
+//
+// A truncated archive is the third shape: a copy that stopped part way still begins
+// with a zip's magic, so the sniff passes it, and only the end-of-central-directory
+// check sees that it is not the whole file.
+func TestARejectedBodyIsNeitherStoredNorRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
+		body        []byte // nil serves a login page
 		contentType string
 		wantGuard   string
 	}{
@@ -545,10 +553,20 @@ func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
 			contentType: "application/zip",
 			wantGuard:   ErrNotAPackageBody.Error(),
 		},
+		{
+			name:        "a truncated archive is refused on its trailer",
+			body:        truncatedPackageBytes("pack"),
+			contentType: "application/zip",
+			wantGuard:   ErrTruncatedArchive.Error(),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			if body == nil {
+				body = []byte("<!doctype html><title>Log in</title>")
+			}
 			srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
-				return []byte("<!doctype html><title>Log in</title>"), tc.contentType, true
+				return body, tc.contentType, true
 			}})
 			lib := t.TempDir()
 			lockPath := filepath.Join(t.TempDir(), "lock.json")
@@ -558,7 +576,7 @@ func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
 				t.Fatalf("a rejected body must fail its file, not the run: %v", err)
 			}
 			if len(rep.Failures) == 0 {
-				t.Fatal("no failures reported for a run where every body was a document")
+				t.Fatal("no failures reported for a run where every body was rejected")
 			}
 			for _, f := range rep.Failures {
 				if !strings.Contains(f.Err, tc.wantGuard) {
@@ -748,24 +766,119 @@ func TestProgressReportsTransferredBytes(t *testing.T) {
 
 // A pack that leaves the library (refunded, delisted) is otherwise carried forward
 // forever with nobody told.
+//
+// The record kept has to be the whole record, with its bytes: a pack carried forward as
+// a key with its files stripped, or with its copy pruned, is erased in all but name.
 func TestDeOwnedPackIsReported(t *testing.T) {
 	srv := newServer(t, serverOpts{})
 	lib := t.TempDir()
-	prior := lockfile.New()
-	prior.Packs["a-pack-i-no-longer-own"] = lockfile.Pack{
-		DisplayName: "A Pack I No Longer Own",
-		Files:       map[string]lockfile.File{"T|Godot_4_5_1": {FileToken: "T", Variant: "Godot_4_5_1", Version: "v1", FileID: 999}},
+	body := packageBytes("T_Godot_4_5_1_v1.zip")
+	p, err := cache.Store(lib, "T", "T_Godot_4_5_1_v1.zip", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	const slug, key = "a-pack-i-no-longer-own", "T|Godot_4_5_1"
+	entry := lockfile.File{
+		FileToken: "T", Variant: "Godot_4_5_1", Version: "v1", FileID: 999, Tracked: true,
+		SHA256: p.SHA256, SizeBytes: p.Size, CachePath: p.RelPath, DownloadedAt: "2026-01-01T00:00:00Z",
+	}
+	prior := lockfile.New()
+	prior.Packs[slug] = lockfile.Pack{DisplayName: "A Pack I No Longer Own", Files: map[string]lockfile.File{key: entry}}
 
 	rep, err := Run(context.Background(), newClient(srv.URL), prior, filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Removed) != 1 || rep.Removed[0] != "a-pack-i-no-longer-own" {
+	if len(rep.Removed) != 1 || rep.Removed[0] != slug {
 		t.Errorf("Removed = %v, want the de-owned pack", rep.Removed)
 	}
-	if _, ok := rep.NewLockfile.Packs["a-pack-i-no-longer-own"]; !ok {
-		t.Error("the de-owned pack was dropped from the lockfile; one enumeration is not enough to erase a record")
+	kept, ok := rep.NewLockfile.Packs[slug]
+	if !ok {
+		t.Fatal("the de-owned pack was dropped from the lockfile; one enumeration is not enough to erase a record")
+	}
+	if got := kept.Files[key]; got != entry {
+		t.Errorf("the de-owned pack's record changed:\n got %+v\nwant %+v", got, entry)
+	}
+	if !cache.Verify(lib, entry.CachePath, entry.SizeBytes) {
+		t.Errorf("the de-owned pack's copy at %s is gone", entry.CachePath)
+	}
+}
+
+// humanBytes formats the store's own size label inside a download goroutine, and the
+// label is whatever the page says. Indexing a four-letter unit table panicked at a
+// pebibyte and took the whole run down with it.
+func TestHumanBytesNamesEveryInt64(t *testing.T) {
+	for n, want := range map[int64]string{
+		-5:            "-5 B",
+		0:             "0 B",
+		1023:          "1023 B",
+		1 << 10:       "1.0 KB",
+		1 << 40:       "1.0 TB",
+		1 << 50:       "1.0 PB",
+		1 << 60:       "1.0 EB",
+		math.MaxInt64: "8.0 EB",
+	} {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// The summary is one list of classes, and String's default arm answered "unchanged",
+// so a class added without a name tallied as a no-op. Classes is the list a caller
+// prints from, and every class in it has to say what it is.
+func TestEveryClassHasItsOwnName(t *testing.T) {
+	seen := map[string]Class{}
+	for _, c := range Classes() {
+		name := c.String()
+		if strings.HasPrefix(name, "class(") {
+			t.Errorf("class %d has no name", int(c))
+		}
+		if other, dup := seen[name]; dup {
+			t.Errorf("classes %d and %d are both called %q", int(other), int(c), name)
+		}
+		seen[name] = c
+	}
+	// Every value String names is in the list, so a new class cannot be named and still
+	// drop out of the tally.
+	for c := Class(0); c < 64; c++ {
+		if _, listed := seen[c.String()]; !listed && !strings.HasPrefix(c.String(), "class(") {
+			t.Errorf("class %q is not in Classes()", c)
+		}
+	}
+}
+
+// A lockfile entry with no fileId is filed under 0 by the index every lookup goes
+// through, and nothing the store lists has that id: it is never classified, its pack
+// rebuilds it away, and orphanedRecords then reports its copy as unreferenced while the
+// same file is fetched again under its real id. It arrives by a hand edit or a merge, so
+// it is refused before the run touches anything, with the entry named.
+func TestAnEntryWithNoFileIDIsRefused(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.FileID = 0 })
+
+	for _, dry := range []bool{true, false} {
+		_, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, runOpts(lib, dry))
+		if err == nil || !strings.Contains(err.Error(), pirateKey) {
+			t.Errorf("dry=%v: err = %v, want a refusal naming %s", dry, err, pirateKey)
+		}
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a refused run rewrote the lockfile")
 	}
 }
 
@@ -837,58 +950,85 @@ func TestADocumentAlreadyInTheLayoutIsNotAdopted(t *testing.T) {
 // records them: the layout adopt scan looks for the new version's name and never
 // matches, and the next run classifies DownloadNow rather than Changed, so the
 // Changed-only prune never fires either.
+//
+// The update can fail at the transport or at the body checks, and the body checks are
+// the case that matters most here: the new version downloads under the same filename,
+// so a rejected body that reached the real path would replace the verified copy with
+// the very bytes the checks refused. Each case asserts which guard refused it.
 func TestFailedUpdateKeepsTheVerifiedCopyRecorded(t *testing.T) {
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	version := "v1_0_0"
-	broken := false
-	srv := newServer(t, serverOpts{
-		itemHTML: func(orderItem string) (string, bool) {
-			if orderItem == "1" {
-				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+	const name = "GENERIC_Particle_FX_Godot_4_5_1.zip" // one name across versions
+	for _, tc := range []struct {
+		what    string
+		status  int
+		body    []byte
+		wantErr string
+	}{
+		{what: "a server error", status: http.StatusInternalServerError, wantErr: "500"},
+		{what: "a document body", body: []byte("<!doctype html><title>Log in</title>"), wantErr: ErrNotAPackageBody.Error()},
+		{what: "a truncated archive", body: truncatedPackageBytes(name), wantErr: ErrTruncatedArchive.Error()},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			broken := false
+			srv := newServer(t, serverOpts{
+				itemHTML: func(orderItem string) (string, bool) {
+					if orderItem == "1" {
+						return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+					}
+					return "", false
+				},
+				downloadName: func(fileID string) (string, bool) { return name, fileID == "999" },
+				downloadStatus: func(fileID string) (int, bool) {
+					return tc.status, broken && tc.status != 0 && fileID == "999"
+				},
+				fileBody: func(string) ([]byte, string, bool) {
+					return tc.body, "application/zip", broken && tc.body != nil
+				},
+			})
+
+			opts := runOpts(lib, false)
+			opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+			lf := seedRun(t, srv, lockPath, opts)
+			const key = "GENERIC_Particle_FX|Godot_4_5_1"
+			before := lf.Packs["polygon-pirate-pack"].Files[key]
+			if !before.Tracked {
+				t.Fatal("seed produced no tracked bundled file")
 			}
-			return "", false
-		},
-		downloadStatus: func(fileID string) (int, bool) {
-			if broken && fileID == "999" {
-				return http.StatusInternalServerError, true
+
+			version, broken = "v2_0_0", true
+			opts.Attempts, opts.Backoff = 1, 0
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+			if err != nil {
+				t.Fatalf("a failed update aborted the run: %v", err)
 			}
-			return 0, false
-		},
-	})
+			if len(rep.Failures) != 1 {
+				t.Fatalf("failures = %+v, want the one file whose update failed", rep.Failures)
+			}
+			if !strings.Contains(rep.Failures[0].Err, tc.wantErr) {
+				t.Errorf("failure %q was not refused by the guard this case is about (%s)", rep.Failures[0].Err, tc.wantErr)
+			}
 
-	opts := runOpts(lib, false)
-	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-	lf := seedRun(t, srv, lockPath, opts)
-	const key = "GENERIC_Particle_FX|Godot_4_5_1"
-	before := lf.Packs["polygon-pirate-pack"].Files[key]
-	if !before.Tracked {
-		t.Fatal("seed produced no tracked bundled file")
-	}
-
-	version, broken = "v2_0_0", true
-	opts.Attempts, opts.Backoff = 1, 0
-	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
-	if err != nil {
-		t.Fatalf("a failed update aborted the run: %v", err)
-	}
-	if len(rep.Failures) != 1 {
-		t.Fatalf("failures = %+v, want the one file whose update failed", rep.Failures)
-	}
-
-	after, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := after.Packs["polygon-pirate-pack"].Files[key]
-	if !got.Tracked || got.CachePath != before.CachePath || got.SHA256 != before.SHA256 {
-		t.Errorf("the verified copy at %s is no longer recorded: %+v", before.CachePath, got)
-	}
-	if got.Version != before.Version {
-		t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
-	}
-	if !cacheFileExists(lib, before.CachePath) {
-		t.Fatalf("the prior copy at %s is gone", before.CachePath)
+			after, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := after.Packs["polygon-pirate-pack"].Files[key]
+			if !got.Tracked || got.CachePath != before.CachePath || got.SHA256 != before.SHA256 {
+				t.Errorf("the verified copy at %s is no longer recorded: %+v", before.CachePath, got)
+			}
+			if got.Version != before.Version {
+				t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
+			}
+			sha, _, err := cache.Hash(context.Background(), lib, before.CachePath)
+			if err != nil {
+				t.Fatalf("the prior copy at %s is gone: %v", before.CachePath, err)
+			}
+			if sha != before.SHA256 {
+				t.Errorf("the bytes at %s were replaced by the rejected body", before.CachePath)
+			}
+		})
 	}
 }
 
@@ -1407,7 +1547,7 @@ func TestAUnityPackageIsAdoptedWithoutAZipTrailer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := wholeArchive(lib, rel, body); err != nil {
+	if err := wholeArchive(rel, body, func(int) ([]byte, error) { return nil, nil }); err != nil {
 		t.Errorf("a container with no zip magic was put through the zip trailer check: %v", err)
 	}
 	if err := adoptable(lib, rel); err != nil {
@@ -1540,32 +1680,176 @@ func TestAdvertisedSizeAndSizeBytesStaySeparate(t *testing.T) {
 	}
 }
 
-// An interrupt is not a per-file verdict. Returning a report instead of the error
-// would record every file the run had not reached yet as failed, for a reason that
-// has nothing to do with any of them, and write that as the committed record.
-func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
+// An interrupt is not a per-file verdict: recording every file the run had not reached
+// as failed would blame each of them for something that has nothing to do with it. Nor
+// is it a reason to throw the record away. A Changed file the run already downloaded has
+// had its prior copy pruned, so a lockfile left as it was names a path holding nothing
+// and a sha for bytes that are gone, and the new copy sits in the cache unrecorded. The
+// run saves what it resolved, carries what it never reached forward unchanged, and
+// still reports the interrupt as the error.
+func TestAnInterruptKeepsTheRecordOfWhatTheRunDid(t *testing.T) {
 	lib := t.TempDir()
 	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	ctx, cancel := context.WithCancel(context.Background())
+	version := "v1_0_0"
 	srv := newServer(t, serverOpts{
-		fileBody: func(string) ([]byte, string, bool) {
-			cancel() // the run is interrupted part way through its first transfer
-			return packageBytes("x"), "application/zip", true
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1":
+				return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
+			case "4":
+				return itemPage("POLYGON_Dungeon", "Godot_4_5_1", version, 5353), true
+			}
+			return "", false
+		},
+		downloadName: func(fileID string) (string, bool) {
+			switch fileID {
+			case "4242":
+				return "POLYGON_Pirate_Godot_4_5_1_" + version + ".zip", true
+			case "5353":
+				return "POLYGON_Dungeon_Godot_4_5_1_" + version + ".zip", true
+			}
+			return "", false
 		},
 	})
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+	const dungeonKey = "POLYGON_Dungeon|Godot_4_5_1"
+	pirateBefore := lf.Packs["polygon-pirate-pack"].Files[pirateKey]
+	dungeonBefore := lf.Packs["polygon-dungeon-pack"].Files[dungeonKey]
 
-	rep, err := Run(ctx, newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err == nil {
-		t.Fatalf("an interrupted run reported success: %d diffs", len(rep.Diffs))
+	version = "v2_0_0"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts.Progress = func(m string) {
+		// Interrupted as the second download starts, after Pirate's has landed and its
+		// prior copy has been pruned.
+		if m == "download "+dungeonKey {
+			cancel()
+		}
 	}
+	rep, err := Run(ctx, newClient(srv.URL), lf, lockPath, opts)
 	if !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want context.Canceled", err)
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if len(rep.Failures) != 0 {
-		t.Errorf("an interrupt was recorded as %d per-file failures", len(rep.Failures))
+		t.Errorf("an interrupt was recorded as per-file failures: %+v", rep.Failures)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pirate := after.Packs["polygon-pirate-pack"].Files[pirateKey]
+	if pirate.Version != "v2_0_0" || !pirate.Tracked || !cacheFileExists(lib, pirate.CachePath) {
+		t.Errorf("the download the run finished is not recorded: %+v", pirate)
+	}
+	if cacheFileExists(lib, pirateBefore.CachePath) {
+		t.Fatalf("the prior copy at %s was not pruned, so this does not test what it means to", pirateBefore.CachePath)
+	}
+	dungeon := after.Packs["polygon-dungeon-pack"].Files[dungeonKey]
+	if dungeon != dungeonBefore {
+		t.Errorf("the file the run never reached was not carried forward unchanged:\n got %+v\nwant %+v", dungeon, dungeonBefore)
+	}
+}
+
+// status writes nothing, interrupted or not.
+func TestAnInterruptedStatusWritesNoLockfile(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := runOpts(t.TempDir(), true)
+	// The filter runs once the item pages are read, so this lands in the classify pass.
+	opts.Filter = func(v model.Variant) bool { cancel(); return godotSourceFilter(v) }
+
+	if _, err := Run(ctx, newClient(srv.URL), lockfile.New(), lockPath, opts); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(lockPath); err == nil {
-		t.Error("an interrupted run wrote the lockfile")
+		t.Error("an interrupted status wrote the lockfile")
+	}
+}
+
+// main's signal handler takes SIGINT's default action away for the life of the run, so a
+// pass that never looks at the context ignores Ctrl-C until it finishes. Under sync the
+// classify pass re-hashes the whole library, which is minutes of reading; acting on a
+// verdict an interrupted hash produced is worse, because a cancelled verify reads as a
+// mismatch and the file is re-downloaded as CacheMissing.
+func TestAnInterruptStopsTheClassifyPass(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := runOpts(lib, false)
+	opts.Filter = func(v model.Variant) bool { cancel(); return godotSourceFilter(v) }
+	rep, err := Run(ctx, newClient(srv.URL), lf, lockPath, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(rep.Diffs) != 0 || len(rep.Downloaded) != 0 {
+		t.Errorf("the classify pass kept going after the interrupt: %d diffs, %d downloads", len(rep.Diffs), len(rep.Downloaded))
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Packs, lf.Packs) {
+		t.Error("a run interrupted before it acted on anything changed the record")
+	}
+}
+
+// The adopt pass hashes every file it takes, so it is as long as the classify pass on a
+// library a lost lockfile left unrecorded. An interrupt there must stop it, and the
+// adoption it cut short is the run's outcome, not a refusal to report against the file.
+func TestAnInterruptStopsTheAdoptPass(t *testing.T) {
+	lib := t.TempDir()
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	seedRun(t, srv, filepath.Join(t.TempDir(), "seed.json"), twoPackOpts(lib))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := twoPackOpts(lib)
+	adopts := 0
+	opts.Progress = func(m string) {
+		if strings.HasPrefix(m, "adopt ") {
+			adopts++
+			cancel()
+		}
+	}
+	rep, err := Run(ctx, newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if adopts != 1 {
+		t.Errorf("the adopt pass started %d adoptions, want it to stop after the interrupt", adopts)
+	}
+	if w := warnContaining(rep.Warnings, "canceled"); len(w) != 0 {
+		t.Errorf("an interrupt was reported as a refused adoption: %v", w)
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("an interrupted run went on to download %d files", len(rep.Downloaded))
+	}
+}
+
+// An item page interrupted mid-request comes back as an error that wraps the
+// cancellation. Recording that as the run's first error printed "item page for X:
+// context canceled", naming a pack for what was the user's own Ctrl-C.
+func TestAnInterruptedItemPageIsTheInterrupt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := newServer(t, serverOpts{itemHTML: func(string) (string, bool) {
+		cancel()
+		time.Sleep(50 * time.Millisecond) // past the client noticing
+		return "", false
+	}})
+	packs := []model.Pack{{Slug: "polygon-pirate-pack", ItemURL: "/apps/downloads/customers/1/orders/100/order_items/1"}}
+	_, _, err := fetchAll(ctx, newClient(srv.URL), packs, 1)
+	if err != context.Canceled {
+		t.Errorf("err = %v, want the bare context.Canceled", err)
 	}
 }
 
@@ -2253,5 +2537,262 @@ func TestABundledFileTakesItsLabelsFromEnumerationOrderNotResponseOrder(t *testi
 	got := after.Packs["polygon-pirate-pack"].Files[key].AdvertisedSize
 	if got != wantSize {
 		t.Errorf("advertisedSize = %d, want %d: the file was labelled by the page that answered first, not the pack listed first", got, wantSize)
+	}
+}
+
+// twoFileServer serves Pirate (fileId 4242, at *pirateVersion) and Dungeon (fileId 5353,
+// fixed at v1_0_0) as one-file item pages, each file downloading under the name
+// pirateName or its Synty-style default gives it. A test changes *pirateVersion between
+// runs to make Pirate's file classify Changed.
+func twoFileServer(t *testing.T, pirateVersion *string, pirateName func(version string) string) *httptest.Server {
+	t.Helper()
+	return newServer(t, serverOpts{
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1":
+				return itemPage("POLYGON_Pirate", "Godot_4_5_1", *pirateVersion, 4242), true
+			case "4":
+				return itemPage("POLYGON_Dungeon", "Godot_4_5_1", "v1_0_0", 5353), true
+			}
+			return "", false
+		},
+		downloadName: func(fileID string) (string, bool) {
+			switch fileID {
+			case "4242":
+				return pirateName(*pirateVersion), true
+			case "5353":
+				return "POLYGON_Dungeon_Godot_4_5_1_v1_0_0.zip", true
+			}
+			return "", false
+		},
+	})
+}
+
+func twoPackOpts(lib string) Options {
+	opts := runOpts(lib, false)
+	opts.PackSelected = func(slug string) bool {
+		return slug == "polygon-pirate-pack" || slug == "polygon-dungeon-pack"
+	}
+	return opts
+}
+
+const pirateKey = "POLYGON_Pirate|Godot_4_5_1"
+
+// withPirateEntry returns lf with the Pirate pack's one entry rewritten by edit.
+func withPirateEntry(lf lockfile.Lockfile, edit func(*lockfile.File)) lockfile.Lockfile {
+	pirate := lf.Packs["polygon-pirate-pack"]
+	f := pirate.Files[pirateKey]
+	edit(&f)
+	pirate.Files[pirateKey] = f
+	lf.Packs["polygon-pirate-pack"] = pirate
+	return lf
+}
+
+// The prior copy of a Changed file is pruned when the new one lands elsewhere, and
+// "elsewhere" was decided by comparing the lockfile's string against the derived one.
+// The lockfile is committed and hand-editable, so "./TOK/f.zip" names the file
+// "TOK/f.zip" does; compared raw, a re-download to the same filename was deleted moments
+// after it was committed, recorded with a digest for a path holding nothing, and
+// re-fetched in full on the next run.
+func TestAPruneNeverDeletesTheFileItJustDownloaded(t *testing.T) {
+	const name = "POLYGON_Pirate_Godot_4_5_1.zip" // one name across versions
+	const rel = "POLYGON_Pirate/" + name
+	for _, spelling := range []string{"./" + rel, "POLYGON_Pirate//" + name, "POLYGON_Pirate/x/../" + name} {
+		t.Run(spelling, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			srv := twoFileServer(t, &version, func(string) string { return name })
+			opts := twoPackOpts(lib)
+			lf := withPirateEntry(seedRun(t, srv, lockPath, opts), func(f *lockfile.File) { f.CachePath = spelling })
+
+			version = "v2_0_0"
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rep.Downloaded) != 1 {
+				t.Fatalf("downloaded %+v, want the one Changed file", rep.Downloaded)
+			}
+			got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+			if !cacheFileExists(lib, got.CachePath) {
+				t.Errorf("the run deleted the file it just downloaded to %s, recorded as %s", got.CachePath, spelling)
+			}
+		})
+	}
+}
+
+// Nothing stops a hand-merged lockfile recording one file's bytes as another fileId's
+// prior copy. The prune then deletes a file the lockfile still records for its real
+// owner, which classifies Unchanged this run and CacheMissing the next.
+func TestAPruneNeverDeletesAPathAnotherFileRecords(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+
+	dungeon := lf.Packs["polygon-dungeon-pack"].Files["POLYGON_Dungeon|Godot_4_5_1"]
+	if !dungeon.Tracked || !cacheFileExists(lib, dungeon.CachePath) {
+		t.Fatalf("seed did not leave Dungeon's file on disk: %+v", dungeon)
+	}
+	// A second spelling, so a raw comparison against Dungeon's path cannot see it either.
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.CachePath = "./" + dungeon.CachePath })
+
+	version = "v2_0_0"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Asked of the run, not only of the disk: Dungeon classifies after Pirate, so a
+	// deleted copy is re-downloaded as CacheMissing and is back by the time this looks.
+	for _, d := range rep.Downloaded {
+		if d.FileID == dungeon.FileID {
+			t.Errorf("Dungeon's file was re-downloaded: pruning Pirate's prior copy deleted %s", dungeon.CachePath)
+		}
+	}
+	if !cacheFileExists(lib, dungeon.CachePath) {
+		t.Fatalf("pruning Pirate's prior copy deleted %s, which fileId %d still records", dungeon.CachePath, dungeon.FileID)
+	}
+	if len(warnContaining(rep.Warnings, dungeon.CachePath)) == 0 {
+		t.Errorf("the refused prune was not reported: %v", rep.Warnings)
+	}
+}
+
+// The preferred copy of a file is the canonical name, and when it was a truncated one
+// the adopt checks refused it after the matcher had already chosen it, so an intact
+// "(1)" copy beside it was never examined and the pack re-downloaded in full. Asked of
+// both places a copy can sit: the layout, and flat at the root where Migrate finds it.
+func TestAnIntactCopyBesideARefusedOneIsAdopted(t *testing.T) {
+	const canonical = "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip"
+	const collision = "POLYGON_Pirate_Godot_4_5_1_v1_0_1(1).zip"
+	for _, where := range []string{"POLYGON_Pirate", "."} {
+		t.Run(where, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			dir := filepath.Join(lib, where)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, canonical), truncatedPackageBytes(canonical), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			whole := packageBytes(collision)
+			if err := os.WriteFile(filepath.Join(dir, collision), whole, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range rep.Downloaded {
+				if d.FileID == 2282645 {
+					t.Error("the pack was re-downloaded though an intact copy sat beside the refused one")
+				}
+			}
+			got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+			if got.CachePath != "POLYGON_Pirate/"+collision || got.SizeBytes != int64(len(whole)) {
+				t.Errorf("recorded %+v, want the intact copy %s", got, collision)
+			}
+		})
+	}
+}
+
+// library_path is user-scoped while the lockfile is project-scoped, so two projects share
+// one library. Once one of them has synced a file to v2, the other, whose lockfile still
+// says v1, classified Changed and re-transferred the whole pack over a v2 copy already
+// sitting at <fileToken>/ under the name the store gives v2. New and DownloadNow already
+// asked the layout first; Changed was the one class that never did.
+func TestAChangedFileAdoptsTheNewVersionAnotherProjectFetched(t *testing.T) {
+	lib := t.TempDir()
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	projectA := filepath.Join(t.TempDir(), "a.lock.json")
+	projectB := filepath.Join(t.TempDir(), "b.lock.json")
+	lfA := seedRun(t, srv, projectA, opts)
+	lfB := seedRun(t, srv, projectB, opts)
+
+	version = "v2_0_0"
+	if _, err := Run(context.Background(), newClient(srv.URL), lfA, projectA, opts); err != nil {
+		t.Fatal(err)
+	}
+	afterA, err := lockfile.Load(projectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := afterA.Packs["polygon-pirate-pack"].Files[pirateKey]
+
+	rep, err := Run(context.Background(), newClient(srv.URL), lfB, projectB, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("project B re-downloaded %+v though project A had already fetched v2 into the shared library", rep.Downloaded)
+	}
+	got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+	if got.Version != "v2_0_0" || got.CachePath != fetched.CachePath || got.SHA256 != fetched.SHA256 {
+		t.Errorf("project B recorded %+v, want the v2 copy project A fetched: %+v", got, fetched)
+	}
+}
+
+// The adopt probe matches on name, and the prior record's own path is the one copy whose
+// bytes are known to be another version: the lockfile hashed them as that version. A
+// record whose path already carries the new version's name is a hand edit or a stale
+// merge, and taking those bytes as the new version on the strength of their name would
+// record the old version's content under the new version's number.
+func TestAChangedFileNeverAdoptsItsOwnPriorCopy(t *testing.T) {
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+
+	// Move the v1 bytes to the name v2 would have, and record them there, still as v1.
+	prior := lf.Packs["polygon-pirate-pack"].Files[pirateKey]
+	renamed := "POLYGON_Pirate/POLYGON_Pirate_Godot_4_5_1_v2_0_0.zip"
+	if err := os.Rename(filepath.Join(lib, filepath.FromSlash(prior.CachePath)), filepath.Join(lib, filepath.FromSlash(renamed))); err != nil {
+		t.Fatal(err)
+	}
+	lf = withPirateEntry(lf, func(f *lockfile.File) { f.CachePath = "./" + renamed })
+
+	version = "v2_0_0"
+	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range rep.Adopted {
+		if a.FileID == prior.FileID {
+			t.Fatal("the prior copy was adopted as the new version on the strength of its name")
+		}
+	}
+	if got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]; got.SHA256 == prior.SHA256 {
+		t.Errorf("v2 is recorded with v1's sha: %+v", got)
+	}
+}
+
+// SamePath cannot see two spellings that a case-insensitive filesystem calls one file,
+// so the prune asks the filesystem too. A hard link stands in for that here: two names
+// the filesystem reports as one file, on a platform where case alone would not be.
+func TestRemoveSupersededSparesAPathTheFilesystemCallsTheSameFile(t *testing.T) {
+	lib := t.TempDir()
+	dir := filepath.Join(lib, "TOK")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.zip"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(dir, "new.zip"), filepath.Join(dir, "Old.zip")); err != nil {
+		t.Skipf("cannot hard-link here: %v", err)
+	}
+	if w := removeSuperseded(lib, "TOK/Old.zip", "TOK/new.zip", nil); w != "" {
+		t.Errorf("warning = %q", w)
+	}
+	if !cacheFileExists(lib, "TOK/Old.zip") {
+		t.Error("removeSuperseded deleted a name the filesystem reports as the current file")
 	}
 }
