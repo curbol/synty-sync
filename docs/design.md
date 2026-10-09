@@ -358,8 +358,8 @@ sweep deletes and no scan can take back.
   reason. A real run still saves the lockfile: what the pass verified is recorded, and every
   file it never reached keeps its prior record unchanged (a tracked copy is carried as itself,
   unexamined), rather than being marked as looked for and not found. Nothing is lost and
-  nothing is replaced by an expired session's view; the run then exits with the error. A dry
-  run writes nothing either way.
+  nothing is replaced by an expired session's view; the run prints its summary and then
+  exits with the error. A dry run writes nothing either way.
 - **Empty library against a populated lockfile:** refused outright. A read that returns
   nothing is far more often markup that moved than a library someone emptied, and the
   lockfile is committed to someone's project.

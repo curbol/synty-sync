@@ -114,8 +114,9 @@ walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurren
 Run `synty-sync --help` for which flags each subcommand accepts.
 
 Interrupting a `sync` (Ctrl-C), or a session that expires part way through the downloads,
-stops it early but still saves the lockfile: files that finished are recorded and every
-other entry is left as it was, so the next run picks up where this one stopped.
+stops it early but still saves the lockfile and prints the summary of what it did: files
+that finished are recorded and every other entry is left as it was, so the next run picks up
+where this one stopped.
 
 ## Browsing what you have
 

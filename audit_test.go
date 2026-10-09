@@ -1673,3 +1673,25 @@ func TestExplicitHelpGoesToStdout(t *testing.T) {
 		}
 	}
 }
+
+// syncer.Run hands back the report of an interrupted run alongside the interrupt,
+// because the lockfile already records what it did. Returning on the error alone
+// leaves the user with "context canceled" and no word of what landed.
+func TestAnInterruptedRunStillPrintsWhatItDid(t *testing.T) {
+	rep := syncer.Report{
+		Diffs:      []syncer.FileDiff{{PackSlug: "pirate", Key: "P|Godot_4_5_1", Class: syncer.Changed}},
+		Downloaded: []syncer.FileDiff{{PackSlug: "pirate", Key: "P|Godot_4_5_1", Class: syncer.Changed}},
+	}
+	var out bytes.Buffer
+	err := reportRun(&out, false, config.Config{}, rep, context.Canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the interrupt", err)
+	}
+	if !strings.Contains(out.String(), "downloaded: 1") {
+		t.Errorf("the summary of what the run did was dropped:\n%s", out.String())
+	}
+	out.Reset()
+	if err := reportRun(&out, false, config.Config{}, syncer.Report{}, errors.New("boom")); err == nil || out.Len() != 0 {
+		t.Errorf("a run that did nothing printed a summary: %q, %v", out.String(), err)
+	}
+}

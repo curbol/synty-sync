@@ -301,10 +301,20 @@ func runSyncOrStatus(ctx context.Context, client *portal.Client, cfg config.Conf
 		Progress:     func(m string) { fmt.Fprintln(os.Stderr, m) },
 	}
 	rep, err := syncer.Run(ctx, client, lf, lockPath, opts)
+	return reportRun(stdout, dry, cfg, rep, err)
+}
+
+// reportRun prints a run's summary and decides its exit. An interrupted run, or one
+// whose session expired part way through the downloads, still saved what it did, and
+// the report it hands back alongside the error is the only account of that.
+func reportRun(w io.Writer, dry bool, cfg config.Config, rep syncer.Report, err error) error {
 	if err != nil {
+		if len(rep.Diffs) > 0 {
+			printReport(w, dry, cfg, rep)
+		}
 		return err
 	}
-	printReport(stdout, dry, cfg, rep)
+	printReport(w, dry, cfg, rep)
 	// The files the run could not fetch are the point of the command, so they move the
 	// exit status. A file the store no longer serves does not: no re-run clears it, and
 	// it would fail every future sync forever.
