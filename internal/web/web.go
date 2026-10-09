@@ -278,9 +278,11 @@ func localRequest(r *http.Request, bound net.Addr) bool {
 	if ip := net.ParseIP(peer); ip == nil || !ip.IsLoopback() {
 		return false
 	}
-	host, port, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		return false
+	// A browser omits the port when it is the scheme's default, so a page bound to :80
+	// arrives with a bare name rather than a host:port pair.
+	host, port := strings.TrimSuffix(strings.TrimPrefix(r.Host, "["), "]"), "80"
+	if h, p, err := net.SplitHostPort(r.Host); err == nil {
+		host, port = h, p
 	}
 	boundHost, boundPort, err := net.SplitHostPort(bound.String())
 	if err != nil || port != boundPort {

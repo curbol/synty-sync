@@ -270,6 +270,13 @@ func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T)
 		{"loopback bind, local browser", "127.0.0.1:8787", "127.0.0.1:8787", "127.0.0.1:51000", true},
 		{"loopback bind, rebound name", "127.0.0.1:8787", "evil.example:8787", "127.0.0.1:51000", false},
 		{"loopback bind, wrong port", "127.0.0.1:8787", "127.0.0.1:9999", "127.0.0.1:51000", false},
+		// A browser omits the port when it is the scheme's default, so a page bound to
+		// :80 arrives with a bare name and was answered 421 on every request.
+		{"port 80 bind, browser omits the port", "127.0.0.1:80", "localhost", "127.0.0.1:51000", true},
+		{"port 80 bind, bare loopback literal", "127.0.0.1:80", "127.0.0.1", "127.0.0.1:51000", true},
+		{"port 80 IPv6 bind, bare bracketed literal", "[::1]:80", "[::1]", "[::1]:51000", true},
+		{"port 80 bind, rebound bare name", "127.0.0.1:80", "evil.example", "127.0.0.1:51000", false},
+		{"other port, bare name", "127.0.0.1:8787", "localhost", "127.0.0.1:51000", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &http.Request{Host: tc.host, RemoteAddr: tc.peer}
