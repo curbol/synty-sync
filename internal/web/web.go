@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -126,7 +127,17 @@ func Serve(ctx context.Context, ln net.Listener, packs []model.Pack, enabled map
 			http.Error(w, "unexpected Host", http.StatusMisdirectedRequest)
 			return
 		}
-		_ = page.Execute(w, pageData{Rows: rows, Count: checked, Token: token})
+		// Rendered into a buffer first, so a failure can still become an error status:
+		// template.Must runs Parse, and html/template's escape analysis and the field
+		// lookups wait for Execute, so a template edit that fails there would otherwise
+		// serve a 200 with a blank page and say nothing anywhere.
+		var buf bytes.Buffer
+		if err := page.Execute(&buf, pageData{Rows: rows, Count: checked, Token: token}); err != nil {
+			fmt.Fprintln(os.Stderr, "select: rendering the page failed:", err)
+			http.Error(w, "rendering the selection page failed; see the terminal", http.StatusInternalServerError)
+			return
+		}
+		_, _ = buf.WriteTo(w)
 	})
 	// POST only: this endpoint persists the whole pack selection, and any page the
 	// user visits while select is open can reach localhost with a GET.

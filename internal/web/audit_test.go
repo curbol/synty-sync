@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"html/template"
 	"maps"
 	"net"
 	"net/http"
@@ -275,6 +276,26 @@ func TestRequestsFromAnotherMachineAreRefusedWhateverHostTheyClaim(t *testing.T)
 					got, tc.want, tc.bound, tc.host, tc.peer)
 			}
 		})
+	}
+}
+
+// template.Must runs Parse, not html/template's escape analysis or the field lookups,
+// which wait for the first Execute. A template edit that fails there used to serve a
+// 200 with whatever had been written before the failure, often nothing, while the
+// terminal said nothing: a blank page and no diagnostic anywhere.
+func TestAPageThatFailsToRenderIsAnErrorNotABlankPage(t *testing.T) {
+	prev := page
+	page = template.Must(template.New("select").Parse(`<p>{{.Count}}</p>{{.NoSuchField}}`))
+	t.Cleanup(func() { page = prev })
+
+	base, _ := serving(t, []model.Pack{{Slug: "a", DisplayName: "A"}}, nil)
+	resp, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("a page that failed to render returned %d, want 500", resp.StatusCode)
 	}
 }
 
