@@ -237,11 +237,10 @@ func snapshotDir(t *testing.T, dir string) map[string]string {
 }
 
 // moz_cookies keys on (name, host, path, originAttributes), so one cookie name can have
-// several rows: set at two paths, or in a container tab as well as an ordinary window.
-// They tie on host, SQLite's sorter is not documented as stable, and only one value per
-// name fits in a Cookie header, so without the rest of the ORDER BY the winner is
-// whichever row arrived last and the user gets an intermittent expired session against
-// a login they just made.
+// several rows in one cookie jar: set at two paths, say. They tie on host, SQLite's
+// sorter is not documented as stable, and only one value per name fits in a Cookie
+// header, so without the rest of the ORDER BY the winner is whichever row arrived last
+// and the user gets an intermittent expired session against a login they just made.
 func TestDuplicateCookieRowsResolveToTheLiveOne(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "cookies.sqlite")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -260,7 +259,7 @@ func TestDuplicateCookieRowsResolveToTheLiveOne(t *testing.T) {
 		originAttrs  string
 		lastAccessed int64
 	}{
-		{"LIVE", "/apps/downloads", "^userContextId=4", 2000},
+		{"LIVE", "/apps/downloads", "", 2000},
 		{"STALE-ROOT", "/", "", 1000},
 	} {
 		if _, err := db.Exec(
@@ -284,6 +283,109 @@ func TestDuplicateCookieRowsResolveToTheLiveOne(t *testing.T) {
 		if got != "_shopify_essential=LIVE" {
 			t.Fatalf("read %d returned %q, want the most specific, most recently used row", i, got)
 		}
+	}
+}
+
+// insertCookieRows writes rows that differ in the jar they belong to, which newCookieDB
+// cannot express: it puts every row in the default context.
+func insertCookieRows(t *testing.T, rows ...jarRow) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "cookies.sqlite")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(geckoSchema); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		path := r.path
+		if path == "" {
+			path = "/"
+		}
+		if _, err := db.Exec(
+			`INSERT INTO moz_cookies (originAttributes, name, value, host, path, lastAccessed)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			r.attrs, r.name, r.value, cookieHost, path, r.lastAccessed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dbPath
+}
+
+type jarRow struct {
+	attrs, name, value, path string
+	lastAccessed             int64
+}
+
+// Multi-Account Containers gives a container tab its own cookie jar, so one
+// cookies.sqlite can hold two syntystore.com sessions for two accounts. Picking per name
+// by recency let a container left open against another account outrank the session the
+// rest of the browser uses, or contribute half the header. The default jar decides every
+// name it holds; another jar only supplies names it lacks, so a sign-in made only inside
+// a container still resolves.
+func TestTheDefaultCookieJarOutranksAContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []jarRow
+		want string
+	}{
+		{
+			name: "the default jar wins a name both hold, however recent and specific the container's",
+			rows: []jarRow{
+				{attrs: "", name: "sid", value: "DEFAULT", lastAccessed: 1000},
+				{attrs: "^userContextId=4", name: "sid", value: "CONTAINER", path: "/apps/downloads", lastAccessed: 9000},
+			},
+			want: "sid=DEFAULT",
+		},
+		{
+			name: "a container supplies only the names the default jar lacks",
+			rows: []jarRow{
+				{attrs: "", name: "sid", value: "DEFAULT", lastAccessed: 1000},
+				{attrs: "^userContextId=4", name: "sid", value: "CONTAINER", lastAccessed: 9000},
+				{attrs: "^userContextId=4", name: "extra", value: "C", lastAccessed: 9000},
+			},
+			want: "extra=C; sid=DEFAULT",
+		},
+		{
+			name: "a container-only sign-in still resolves",
+			rows: []jarRow{
+				{attrs: "^userContextId=4", name: "sid", value: "CONTAINER", lastAccessed: 9000},
+			},
+			want: "sid=CONTAINER",
+		},
+		{
+			// Two containers: the one last used supplies a name both hold, even where the
+			// other set it at a more specific path. Per-row ranking would mix the two jars.
+			name: "between containers, the most recently used jar wins",
+			rows: []jarRow{
+				{attrs: "^userContextId=4", name: "sid", value: "OLD", path: "/apps/downloads", lastAccessed: 100},
+				{attrs: "^userContextId=5", name: "sid", value: "NEW", lastAccessed: 200},
+			},
+			want: "sid=NEW",
+		},
+		{
+			// A private window's cookies are meant to die with it, so a row that reached
+			// the disk anyway is not the user's session.
+			name: "a private-browsing row is never read",
+			rows: []jarRow{
+				{attrs: "", name: "sid", value: "DEFAULT", lastAccessed: 1000},
+				{attrs: "^privateBrowsingId=1", name: "pb", value: "PRIVATE", lastAccessed: 9000},
+				{attrs: "^userContextId=4&privateBrowsingId=1", name: "pb2", value: "PRIVATE", lastAccessed: 9000},
+			},
+			want: "sid=DEFAULT",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readSQLiteCookies(insertCookieRows(t, tc.rows...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("header = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -293,22 +293,22 @@ func readSQLiteCookies(dbPath string) (string, error) {
 		return "", err
 	}
 	defer db.Close()
-	// Scan in increasing order of specificity, so the last write into the map for a
-	// given name is the most specific record that set it: a subdomain first, then the
-	// domain-wide ".syntystore.com", then the apex itself. Ordering by host alone
-	// would decide that alphabetically: every subdomain sorting after "syntystore"
-	// (www, for one) would beat the apex and send the wrong value, which arrives as an
-	// expired session against cookies the user just refreshed.
+	// Within one cookie jar, scan in increasing order of specificity, so the last write
+	// for a given name is the most specific record that set it: a subdomain first, then
+	// the domain-wide ".syntystore.com", then the apex itself. Ordering by host alone
+	// would decide that alphabetically: every subdomain sorting after "syntystore" (www,
+	// for one) would beat the apex and send the wrong value, which arrives as an expired
+	// session against cookies the user just refreshed.
 	//
-	// Host is not unique: moz_cookies keys on (name, host, path, originAttributes), so
-	// a name set at two paths, or in a container tab as well as an ordinary window,
-	// gives two rows that tie on host. SQLite's sorter is not documented as stable, so
-	// without the rest of this the winner is whichever row happened to arrive last.
-	// path length is the order RFC 6265 has a browser send them in, and lastAccessed
-	// then picks the session actually in use over one left behind by an earlier login;
-	// id is there only to make the order total.
+	// Host is not unique: moz_cookies keys on (name, host, path, originAttributes), so a
+	// name set at two paths gives two rows that tie on host. SQLite's sorter is not
+	// documented as stable, so without the rest of this the winner is whichever row
+	// happened to arrive last. path length is the order RFC 6265 has a browser send them
+	// in, and lastAccessed then picks the session actually in use over one left behind by
+	// an earlier login; id is there only to make the order total.
 	rows, err := db.Query(
-		`SELECT name, value FROM moz_cookies WHERE host LIKE ? OR host = ?
+		`SELECT originAttributes, name, value, COALESCE(lastAccessed, 0) FROM moz_cookies
+		 WHERE host LIKE ? OR host = ?
 		 ORDER BY CASE host WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END,
 		          LENGTH(path), lastAccessed, id`,
 		"%."+cookieHost, cookieHost, cookieHost, "."+cookieHost)
@@ -316,18 +316,83 @@ func readSQLiteCookies(dbPath string) (string, error) {
 		return "", fmt.Errorf("query moz_cookies: %w", err)
 	}
 	defer rows.Close()
-	pairs := map[string]string{}
+	jars := map[string]*cookieJar{}
 	for rows.Next() {
-		var name, value string
-		if err := rows.Scan(&name, &value); err != nil {
+		var attrs, name, value string
+		var lastAccessed int64
+		if err := rows.Scan(&attrs, &name, &value, &lastAccessed); err != nil {
 			return "", err
 		}
-		pairs[name] = value
+		if privateBrowsing(attrs) {
+			continue
+		}
+		jar := jars[attrs]
+		if jar == nil {
+			jar = &cookieJar{attrs: attrs, pairs: map[string]string{}}
+			jars[attrs] = jar
+		}
+		jar.pairs[name] = value
+		jar.lastAccessed = max(jar.lastAccessed, lastAccessed)
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	return joinCookies(pairs)
+	return joinCookies(mergeJars(jars))
+}
+
+// cookieJar is the syntystore.com cookies one originAttributes value holds.
+type cookieJar struct {
+	attrs        string
+	pairs        map[string]string
+	lastAccessed int64
+}
+
+// mergeJars builds one Cookie header's worth of pairs out of several cookie jars, taking
+// each name from the highest-ranked jar that holds it.
+//
+// Multi-Account Containers gives a container tab its own jar, so one profile can hold two
+// syntystore.com sessions for two accounts. Ranking every row together by recency lets a
+// container left open against the other account outrank the session the rest of the
+// browser uses, or supply half the header. The default jar (an empty originAttributes)
+// decides every name it holds; the other jars, most recently used first, supply only the
+// names it lacks. That keeps a sign-in made only inside a container resolving, and one
+// made under first-party isolation, which gives every cookie a non-empty originAttributes.
+func mergeJars(jars map[string]*cookieJar) map[string]string {
+	order := make([]*cookieJar, 0, len(jars))
+	for _, j := range jars {
+		order = append(order, j)
+	}
+	sort.Slice(order, func(i, k int) bool {
+		a, b := order[i], order[k]
+		if (a.attrs == "") != (b.attrs == "") {
+			return a.attrs == ""
+		}
+		if a.lastAccessed != b.lastAccessed {
+			return a.lastAccessed > b.lastAccessed
+		}
+		return a.attrs < b.attrs
+	})
+	pairs := map[string]string{}
+	for _, j := range order {
+		for name, value := range j.pairs {
+			if _, have := pairs[name]; !have {
+				pairs[name] = value
+			}
+		}
+	}
+	return pairs
+}
+
+// privateBrowsing reports whether an originAttributes value names a private window's
+// jar. Those cookies are meant to die with the window, so one that reached the disk is
+// not a session the user chose to keep.
+func privateBrowsing(attrs string) bool {
+	for _, kv := range strings.Split(strings.TrimPrefix(attrs, "^"), "&") {
+		if v, ok := strings.CutPrefix(kv, "privateBrowsingId="); ok && v != "0" {
+			return true
+		}
+	}
+	return false
 }
 
 func hostMatches(host string) bool {
