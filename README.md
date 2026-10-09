@@ -44,8 +44,9 @@ Two kinds of state, kept apart:
 
 - **User config** (account identity, session, machine defaults) lives *outside* any
   project, resolved as `--config <dir>` › `$SYNTY_CONFIG_DIR` › `$XDG_CONFIG_HOME/synty-sync`
-  › `~/.config/synty-sync`. Provide your customer id via `--customer`, `SYNTY_CUSTOMER_ID`,
-  or a `config.toml` there (precedence in that order):
+  › `~/.config/synty-sync` (a dir you name with `--config` or `$SYNTY_CONFIG_DIR` must
+  already exist). Provide your customer id via `--customer`, `SYNTY_CUSTOMER_ID`, or a
+  `config.toml` there (precedence in that order):
 
   ```bash
   mkdir -p ~/.config/synty-sync && cp config.example.toml ~/.config/synty-sync/config.toml
@@ -91,7 +92,11 @@ synty-sync status --cookies cookies.txt
 
 Reading from the browser auto-refreshes the session whenever you browse the store, which
 is why it's the no-maintenance default. (A pasted curl/cookies.txt expires and must be
-re-grabbed.)
+re-grabbed.) Each run prints the cookie database it read (`session: read from …`), so a
+stale or wrong profile is easy to spot. If you use Multi-Account Containers, the browser's
+default (non-container) session wins; a container's cookies are used only for names the
+default session lacks, and private windows are never read. A pasted curl works in either
+DevTools format, POSIX (`bash`) or Windows `cmd`.
 
 ## Commands
 
@@ -107,6 +112,10 @@ walking up from cwd), `--only <pack-slug-glob>`, `--library <dir>`, `--concurren
 `--customer <id>`, `--config <dir>` (user config dir; default `~/.config/synty-sync`).
 `list` takes only `--manifest`: it reads the lockfile beside it and no user config.
 Run `synty-sync --help` for which flags each subcommand accepts.
+
+Interrupting a `sync` (Ctrl-C), or a session that expires part way through the downloads,
+stops it early but still saves the lockfile: files that finished are recorded and every
+other entry is left as it was, so the next run picks up where this one stopped.
 
 ## Browsing what you have
 

@@ -16,7 +16,7 @@ Scope: $ARGUMENTS
 
 - **No arguments:** review every `.go` file under `internal/` and `cmd/`, the root files
   (`main.go`, `main_test.go`, `audit_test.go`, `install_test.go`), `install.sh`,
-  `.github/workflows/{ci,release}.yml`, and the two committed examples
+  `.github/workflows/{ci,release}.yml`, `.gitattributes`, and the two committed examples
   (`config.example.toml`, `synty-sync.example.toml`), which describe schemas the code
   owns and drift silently when a key is renamed.
 - **With scope:** interpret the user's wording to identify which packages and files to
@@ -47,8 +47,12 @@ go test -race ./... # ~30s wall from a clean test cache
 committed captures, and the race detector multiplies that by roughly ten. Everything else
 is a second or two.
 
-This is exactly the gate in `.github/workflows/ci.yml`, which `release.yml` calls as its
-own gate, so the bar here is the bar for merging and tagging. There is no Makefile, task
+These are the Linux job in `.github/workflows/ci.yml`, which `release.yml` calls as its
+own gate, so the bar here is the bar for merging and tagging. That job also cross-compiles
+every platform `release.yml` builds and refuses a tracked compiled binary (self-checking its
+pattern against probe builds), and a second job runs `go build` and `go test` (no `-race`)
+on Windows and macOS, where several platform branches only execute. A failure reported from
+either of those is Tier 1 too, but this machine cannot reproduce them. There is no Makefile, task
 runner, or linter config: `go vet` is the only static analysis wired up. So in Step 5 a
 mechanizable class has two homes: introducing a linter (`.golangci.yml`, wired into the
 `check` job in `.github/workflows/ci.yml`) or a guard test in the relevant package's
@@ -58,8 +62,10 @@ The suite is fully offline and hermetic: portal and web tests run against
 `net/http/httptest` servers and the committed `testdata/portal/*.html` captures, session
 tests build throwaway Gecko `cookies.sqlite` files, selfupdate tests serve fake release
 assets, and `install_test.go` runs `install.sh` end to end against a stub GitHub
-(`SYNTY_INSTALL_API` / `SYNTY_INSTALL_DOWNLOAD`) with a stubbed `uname` ahead of it on
-`PATH`. Nothing needs network, a real session, or a customer id, so a green run means
+(`SYNTY_INSTALL_API` / `SYNTY_INSTALL_DOWNLOAD`, with `SYNTY_INSTALL_ALLOW_TOKEN` opting a
+test into sending a token to a non-GitHub host) with a stubbed `uname`, and where it checks
+how the token travels, an argv-recording `curl` wrapper, ahead of it on `PATH`. Nothing
+needs network, a real session, or a customer id, so a green run means
 something. Every `internal/` package has a test file, and so does `cmd/scrubfixtures`,
 whose own test covers the two things `internal/fixtures` cannot see from inside the
 package: the filename scrub and the `.html` filter.
@@ -75,35 +81,43 @@ agents run in parallel:
   expired-session sentinel, the stall guard on a download body, and strict goquery
   parsing of the two page shapes. What goes wrong here is a markup change read as an
   empty page, a retry policy that treats the wrong status as permanent, a bound that
-  truncates instead of erroring, and account identity leaking into an error string.
+  truncates instead of erroring, a logged-out document download (`CheckSession`) reported
+  as an ordinary failed file, and account identity (the customer id, the email, or the
+  `Credential` cookie) leaking into an error string or a printed `Client`.
 - **Sync core** — `internal/syncer/`, `internal/model/`, `internal/lockfile/`,
   `internal/manifest/`. The diff engine and the records it rewrites: `classify`, the
   `Class` enum, fileId dedup, the bounded fan-out in `fetchAll`, the adopt scan, the
   body sniff, the per-file failure model, `buildLockfile`'s carry-forward of unfetched
-  packs, and the opt-in allowlist. What goes wrong here is a lockfile rebuilt from
-  incomplete live data, a version attached to another version's sha, a failure that
-  costs the run instead of the file, and a race in the fan-out.
+  packs, the interrupted-pass carry-forward (`carryUnreached`), the superseded-copy prune
+  (`removeSuperseded`), and the opt-in allowlist. What goes wrong here is a lockfile
+  rebuilt from incomplete live data, a version attached to another version's sha, a
+  failure that costs the run instead of the file, a prune that deletes bytes another entry
+  records, and a race in the fan-out.
 - **Cache & session** — `internal/cache/`, `internal/session/`, `internal/config/`,
   `internal/atomicfile/`, `internal/fixtures/`, `cmd/scrubfixtures/`. Everything touching
-  the local filesystem and the user's identity: two-phase stores, path confinement,
-  flat-file migration, temp sweeping, the one way a committed file is replaced, XDG
-  resolution, and cookie extraction from a live browser DB. What goes wrong here is an
-  unverified file adopted as verified, a path from the committed lockfile escaping the
-  library root, and a stale cookie set read from a checkpointed DB.
+  the local filesystem and the user's identity: two-phase stores, path confinement
+  (`Canonical` plus an `os.Root`), flat-file migration, temp sweeping, the one way a
+  committed file is replaced, XDG resolution, and cookie extraction from a live browser DB.
+  What goes wrong here is an unverified file adopted as verified, a path from the committed
+  lockfile escaping the library root (by its spelling or through a symlink), a path that
+  confines on one platform and escapes on another, a stale cookie set read from a
+  checkpointed DB, and a container jar signed into another account outranking the default
+  one.
 - **CLI & selection page** — `main.go`, `main_test.go`, `audit_test.go`, `internal/web/`,
   `config.example.toml`, `synty-sync.example.toml`. Flag parsing and subcommand dispatch,
   the config → session → client wiring, report printing, the exit status, and the local
   page `select` serves. What goes wrong here is a stray positional swallowing the flags
   after it, an error losing the sentinel a caller checks, a failure class that stops
   moving the exit status, a submission that rewrites the committed allowlist with less
-  than the user chose, and a request from off this machine or another origin reaching
-  `/save`.
+  than the user chose (or from a wrong-account library), a second save accepted and then
+  dropped, and a request from off this machine or another origin reaching `/save`.
 - **Distribution** — `internal/selfupdate/`, `internal/releaseyml/`, `install.sh`,
   `install_test.go`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`. How the
   binary is built, released, installed, and replaced in place. What goes wrong here is a
   non-executable asset swapped over a working binary, a platform label that names an asset
-  no release publishes, a token reaching an error message, and a release path that skips
-  the checks a merge would have run.
+  no release publishes, a token reaching an error message or a host other than
+  `https://api.github.com`, an action pinned by tag rather than commit, and a release path
+  that skips the checks a merge would have run.
 
 For each sub-agent, provide:
 - The full list of files in its area, not a diff.
@@ -168,25 +182,40 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   store labels a bundled file per order item, so two in-scope owners reading their own rows
   commit two versions, two variants or two advertised sizes for one `fileId` at one sha.
   `applyResolved` hides it, so it only surfaces on the verdicts that resolve nothing.
-- **An expired session must never overwrite the lockfile.** `portal.Enumerate` returns
-  `ErrExpiredSession` when a zero-anchor page lacks the logged-in sentinel, on **every**
-  page of the walk, not just page 1. `ItemFiles` returns it too, for a session that expires
-  part way through the item-page fetches: a logout shell carries none of the parser's
-  selectors, so it checks `HasLibrarySentinel` before reporting a parse failure as changed
-  markup. `syncer.ErrEmptyLibrary` is the second half: an enumeration that comes back empty
-  while the lockfile holds packs is refused rather than written. Violation: any path that
-  writes the lockfile after an enumeration or item-page error, any wrap that loses
-  `errors.Is` identity (`%v` instead of `%w`, a string-matched error, a swallowed one), any
-  zero-anchor page treated as the terminator without the sentinel check, and an item-page
-  parse error returned without it. Trace `Enumerate` → `syncer.Run` → `main.run`;
-  `explainSession` wraps it and must keep the sentinel.
+  A prior entry with `fileId` 0 can match nothing, so `checkFileIDs` refuses it before the
+  sweep. Pruning a `Changed` file's prior copy goes through `removeSuperseded`, which
+  compares with `cache.SamePath` and `cache.SameFile` and refuses any path in
+  `claimedPaths` (recorded or resolved for another `fileId`). Violation: a raw string
+  comparison of a recorded path against a derived one, or a prune that can delete bytes
+  another entry records.
+- **An expired session never replaces a record with its own view.** `portal.Enumerate`
+  returns `ErrExpiredSession` when a zero-anchor page lacks the logged-in sentinel, on
+  **every** page of the walk, not just page 1. `ItemFiles` returns it too, for a session
+  that expires part way through the item-page fetches: a logout shell carries none of the
+  parser's selectors, so it checks `HasLibrarySentinel` before reporting a parse failure as
+  changed markup. Either aborts `syncer.Run` before the lockfile is written.
+  `syncer.ErrEmptyLibrary` is the second half: an enumeration that comes back empty while
+  the lockfile holds packs is refused rather than written. During the download pass, a
+  document answer makes `portal.Resolve` (Content-Type) or `syncer.download` (body sniff) ask
+  `Client.CheckSession`, and a logged-out answer wraps `ErrExpiredSession`; the pass stops
+  there, as on an interrupt, and a real run saves the lockfile with what it verified plus
+  every unreached file given its prior record by `carryUnreached` (a tracked copy as itself,
+  never `unresolved`), then returns the report with the error. Violation: any path that
+  writes the lockfile after an enumeration or item-page error, an unreached file rebuilt
+  untracked or marked unresolved, a dry run that writes, any wrap that loses `errors.Is`
+  identity (`%v` instead of `%w`, a string-matched error, a swallowed one), any zero-anchor
+  page treated as the terminator without the sentinel check, and an item-page parse error
+  returned without it. Trace `Enumerate` → `syncer.Run` → `main.run`; `explainSession`
+  wraps it and must keep the sentinel.
 - **Selection is opt-in, and never silently widened or wiped.** New packs are reconciled
   into the manifest **disabled**; `sync`/`status` act only on enabled packs, and
   `syncer.Options.PackSelected` is required rather than defaulting to "everything owned".
   `select` rewrites the committed allowlist from the page's response, so it drops slugs the
   page never offered (a stale tab) and refuses an empty submission while packs are enabled.
-  Violation: a nil-selection fallback that means "all", a save path that writes a set the
-  page did not produce, or a disabled pack whose item page still gets fetched. The page
+  Before serving, `selectPacks` refuses an empty enumeration against a populated manifest
+  and a library that owns none of the enabled packs (a wrong-account session). Violation:
+  a nil-selection fallback that means "all", a save path that writes a set the page did
+  not produce, or a disabled pack whose item page still gets fetched. The page
   decides the selection and nothing else: `selectPacks` re-reads the manifest once `Serve`
   returns, because the wait is a person's and `Save` re-encodes the whole file. Saving the
   copy loaded before the page opened silently reverts any hand edit made meanwhile (a
@@ -223,27 +252,36 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   lockfile are confined to the library root.** Applies to `cache.Store`, `lockfile.Save`,
   `manifest.Save`, and `selfupdate.replaceBinary`. The lockfile is committed and travels
   with the consuming project, so `cachePath` values read back from it are not the running
-  user's to trust: `cache.resolve` confines them, and `Verify`, `VerifyDeep`, `Head`, `Hash`
-  and `Remove` must all go through it. Portal-derived components go through `safeIdentity`
-  and `cleanBase` instead, since a signed URL or a `Content-Disposition` can carry a path.
-  `Migrate` must never rename a flat file over a copy already in the layout, since the
-  caller hashes whatever lands there and records that sha. Violation: a write that truncates
-  the target first, a rename across filesystems with no copy fallback, a path built by
-  string concatenation, or a new cache accessor that joins `relPath` without confining it.
+  user's to trust. `cache.Canonical` spells them in slash space and refuses `\`, `:`, a
+  `..` escape and a Windows device name identically on every platform; `rooted` then hands
+  the name to an `os.Root` opened on the library, so a symlinked segment cannot leave the
+  tree. `Verify`, `VerifyDeep`, `Head`, `Tail`, `Hash`, `Remove`, `SameFile` and
+  `Store`/`Commit`/`Discard`/`Migrate`/`Locate`/`SweepTemps` all act through the root.
+  Portal-derived components go through `safeIdentity` (`safeName`: no separator, colon,
+  device name or temp prefix) and `cleanBase` instead, since a signed URL or a
+  `Content-Disposition` can carry a path, and a name `Store` accepts must be one
+  `Canonical` accepts. `Migrate` must never rename a flat file over a copy already in the
+  layout, since the caller hashes whatever lands there and records that sha. Violation: a
+  write that truncates the target first, a rename across filesystems with no copy fallback,
+  a path built by string concatenation, a cache operation on a joined path rather than
+  through the root, or a check that answers differently on Windows than on Linux.
 - **Nothing unverified ever holds a real cache path.** `cache.Store` streams into a
   `.synty-dl-*` temp and stops there, returning a `*Pending` the caller `Commit`s or
   `Discard`s; renaming inside `Store` would strand a rejected body exactly where the next
   run's adopt scan takes it for genuine. A download that answers with a document is refused
   twice — `portal.ErrNotAPackage` on Content-Type before streaming, `syncer.ErrNotAPackageBody`
   on the delivered bytes — and both are permanent, since no retry turns a login page into a
-  pack. Adoption (`adoptable`) runs the same sniff plus `wholeArchive`, a zip
-  end-of-central-directory check, because it is the one path into the lockfile that never
-  consults `classify`, a cache written before these guards existed can hold error pages
-  under exactly the right names, and a copy that stopped part way still begins with an
-  archive's magic. The temp prefix is skipped by `Migrate`, `Locate` and the adopt scan,
-  since a partial transfer can normalize onto a wanted name. Violation: a `Commit` before the sniff, an adopt path that hashes without
-  sniffing or without `wholeArchive`, a sniff loosened to accept text, or a scan that stops
-  skipping `tempPrefix`.
+  pack. Downloads (`looksLikePackage`) and adoption (`adoptable`) both add `wholeArchive`, a
+  zip end-of-central-directory check whose `ErrTruncatedArchive` is permanent too, because
+  a copy that stopped part way still begins with an archive's magic. Adoption is the one
+  path into the lockfile that never consults `classify`, and a cache written before these
+  guards existed can hold error pages under exactly the right names; its checks run inside
+  `Migrate`/`Locate` through the `accept` predicate, so the first acceptable copy in
+  `inPreferenceOrder` wins rather than the preferred one being refused alone. The temp
+  prefix is skipped by `Migrate`, `Locate` and the adopt scan, since a partial transfer can
+  normalize onto a wanted name. Violation: a `Commit` before the checks, a download or adopt
+  path that skips the sniff or `wholeArchive`, a sniff loosened to accept text, or a scan
+  that stops skipping `tempPrefix`.
 - **A failed download fails its file, not the run.** The lockfile is still written —
   aborting would throw away the record of everything the run did download. Only failures a
   later run could clear move the exit status: `Report.ActionableFailures` excludes
@@ -251,8 +289,10 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   exit status from it. A file that already had a verified copy keeps its record when the
   *update* fails, at the version those bytes actually are; every other class reaches the
   failure path with no good prior copy and must say so through `verdicts.unresolved`, so
-  every owning pack agrees. Violation: a download error returned from `Run` instead of
-  recorded, a `Gone` failure counted into the exit status, a failed `Changed` update
+  every owning pack agrees. An interrupt or a logged-out session is not a per-file verdict:
+  it ends the pass (see the expired-session invariant) rather than failing every file left.
+  Violation: a download error returned from `Run` instead of recorded, a cancellation
+  recorded as a file failure, a `Gone` failure counted into the exit status, a failed `Changed` update
   rebuilt from the live page (dropping the path and sha while the bytes stay on disk), or
   an in-scope owner marked untracked while an out-of-scope one keeps the record.
 - **No account identity in the repo, in output, or in errors.** The customer id, account
@@ -260,10 +300,13 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   hard-coded, committed, logged, or embedded in an error message. Portal URLs carry the
   customer id in the path and the email in the query, so transport errors (`*url.Error`
   quotes the whole URL) and parser errors (which fire exactly when an anchor's shape changes)
-  go through `Client.redact` / `redactErr`, and a download href — which carries the email
-  too — goes through `transportCause`, which drops the URL entirely. Violation: a new error
-  path that formats a raw URL, an absolute machine path or customer id in code, or a fixture
-  regenerated without the scrub map. The `internal/fixtures` guard test must stay green.
+  go through `Client.redact` / `redactErr`, and a download href (which carries the email
+  too) goes through `transportCause`, which drops the URL entirely. `Client.Cookie` is a
+  `portal.Credential`, whose `Format` and `MarshalText` render `[redacted]`, and
+  `session.Resolved` prints only its `Path` (`Header` is `json:"-"`). Violation: a new error
+  path that formats a raw URL, a cookie held as a plain `string` where a `%v` can reach it,
+  an absolute machine path or customer id in code, or a fixture regenerated without the
+  scrub map. The `internal/fixtures` guard test must stay green.
 
 **Correctness**
 
@@ -271,17 +314,25 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   each branch against its condition: `!hasPrior` → `New`; `!prior.Tracked` → `DownloadNow`;
   version differs → `Changed`; empty `CachePath` or a failed `cacheOK` → `CacheMissing`;
   else `Unchanged`. A wrong branch means a missed download or a needless multi-GB refetch.
+  `Classes()` is the one list of classes, and `main.printReport`'s tally iterates it, so a
+  class missing from it drops out of the summary while still counting toward the total.
   Tier 1.
-- Adoption is the path around `classify`, so its entry conditions carry the weight instead:
-  both adopt loops skip a fileId whose prior record is `Tracked`, `Migrate` moves only files
-  no lockfile tracks, and `status` (`DryRun`) adopts read-only with the sniff standing in for
-  the hash. A loosened condition moves unverified content over a verified copy and repoints
-  the lockfile at it. Tier 1.
+- Adoption is the path around `classify`, so its entry conditions carry the weight instead,
+  and `adoptCandidates` states them once for both adopt loops: an untracked fileId, or one
+  tracked at a version other than the live one (the would-be `Changed` file, whose new
+  version another project may already have fetched into the user-scoped library). A fileId
+  tracked at the live version is never a candidate. For the `Changed` case the prior
+  record's own path is refused by the `accept` predicate (`SamePath` or `SameFile`), since
+  those bytes are the old version whatever they are named, and the prior copy is pruned
+  after adoption through `removeSuperseded`. `status` (`DryRun`) adopts read-only with the
+  checks standing in for the hash, and neither migrates nor prunes. A loosened condition
+  moves unverified content over a verified copy and repoints the lockfile at it. Tier 1.
 - The retry policy differs by layer, deliberately, and the asymmetry is easy to "fix" into a
   bug. Page fetches (`portal.transientStatus`) retry 5xx, 429, and 408 and fail fast on
   every other 4xx, **403 included**. Downloads (`syncer.permanentDownloadFailure`) retry 5xx,
-  429, and **403**, because a 403 there is an expired CloudFront signature that the next
-  attempt re-signs; it stops immediately on either not-a-package sentinel. Confirm each list
+  429, 408, and **403**, because a 403 there is an expired CloudFront signature that the next
+  attempt re-signs; they stop immediately on either not-a-package sentinel and on
+  `ErrTruncatedArchive`. Confirm each list
   still matches its comment, and that `retry.Stop`-wrapped errors still unwrap for
   `errors.Is`. Tier 1.
 - Every download retry must resolve a **fresh** signed URL: `downloadWithRetry` calls
@@ -294,8 +345,12 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 - `cache.normalizeName` and the `Migrate`/`Locate` matching: `normalizeName` drops any
   extension (so a `.unitypackage` folds in the same way a `.zip` does), strips `(N)`
   collision suffixes, and flattens variant-rendering differences (`Source_Sprites` vs
-  `SourceSprites`). A key that cannot match means gigabytes re-downloaded silently; a key
-  that matches too loosely adopts the wrong bytes. Tier 2.
+  `SourceSprites`). Several names can match one wanted file; `firstAccepted` sorts them
+  with `inPreferenceOrder` (least normalizing first, stable) and returns the first the
+  caller's `accept` takes, and `Migrate` leaves every other one, refused ones included,
+  flat. A key that cannot match means gigabytes re-downloaded silently; a key that matches
+  too loosely adopts the wrong bytes; checks run after the choice rather than inside it let
+  a bad preferred copy mask a good one. Tier 2.
 - `model.Slug` and `FileEntry.Key()` are the identity rules the lockfile and cache are keyed
   by. Two display names collapsing to one slug, or a `Key()` change, silently rewrites
   identity across the whole lockfile. Tier 1.
@@ -325,23 +380,36 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
   (`io.MultiWriter`), and the recorded `sizeBytes` is the actual byte count, not the
   portal's rounded label size (`advertisedSize`, refreshed every run, is the label). Tier 1.
 - Pruning a prior version is best-effort but must not vanish: a failed prune leaves an
-  orphaned file in the cache with nothing recording it, so it has to be reported. Tier 2.
+  orphaned file in the cache with nothing recording it, so it has to be reported. A prune
+  that fires when it should not is worse: `removeSuperseded` must treat a respelled or
+  case-folded path as the file just written, and leave a path another fileId claims. Tier 1
+  for a prune that can delete recorded bytes, Tier 2 for one that goes unreported.
+- `cache.Remove` and a failed or discarded `Store` prune the `<fileToken>/` they leave empty
+  (`pruneEmptyDirs`), never past the library root and never through a symlink. Tier 2.
 - `cache.SweepTemps` runs before enumeration on a real run only, against
   `abandonedTempAge`, passed as a duration rather than a cutoff instant so a sign the wrong
   way round cannot delete every in-flight transfer. It has to stay long enough that a
-  concurrent run's transfer survives it. Tier 1 if it can delete a live download.
+  concurrent run's transfer survives it. It walks the root's own FS, so a library root that
+  is a symlink is descended while a symlinked directory inside it is not. Tier 1 if it can
+  delete a live download. `atomicfile.Write` keeps a separate sweep of its own temp pattern
+  beside the destination, at one hour.
 
 **Failure model & errors**
 
 - Errors callers inspect must be wrapped with `%w` and matched with `errors.Is`/`errors.As`,
   never by string. `portal.ErrExpiredSession`, `portal.ErrNotAPackage`, `portal.ErrStalled`,
-  `syncer.ErrNotAPackageBody`, `syncer.ErrEmptyLibrary`, `portal.StatusError` (via
+  `syncer.ErrNotAPackageBody`, `syncer.ErrTruncatedArchive`, `syncer.ErrEmptyLibrary`,
+  `portal.StatusError` (via
   `StatusOf`), and `retry.Stop`'s marker are what carry meaning across package boundaries.
   Tier 1/2.
 - Swallowed errors: `_ =` on a write, close, or download that matters; an error logged and
   dropped where the run should abort. Tier 1 if it hides a failed download or a corrupt
   write. `drainClose` deliberately discards, which is correct; a new one may not be.
 - `context.Context` threaded through every HTTP call and download, and cancellation honored.
+  Long local reads take one too (`cache.Hash`, `VerifyDeep`, `Migrate`): main's signal
+  handler takes SIGINT's default action away for the run, so a read that ignores the
+  context ignores Ctrl-C until a multi-gigabyte file is done. A probe the interrupt cut
+  short answers false, so `Run` checks `ctx.Err()` before acting on a `classify` verdict.
   A download carries no whole-request deadline (a pack runs to gigabytes), so the bounds
   that stand in for it must all survive: `Limits.PageTimeout` per page attempt,
   `Limits.HeaderTimeout` until the response headers arrive (the stall guard only starts
@@ -356,23 +424,29 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 
 **Lockfile & manifest stability**
 
-- The lockfile must marshal deterministically for minimal diffs. `MarshalIndent` sorts JSON
-  map keys, so any slice written must be sorted by a stable key. A timestamp beyond
+- The lockfile must marshal deterministically for minimal diffs. `lockfile.Save` encodes
+  through a `json.Encoder` (indented, HTML escaping off), which sorts map keys, so any slice
+  written must be sorted by a stable key. A timestamp beyond
   `generatedAt`, random ordering, or a map iterated into a slice without sorting churns the
   file: Tier 2, or Tier 1 if it perturbs identity or the tracked set.
 - The manifest must round-trip without dropping packs, losing `variant_includes`, or
   flipping `enabled`, and `Reconcile` must add new packs disabled. `Save` sorts a copy of
-  `Packs`, since the value receiver shares the caller's backing array. Tier 1/2.
+  `Packs`, since the value receiver shares the caller's backing array. `Load` refuses two
+  `[[pack]]` entries for one slug, since `EnabledSet` and `Reconcile` disagree over which
+  wins. Tier 1/2.
 
 **Paths & portability**
 
 - Config, state, and library paths resolve through the documented precedence.
   `config.ResolveDir` picks the config dir: `--config` › `$SYNTY_CONFIG_DIR` ›
-  `$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`. Settings then layer as built-in
-  defaults › `config.toml` › env (`SYNTY_CUSTOMER_ID`, `SYNTY_LIBRARY`) › flags, the last
-  applied in `main.applyFlags` after `config.Load` returns; the cache default is
-  `$XDG_DATA_HOME/synty-sync` › `~/.local/share/synty-sync`. No baked-in machine path, no
-  hard-coded `HOME`.
+  `$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`, and returns an error when a dir
+  the user named does not exist or is not a directory. Settings then layer as built-in
+  defaults › `config.toml` › env (`SYNTY_CUSTOMER_ID`, `SYNTY_LIBRARY`) › flags, all inside
+  `config.Load(dir, config.Flags{...})`; the cache default is `$XDG_DATA_HOME/synty-sync` ›
+  `~/.local/share/synty-sync`, resolved only when no layer set one, and an error (never a
+  relative path) when neither is available. A `concurrency` below 1 is refused, in the
+  file by `Load` and on the flag by `main.run`. `ExpandHome` accepts either separator after
+  `~` on Windows. No baked-in machine path, no hard-coded `HOME`.
   The cache deliberately lives in data, not `~/.cache`, so an OS cache cleaner cannot wipe a
   multi-GB library. Tier 1.
 - `filepath` for on-disk paths, `path` for the forward-slash forms stored in the lockfile.
@@ -381,25 +455,37 @@ pin these rules, so a change that makes one fail is a finding, not a test to upd
 **Session & self-update**
 
 - Cookies are forwarded, not guessed: every `syntystore.com` cookie is sent rather than one
-  the tool picked. The Gecko reader must copy the DB with its `-wal`/`-shm` sidecars (a
-  running browser leaves recent writes uncheckpointed, so reading the main file alone
-  returns a stale set and the user is told their fresh session expired), must never write to
-  the source, and must treat `#HttpOnly_` as a marker rather than a comment, since the
-  gating cookie is HttpOnly. An unreadable DB or a profile with no store cookies is a
-  reportable error, not an empty header that resurfaces downstream as "expired session".
-  Tier 1/2.
+  the tool picked. The Gecko reader must copy the DB with its `-wal` sidecar and not the
+  `-shm` (a running browser leaves recent writes uncheckpointed, so reading the main file
+  alone returns a stale set and the user is told their fresh session expired; SQLite
+  rebuilds the `-shm`, and copying it second could describe frames the copied `-wal`
+  lacks), must never write to the source, and must treat `#HttpOnly_` as a marker rather
+  than a comment, since the gating cookie is HttpOnly. Profile ranking reads both sidecars'
+  mtimes (`livenessSidecars`). Rows are grouped per `originAttributes` jar and merged by
+  `mergeJars`: the default jar decides every name it holds, other jars fill only missing
+  names, most recent first, and `privateBrowsing` rows are skipped. A pasted curl is split
+  by `curlArguments` the way its shell would (single, ANSI-C `$'…'`, double and cmd `^"…^"`
+  quoting) and read from `-H`/`--header` or `-b`/`--cookie`. An unreadable DB or a profile
+  with no store cookies is a reportable error, not an empty header that resurfaces
+  downstream as "expired session". Tier 1/2.
 - `selfupdate`: token resolution order (`GITHUB_TOKEN` › `GH_TOKEN` › `gh auth token`), the
   executable-magic sniff before swapping an asset over a working binary, the rename-aside
   dance that lets the running image be replaced on Windows (including naming the aside copy
-  when a restore fails), and no staging file left behind on any path. `install.sh` resolves
-  tokens the same way and should not drift from it. Tier 1/2.
+  when a restore fails), the replaced binary's mode kept (plus owner exec, `installMode`),
+  the zip reader's CRC check refusing a corrupt entry, and no staging file left behind on
+  any path. `selfupdate.Run(ctx, current, want Requested)` takes the asked-for version as
+  its own type. `install.sh` resolves tokens the same way and should not drift from it.
+  Tier 1/2.
 - The platform labels are shared across three files and nothing but a test binds them:
   `release.yml` publishes `mac-intel` / `mac-apple` / `linux-intel` / `linux-arm64` / `win`,
   `selfupdate.assetSuffix` decides which one this platform wants (`platformAsset` then
   finds it in the release), and `install.sh` derives them from `uname`. A label that names
   an asset no release publishes fails only at update time. Both directions are bound for
   the updater in `internal/selfupdate/audit_test.go` and for the installer in
-  `install_test.go`, against `release.yml` itself rather than a copied list. Tier 1.
+  `install_test.go`, against `release.yml` itself rather than a copied list. Every
+  released platform must also have an executable signature in `checkMagic`
+  (`TestEveryReleasedPlatformHasAnExecutableSignature`), and `check_executable` refuses an
+  OS it has none for. Tier 1.
 
 **Duplication and extraction**
 
@@ -463,23 +549,36 @@ OS pick the port — so flag anything that reintroduces either.
 - `install.sh` runs under `set -euo pipefail`, which is why every command substitution is
   guarded with `|| true` and checked explicitly; check that every pipeline still behaves
   under it, that variables are quoted, that `STAGE` is cleared on every exit path, and that
-  a partial download cannot be moved into `~/.local/bin` as a working binary.
+  a partial download cannot be moved into `~/.local/bin` as a working binary (it is
+  flushed with `sync` before the `mv`, and `check_executable` has an error arm for an OS
+  it has no signature for). A token goes only to `https://api.github.com` unless a test
+  sets `SYNTY_INSTALL_ALLOW_TOKEN`, and the asset URL taken from the release body must sit
+  under that API's `/repos/<repo>/releases/assets/` path before the token is sent with it.
+  Failures are reported by HTTP status, not by curl's exit code.
 - The workflows: `release.yml` must keep calling `ci.yml` as its gate rather than
   reimplementing the checks, `go-version-file: go.mod` must stay the single source of the Go
-  version, the third-party release action must stay pinned to a commit, and permissions must
-  stay minimal (`contents: read` for CI, `write` only for the release job). Tier 1 for
-  anything that lets an untested commit reach a release.
+  version, every action (first-party included) must stay pinned to a 40-hex commit with its
+  exact `# vX.Y.Z` beside it (`TestEveryActionIsPinnedToACommit`), the tracked-binary step
+  must keep proving its pattern against its probe builds, the Windows/macOS job must keep
+  running the suite, and permissions must stay minimal (`contents: read` for CI, `write`
+  only for the release job). `.gitattributes` pins LF and leaves `testdata/` raw; the tests
+  read workflows and scripts byte for byte. Tier 1 for anything that lets an untested
+  commit reach a release.
 
 **Selection page (CLI & selection page area only)**
 
-- `/save` rewrites a committed file, so `web.Serve` holds three guards and each covers a
-  case the others miss: the per-invocation form token (compared from `PostForm`, never the
-  query string), the peer address checked before the `Host` header (on a wildcard bind a
-  remote client can claim a loopback `Host`), and the `Host` check itself (a page that
-  points its own name at a loopback address is otherwise same-origin with this server).
+- `/save` rewrites a committed file, so the handlers `web.newHandler` builds hold three
+  guards and each covers a case the others miss: the per-invocation form token (compared
+  from `PostForm`, never the query string), the peer address checked before the `Host`
+  header (on a wildcard bind a remote client can claim a loopback `Host`), and the `Host`
+  check itself (a page that points its own name at a loopback address is otherwise
+  same-origin with this server; a portless `Host` reads as port 80).
   `main.listenLocal` refuses a non-loopback `--addr` to match. Violation: a handler that
   skips any of the three, a token accepted from `Form`, or a bind that can reach a
   non-loopback interface. Tier 1.
+- A page takes exactly one save (`sync.Once`; a later one gets 409), and `serveHandler`
+  drains a save accepted during shutdown so it wins over the interrupt. A render failure is
+  a 500, never a blank 200. Violation: a save answered as taken that nobody reads. Tier 1.
 
 **Cross-boundary consistency (flag here, synthesized in Step 4)**
 
@@ -498,15 +597,23 @@ no single agent could do:
    `cache.RelPath`'s identity keying, and the lockfile `File` schema. Confirm a file owned
    by several packs downloads once and that every owning pack's entry ends the run agreeing
    on `cachePath`, `version`, `sha256`, and `sizeBytes`, including when only some of its
-   owners were in scope and when the download failed.
-2. **Expired session, no lockfile write.** Trace `portal.Enumerate`'s sentinel check through
+   owners were in scope and when the download failed. Then trace a `Changed` file's prior
+   path through `adoptCandidates`' `notAt`, the `accept` predicate, and `removeSuperseded`
+   with `claimedPaths`, and confirm no prune can delete the copy just written or one
+   another fileId records.
+2. **Expired session, no record replaced.** Trace `portal.Enumerate`'s sentinel check through
    `getBody`'s retry, `syncer.Run`'s `ErrEmptyLibrary` guard, `runSyncOrStatus`, and
    `explainSession` into `main.run`. Confirm no path reaches `lockfile.Save` once
-   enumeration failed, and that `errors.Is(err, portal.ErrExpiredSession)` still holds at
-   the top.
+   enumeration or an item page failed, and that `errors.Is(err, portal.ErrExpiredSession)`
+   still holds at the top. Then trace a logged-out download: `portal.Resolve` and
+   `syncer.download` → `CheckSession` → the `sessionLost` break in `Run` →
+   `carryUnreached` → `buildLockfile` → `lockfile.Save`, and confirm the saved file holds
+   only verified bytes plus unreached files' prior records, unchanged, and that a dry run
+   returns before writing.
 3. **Opt-in selection.** Trace a newly-owned pack from `Enumerate` through
    `manifest.Reconcile` (added disabled), `EnabledSet`, `syncer.Options.PackSelected`, and
-   `filterPacks`. Then trace the write-back path: `web.Serve`'s `known`-slug filter →
+   `filterPacks`. Then trace the write-back path: `selectPacks`'s empty-library and
+   wrong-account refusals → `web.Serve`'s `known`-slug filter and single save →
    `selectPacks`'s empty-submission refusal → the post-`Serve` `manifest.Load` →
    `manifest.SetEnabled` → `manifest.Save`, and confirm no route rewrites the allowlist
    with anything other than what the user chose, or any other field with anything other
@@ -529,11 +636,12 @@ no single agent could do:
    bytes (`cache.Store`, `cache.Migrate`, `lockfile.Save`, `manifest.Save`,
    `selfupdate.replaceBinary`, `install.sh`) against the temp-file + rename contract, and
    every site that consumes a `cachePath` from the lockfile (`Verify`, `VerifyDeep`, `Head`,
-   `Hash`, `Remove`, and the syncer's prune) against `cache.resolve`. Then follow the bytes
-   from `portal.Resolve`'s Content-Type refusal through `cache.Store`'s `*Pending`,
-   `looksLikePackage`, and `Commit`, and separately through `Migrate`/`Locate` → `adoptable`
-   → `cache.Hash`. Confirm no route commits or records bytes that skipped a check, and that
-   an accessor joining a lockfile path without confining it does not exist.
+   `Tail`, `Hash`, `Remove`, `SameFile`, and the syncer's prune) against `cache.Canonical`
+   and the `os.Root` that `rooted` opens. Then follow the bytes from `portal.Resolve`'s
+   Content-Type refusal through `cache.Store`'s `*Pending`, `looksLikePackage` (sniff plus
+   `wholeArchive`), and `Commit`, and separately through `Migrate`/`Locate` → `accept` →
+   `adoptable` → `cache.Hash`. Confirm no route commits or records bytes that skipped a
+   check, and that no cache operation acts on a joined path outside the root.
 7. **A failed file, not a failed run.** Trace a download error from `downloadWithRetry`
    through the `Failures` append, `verdicts.unresolved`, `buildLockfile`'s carried and
    rebuilt halves, `Report.ActionableFailures`, and `main.runSyncOrStatus`'s exit status.
@@ -544,7 +652,8 @@ no single agent could do:
 8. **No account identity anywhere.** Grep the tree for a hard-coded customer id, email,
    cookie, token, or absolute home path. Then read every error-formatting site in
    `internal/portal` and `internal/selfupdate` and confirm each raw URL or API body goes
-   through `redact` / `redactErr` / `transportCause` or omits the secret. Confirm the
+   through `redact` / `redactErr` / `transportCause` or omits the secret, and that the
+   session travels only as a `portal.Credential` or `session.Resolved.Header`. Confirm the
    `internal/fixtures` guard would catch a leak into `testdata/`, and that `.gitignore` still
    covers `config.toml`, `*.curl`, `cookies.txt`, `synty-sync.toml`, and
    `synty-sync.lock.json`.

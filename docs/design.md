@@ -103,15 +103,35 @@ install), so a stray one is an error rather than silently swallowing the flags a
 
 Steps 3-4 run at small concurrency with polite backoff; this is the only per-run store load
 when nothing changed. Step 7 fails per file: the run continues, and the lockfile still
-records everything that succeeded.
+records everything that succeeded. An interrupt, or a session found logged out during step 7,
+ends the pass instead of failing each remaining file; step 8 still runs (see Failure
+handling).
 
 ## Session handoff
 
 Primary: read cookies directly from Firefox. The store cookies live in
 `~/.mozilla/firefox/<profile>/cookies.sqlite` in plaintext; copy the (possibly locked) DB to
-a temp path, query rows for `host LIKE '%syntystore.com'`, and rebuild the Cookie header. The
-monthly run becomes just `synty sync`, auto-refreshed whenever the user has browsed the store.
-The `-wal` sidecar is copied with it, and when several profiles are in the running they are
+a temp path, query rows for `syntystore.com` and its subdomains, and rebuild the Cookie
+header. The monthly run becomes just `synty sync`, auto-refreshed whenever the user has
+browsed the store. Profile bases are per platform: the native, snap and flatpak layouts on
+Linux, `~/Library/Application Support` on macOS, and on Windows `%APPDATA%` (read from the
+variable, since Folder Redirection moves it off the profile) plus the Microsoft Store
+Firefox's package container under `%LOCALAPPDATA%\Packages`, matched by a glob because the
+container is named for an undocumented publisher hash. The run prints which database it
+read (`session: read from <path>`) and names it again in the expired-session hint, since
+which profile a search settled on is otherwise invisible.
+
+Rows are grouped by `originAttributes`, which gives every cookie jar its own value.
+Multi-Account Containers keeps a container's cookies in a separate jar, so one profile can
+hold two sessions for two accounts, and ranking every row together lets a container left
+signed into the other account supply the header, or half of it. The default jar decides
+every name it holds; the other jars, most recently used first, fill only the names it
+lacks, which keeps a sign-in made only inside a container (or under first-party isolation,
+where every cookie carries attributes) working. Private-browsing rows are never read: they
+are meant to die with the window.
+
+The `-wal` sidecar is copied with it (the `-shm` index is not: SQLite rebuilds it from the
+`-wal`), and when several profiles are in the running they are
 ranked on the newest of the database and its sidecars: a WAL-mode database — which is every
 browser that is actually open — takes its writes in the sidecar and moves the main file only
 on a checkpoint, so the main file's mtime reads a live profile as older than it is. That is
@@ -120,7 +140,11 @@ wins the tie, and the run then reads real but months-old cookies and reports a s
 user just refreshed as expired.
 
 Fallback: `--cookies <file>` accepts a pasted `curl` command or a `cookies.txt`, for
-portability or when the browser path doesn't apply.
+portability or when the browser path doesn't apply. A pasted curl is split the way the shell
+it was copied for would split it, since DevTools writes it in whichever quoting the value
+needs: POSIX single quotes, ANSI-C `$'…'`, double quotes with `\"`, or the Windows cmd
+`^"…^"` form. The cookie is taken from `-H`/`--header 'Cookie: …'` or from `-b`/`--cookie`
+(a `-b` value with no `=` is a cookie-jar filename, not a cookie, and is skipped).
 
 `customerId` is stable but account-identifying, so it is never committed: it comes from
 `SYNTY_CUSTOMER_ID` env, `--customer`, or a gitignored `config.toml` in the user config dir.
@@ -131,11 +155,16 @@ exact one.
 ## Lockfile
 
 Committed beside the project manifest as `synty-sync.lock.json`. JSON with sorted keys and
-stable formatting so a sync produces a minimal, readable diff. It and the manifest are both
-replaced through `internal/atomicfile`: a temp in the same directory, flushed, then renamed.
-The flush is the half that is easy to leave out and impossible to notice — renaming is atomic
-against a reader but says nothing about durability, so a crash can otherwise leave a
-full-length file of zeros where the record of every cached byte used to be. Keyed by a stable **pack slug**
+stable formatting so a sync produces a minimal, readable diff; HTML escaping is off, so a
+display name carrying `&` or `<` reads as itself rather than as `&`. It and the manifest
+are both replaced through `internal/atomicfile`: a temp in the same directory, flushed, then
+renamed. The flush is the half that is easy to leave out and impossible to notice: renaming
+is atomic against a reader but says nothing about durability, so a crash can otherwise leave
+a full-length file of zeros where the record of every cached byte used to be. A kill between
+the create and the rename leaves the temp behind in the directory the user commits, so each
+write first sweeps its own pattern's temps there that are more than an hour old. Every entry
+must carry a `fileId`: every lookup a run makes goes through it, so an entry without one (a
+hand edit or a merge) is refused, named, before anything is touched. Keyed by a stable **pack slug**
 derived from the library-list display name, because the file-label token is *not* stable
 within a pack (one pack's files can read `POLYGON_Pirate`, `POLYGON_Pirate_Pack`, and
 `POLYGON_Pirates_Pack`). The slug carries the whole of a pack's identity in both committed
@@ -213,7 +242,17 @@ The original filename comes from the final signed-URL path basename (it matches 
 `<fileToken>_<variant>_<version>.zip` convention). Files are deduped by `fileId`: the bundled
 `GENERIC_Particle_FX` lands once under `GENERIC_Particle_FX/` and every owning pack's lockfile
 entry points at it. On update the tool writes the new version and removes the prior file for
-that file identity, so a tracked entry and the bytes it names stay in step. A file that
+that file identity, so a tracked entry and the bytes it names stay in step. The prior path
+comes out of a committed, hand-editable file, so it is compared with the new one canonically
+(`./TOK/f.zip` is `TOK/f.zip`) and then by the filesystem (on a case-insensitive one
+`tok/f.zip` is the same file), never as a string, or the prune deletes the bytes the run just
+fetched; and a path any other `fileId` records is left alone with a warning, since a
+hand-merged lockfile can name one path twice. A `Changed` file's new version may already be
+on disk (the library is user-scoped and the lockfile project-scoped, so another project can
+have fetched it); a copy under the new version's name is adopted on the same terms as an
+untracked file, except at the prior record's own path, and the prior copy is then pruned the
+same way. Removing a file also removes the `<fileToken>/` it leaves empty, and a store that
+fails or is discarded does the same. A file that
 stops being tracked leaves its bytes behind instead of deleting them, and is reported rather
 than pruned (see Failure handling): the cache is the expensive half to rebuild, and a run
 that declined a file this time is not evidence the reader wants it gone. No backup and
@@ -228,12 +267,26 @@ item-page token, e.g. `Source_Sprites` vs `SourceSprites`, and carry `(N)` colli
 A name off the disk drops its extension, so a Unity pack's `.unitypackage` folds in the same
 way a `.zip` does; the synthetic `<token>_<variant>_<version>` key does not, since it has no
 extension and stripping one would truncate it at the first version rendered with a dot. When
-several names normalize onto one wanted file, exactly one is folded in — the one that needed
-the least normalizing — and the rest are left flat rather than stacked up in the layout with
-nothing recording them. Migration never replaces a copy already in the layout: the match is on name alone, and
-the adopted file's hash is what gets recorded, so overwriting would let a stale flat file be
-adopted as verified content. Cache paths read back from the lockfile are confined to the
-library root before use, since that file is committed and travels with the project.
+several names normalize onto one wanted file, they are tried in preference order (the one
+that needed the least normalizing first) against the same byte checks adoption runs, and the
+first that passes is folded in; the rest, refused ones included, are left flat rather than
+stacked up in the layout with nothing recording them. The checks go into the choice rather
+than running on what it returns, or a truncated canonical copy masks an intact `(1)` beside
+it and the file re-downloads in full. Migration never replaces a copy
+already in the layout: the match is on name alone, and the adopted file's hash is what gets
+recorded, so overwriting would let a stale flat file be adopted as verified content.
+
+Cache paths read back from the lockfile are confined to the library root before use, since
+that file is committed and travels with the project. A path is first put in one canonical
+spelling in slash space, which refuses a backslash, a colon, an escape through `..` and a
+Windows device name identically on every platform: `Z:..\..\x` cleans to itself on Windows
+and would confine on the machine that wrote it and escape on the one that read it. Every read,
+write, rename and delete then goes through an `os.Root` opened on the library, so a symlinked
+segment cannot carry it out of the tree; a `<fileToken>/` symlinked elsewhere fails its file
+once with the reason rather than storing bytes no later check can find. The library root itself
+may be a symlink, and the temp sweep descends it. Names the store supplies are held to the same
+rules (no separators, no colon, no device name, no temp prefix), so a name stored on one
+machine is one the other can resolve.
 
 ## Download integrity
 
@@ -243,7 +296,7 @@ the caller inspects the bytes and then `Commit`s or `Discard`s them. Renaming in
 would leave a window where an interrupt strands a rejected body exactly where the next run's
 adopt scan would take it for genuine.
 
-Three checks stand between a response and the lockfile:
+Four checks stand between a response and the lockfile:
 
 1. The client refuses a document `Content-Type` before streaming anything. An expired session
    and a CDN refusal both answer the download href with a login page or an XML error, often at
@@ -251,18 +304,25 @@ Three checks stand between a response and the lockfile:
 2. The syncer sniffs the delivered bytes for the response that claims to be an archive and is
    not. Only text is refused: an archive format this tool has not seen must not be turned
    away, but no archive begins with prose, and a zero-byte body is not a pack.
-3. `sha256` and the exact byte count are recorded from the committed file, and later runs
+3. A file whose leading bytes say it is a zip must carry its end-of-central-directory record.
+   A copy that stopped part way still begins with an archive's magic, and recording one takes
+   its own short bytes as the file's truth, after which every verify compares them against
+   themselves. The transport already fails a body that ends short of its length, so one that
+   arrives whole without the trailer is what the server holds.
+4. `sha256` and the exact byte count are recorded from the committed file, and later runs
    compare against them.
 
-Both rejections are permanent: no number of retries turns a login page into a pack. The
-same sniff runs on adoption, which is the one path into the lockfile that never consults
-`classify` — a cache written before these guards existed can hold error pages under exactly
-the right names. Adoption adds one check a fresh download does not need: a file whose leading
-bytes say it is a zip must carry its end-of-central-directory record, because a copy that
-stopped part way still begins with an archive's magic, and adopting it records its own short
-bytes as the file's truth. That is keyed on the bytes rather than the extension: the filename
-comes from a signed URL or from whoever placed the file, and the adopt scan matches a wanted
-file under any extension or none.
+Every rejection is permanent: no number of retries turns a login page into a pack, and
+refetching a short archive transfers the same short bytes. A document cannot say on its own
+whether it is a CDN refusal or a session that expired during the download pass, so on either
+document rejection the client asks the first library page for the logged-in sentinel, and a
+session found logged out is reported as `ErrExpiredSession` (see Failure handling) rather than
+as one more failed file. The same sniff and trailer check run on adoption, which is the one
+path into the lockfile that never consults `classify`, and a cache written before these guards
+existed can hold error pages under exactly the right names. The trailer check is keyed on the
+bytes rather than the extension: the filename comes from a signed URL or from whoever placed
+the file, and the adopt scan matches a wanted file under any extension or none. A container
+it cannot read (`.unitypackage`) passes through.
 
 The cache filename comes from the final signed-CloudFront URL path basename (the signed URL
 sets `Content-Disposition` to a bare "attachment"). The portal's label size is rounded (e.g.
@@ -291,7 +351,15 @@ sweep deletes and no scan can take back.
   page adds no packs it has not already seen, so a paginator that clamps an out-of-range
   page cannot loop forever; it is an error rather than a stop, since the packs gathered so
   far may be a truncated library and returning them is the outcome the sentinel exists to
-  prevent.
+  prevent. An item page that turns out to be a logout shell is reported the same way rather
+  than as changed markup.
+- **Interrupted, or logged out mid-download:** a Ctrl-C, or a download that finds the session
+  logged out, ends the download pass, since every file after it would fail for the same
+  reason. A real run still saves the lockfile: what the pass verified is recorded, and every
+  file it never reached keeps its prior record unchanged (a tracked copy is carried as itself,
+  unexamined), rather than being marked as looked for and not found. Nothing is lost and
+  nothing is replaced by an expired session's view; the run then exits with the error. A dry
+  run writes nothing either way.
 - **Empty library against a populated lockfile:** refused outright. A read that returns
   nothing is far more often markup that moved than a library someone emptied, and the
   lockfile is committed to someone's project.
@@ -319,7 +387,9 @@ sweep deletes and no scan can take back.
   as above. `status` compares the recorded byte count (cheap, and enough to see a truncation);
   `sync` also re-hashes, which is the only check that sees a mid-file corruption.
 - **De-owned packs:** a pack the library no longer lists is reported and its lockfile record
-  kept. One enumeration is not enough to erase a committed record.
+  kept. One enumeration is not enough to erase a committed record. The summary names the
+  first ten and counts the rest: a session for another account lists a library disjoint from
+  the lockfile, and a line per recorded pack buries everything printed around it.
 - **A file that stops being tracked is named on the way out.** A pack the store still lists
   keeps its entry, so a file the run declines never reaches `orphanedRecords`, but the entry
   is rebuilt untracked and takes its cache path and sha with it while the bytes stay on disk,
@@ -348,7 +418,19 @@ pack list, which is a purchase history. The peer comes first because the `Host` 
 client's to claim: on a wildcard bind, checking only the `Host` inverts, admitting a remote
 client that says `127.0.0.1` while refusing the browser on the machine the bind was aimed at,
 which can only send that machine's real address. `--addr` therefore takes a loopback address
-or nothing: a wider bind cannot widen the page's reach, only leave the port open.
+or nothing: a wider bind cannot widen the page's reach, only leave the port open. A page
+bound to port 80 is addressed with a portless `Host`, and that is accepted.
+
+A page takes exactly one save. `select` reads one selection and stops, so a second
+submission (a double click, another tab) is answered 409 rather than told it was taken while
+nobody reads it. A save accepted as the run is interrupted has already told the browser it
+was taken, so it wins over the interrupt and is written. A page that fails to render answers
+500 and says why on the terminal, rather than serving a blank 200.
+
+Before the page goes up, `select` refuses two libraries it cannot tell from a bad read: one
+that lists no packs while the manifest holds some, and one that owns none of the packs the
+manifest enables, which is what a session signed into another account enumerates. Either
+would rewrite the allowlist from a library that is not this project's.
 
 ## Configuration
 
@@ -356,27 +438,42 @@ Two scopes. The **user config** (`~/.config/synty-sync/config.toml`, not committ
 project) holds account identity and machine defaults: `customer_id`, `session_source`,
 `library_path`, `concurrency`. It resolves via `--config` › `$SYNTY_CONFIG_DIR` ›
 `$XDG_CONFIG_HOME/synty-sync` › `~/.config/synty-sync`, and the customer id may instead come
-from `SYNTY_CUSTOMER_ID` / `--customer`. The **project manifest** (`synty-sync.toml`,
+from `SYNTY_CUSTOMER_ID` / `--customer`. A config dir named by `--config` or
+`$SYNTY_CONFIG_DIR` must exist and be a directory: an absent `config.toml` is the ordinary
+first run, so a misspelled dir would otherwise read as no config and mirror gigabytes into
+the default library. The library defaults to `$XDG_DATA_HOME/synty-sync`, else
+`~/.local/share/synty-sync`; with neither available the run stops and names the ways to set
+it rather than writing into the working directory. A `concurrency` below 1, in the file or
+on the flag, is refused. The **project manifest** (`synty-sync.toml`,
 committed in the consuming repo, discovered by walking up from cwd or via `--manifest`) holds
-the project-scoped settings: `variant_includes` and the `[[pack]]` allowlist. The manifest
+the project-scoped settings: `variant_includes` and the `[[pack]]` allowlist. Two entries for
+one slug are refused, since the readers disagree over which wins. The manifest
 schema has no account field, so no account PII can be committed through it. Machine paths also
 via env (`SYNTY_LIBRARY`).
 
 ## Testing
 
 The suite is offline and hermetic: no network, no session, no customer id. `go test ./...`
-is the whole gate, and it is the gate CI and the release workflow run.
+is the gate CI and the release workflow run, under `-race` on Linux and plainly on Windows and
+macOS, where the executable signature, the installer's checks, the browser profile bases and
+the rename that replaces a running binary take their other branches. CI also cross-compiles
+every platform `release.yml` builds and refuses a tracked compiled binary (proving with probe
+builds that its pattern still matches one). `.gitattributes` pins LF in the working tree,
+since the tests read workflows and scripts byte for byte, and leaves `testdata/` untouched.
 
 - Real portal pages are checked in as parser fixtures, scrubbed of the email and customer id
   by `go run ./cmd/scrubfixtures` (never hand-edited). `internal/fixtures` fails the build if
-  either leaks back in. Unit tests assert the parser extracts the expected packs, variants,
+  either leaks back in, walking every `testdata/` directory in the repo (not dot- or
+  underscore-prefixed ones, nor a nested checkout) and refusing a committed SQLite database
+  or WAL, which is what a copied `cookies.sqlite` fixture would be. Unit tests assert the parser extracts the expected packs, variants,
   versions, sizes, and file ids, and the pagination walk runs against the real captures.
 - Diff logic is unit-tested against synthetic lockfile + enumeration pairs (new / changed /
   unchanged / variant-filtered). Whole runs go through `httptest` stores that can withhold a
   file, serve a login page where a pack belongs, or stop advancing their paginator.
 - Each package keeps its guard tests in `audit_test.go`, one per invariant, each carrying a
   comment naming the failure it prevents. A guard test that fails is a regression, not a test
-  to update.
+  to update. `install_test.go` guards `install.sh` and the workflows, including that every
+  action is pinned to a commit SHA with its exact version in a comment.
 
 ## Open questions
 
