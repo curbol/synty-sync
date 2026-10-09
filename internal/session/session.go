@@ -12,12 +12,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/curbol/synty-sync/internal/config"
 
@@ -92,24 +92,284 @@ func hostRank(host string) int {
 	}
 }
 
-// A Cookie value can contain the opposite quote char (Shopify's _consentik_cookie
-// holds JSON with double quotes), so match per outer-quote type: a single-quoted
-// header captures up to the next single quote, a double-quoted one up to the next
-// double quote. RE2 has no backreferences, so two patterns rather than one.
-var (
-	curlCookieSingle = regexp.MustCompile(`(?i)(?:-H|--header)\s+'Cookie:\s*([^']*)'`)
-	curlCookieDouble = regexp.MustCompile(`(?i)(?:-H|--header)\s+"Cookie:\s*([^"]*)"`)
-)
-
 // FromCurl extracts the Cookie header value from a pasted curl command.
 func FromCurl(content string) (string, error) {
-	if m := curlCookieSingle.FindStringSubmatch(content); m != nil {
-		return strings.TrimSpace(m[1]), nil
-	}
-	if m := curlCookieDouble.FindStringSubmatch(content); m != nil {
-		return strings.TrimSpace(m[1]), nil
+	if v, ok := cookieArgument(content); ok {
+		return v, nil
 	}
 	return "", fmt.Errorf("no Cookie header found in curl command")
+}
+
+// cookieArgument returns the cookie string a pasted curl command carries. Two flags
+// carry it: a browser that writes the jar as a header emits -H 'Cookie: …', and one that
+// uses curl's own cookie flag emits -b '…', whose value is the cookie string itself.
+func cookieArgument(content string) (string, bool) {
+	args := curlArguments(content)
+	for i := 0; i+1 < len(args); i++ {
+		switch a := args[i]; a {
+		case "-H", "--header":
+			if v, ok := cutHeader(args[i+1], "Cookie"); ok {
+				return v, true
+			}
+		case "-b", "--cookie":
+			// curl reads a value holding no "=" as the name of a cookie jar to load. A
+			// filename is not a cookie, and taking it as one sends the store the path.
+			if strings.Contains(args[i+1], "=") {
+				return strings.TrimSpace(args[i+1]), true
+			}
+		}
+	}
+	return "", false
+}
+
+func cutHeader(arg, name string) (string, bool) {
+	if len(arg) <= len(name) || !strings.EqualFold(arg[:len(name)], name) || arg[len(name)] != ':' {
+		return "", false
+	}
+	return strings.TrimSpace(arg[len(name)+1:]), true
+}
+
+// Quoting states for curlArguments, named for the shell construct each one is inside.
+const (
+	bare = iota
+	singleQuoted
+	doubleQuoted
+	ansiCQuoted
+	cmdQuoted
+)
+
+// curlArguments splits a pasted curl command into its arguments, undoing the quoting
+// of the shell it was copied for.
+//
+// DevTools writes the command for that shell, so an argument arrives in one of four
+// spellings: POSIX single quotes; ANSI-C $'…', which Firefox switches to when a value
+// holds a "'", a "!" or a byte outside printable ASCII; plain double quotes; and the
+// Windows cmd form, which escapes a backslash and a quote for the program's argument
+// parser, prefixes ^ to every byte cmd would act on, and wraps the result in ^". A
+// Cookie value holds quotes of either kind (Shopify's _consentik_cookie is JSON), so
+// matching one quote style with a pattern either misses the argument or stops at the
+// first escaped quote inside it.
+//
+// Nothing is unescaped in a context that does not escape: inside single quotes every
+// byte is literal, so a cookie value holding a ^ or a \ survives as itself.
+func curlArguments(content string) []string {
+	var (
+		args    []string
+		cur     strings.Builder
+		started bool
+		state   = bare
+	)
+	flush := func() {
+		if started {
+			args = append(args, cur.String())
+			cur.Reset()
+			started = false
+		}
+	}
+	for i := 0; i < len(content); i++ {
+		c := content[i]
+		next := byte(0)
+		if i+1 < len(content) {
+			next = content[i+1]
+		}
+		switch state {
+		case singleQuoted:
+			if c == '\'' {
+				state = bare
+				continue
+			}
+			cur.WriteByte(c)
+		case ansiCQuoted:
+			switch {
+			case c == '\'':
+				state = bare
+			case c == '\\' && next != 0:
+				decoded, n := ansiCEscape(content, i+1)
+				i += n
+				cur.Write(decoded)
+			default:
+				cur.WriteByte(c)
+			}
+		case doubleQuoted:
+			switch {
+			case c == '"':
+				state = bare
+			case c == '\\' && next != 0:
+				i++
+				cur.WriteByte(next)
+			default:
+				cur.WriteByte(c)
+			}
+		case cmdQuoted:
+			i = cmdQuotedByte(content, i, &cur, &state)
+		default:
+			switch {
+			case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+				flush()
+			case c == '\'':
+				state, started = singleQuoted, true
+			case c == '"':
+				state, started = doubleQuoted, true
+			case c == '$' && next == '\'':
+				state, started = ansiCQuoted, true
+				i++
+			case c == '^' && next == '"':
+				state, started = cmdQuoted, true
+				i++
+			case c == '^' && next == '^':
+				// cmd escapes a literal caret by doubling it.
+				i++
+				cur.WriteByte('^')
+				started = true
+			case c == '^' || c == '`':
+				// A line continuation (cmd, PowerShell), or a prefix on the byte after
+				// it, which keeps its normal meaning. Dropping the marker covers both.
+			case c == '\\':
+				if next == '\n' || next == '\r' {
+					continue
+				}
+				if next != 0 {
+					i++
+					cur.WriteByte(next)
+					started = true
+				}
+			default:
+				cur.WriteByte(c)
+				started = true
+			}
+		}
+	}
+	flush()
+	return args
+}
+
+// cmdQuotedByte consumes what starts at content[i] inside a ^"…^" argument and returns
+// the index of the last byte it consumed.
+//
+// The argument passes through two parsers. cmd goes first: the opening ^" escapes the
+// quote, so cmd never counts itself as inside one and strips every caret through to the
+// end, ^X becoming X. The program's own argument parser then reads what is left, where
+// a quote preceded by an odd run of backslashes is a literal quote, the run halving, and
+// an unescaped quote ends the argument. Undoing only the caret layer leaves a \ in front
+// of every quote the value holds; undoing them in the other order reads the ^" an
+// escaped quote arrives as (^\^") for the end of the argument.
+func cmdQuotedByte(content string, i int, cur *strings.Builder, state *int) int {
+	b, i := cmdByte(content, i)
+	switch b {
+	case '"':
+		*state = bare
+	case '\\':
+		run := 1
+		for {
+			nb, ni := cmdByte(content, i+1)
+			if ni >= len(content) || nb != '\\' {
+				break
+			}
+			run, i = run+1, ni
+		}
+		nb, ni := cmdByte(content, i+1)
+		if ni < len(content) && nb == '"' {
+			cur.WriteString(strings.Repeat("\\", run/2))
+			if run%2 == 1 {
+				cur.WriteByte('"')
+				i = ni
+			}
+			return i
+		}
+		cur.WriteString(strings.Repeat("\\", run))
+	default:
+		cur.WriteByte(b)
+	}
+	return i
+}
+
+// cmdByte is the byte cmd hands on for content[i], and the index of the last byte it
+// read: a caret escapes the byte after it.
+func cmdByte(content string, i int) (byte, int) {
+	if i >= len(content) {
+		return 0, i
+	}
+	if content[i] == '^' && i+1 < len(content) {
+		return content[i+1], i + 1
+	}
+	return content[i], i
+}
+
+// ansiCSingle is the one-letter half of bash's $'…' table, plus the punctuation escapes.
+var ansiCSingle = map[byte]byte{
+	'a': 0x07, 'b': 0x08, 'e': 0x1b, 'E': 0x1b, 'f': 0x0c,
+	'n': '\n', 'r': '\r', 't': '\t', 'v': 0x0b,
+	'\\': '\\', '\'': '\'', '"': '"', '?': '?',
+}
+
+// ansiCEscape decodes the escape sequence starting at i, the byte after a backslash
+// inside $'…', returning the bytes it stands for and how many bytes past the backslash
+// it consumed.
+//
+// This is not the double-quoted rule of dropping the backslash and keeping the next
+// byte. Firefox writes "!" as \041, a byte under 256 as \xNN and anything above as
+// \uNNNN, and "!" is the first octet RFC 6265 admits in a cookie value: the
+// double-quoted rule turns it into the three characters 041, and the store reads the
+// mangled value as no session at all.
+func ansiCEscape(src string, i int) ([]byte, int) {
+	c := src[i]
+	if b, ok := ansiCSingle[c]; ok {
+		return []byte{b}, 1
+	}
+	switch c {
+	case 'x':
+		if v, n := digitRun(src, i+1, 16, 2); n > 0 {
+			return []byte{byte(v)}, 1 + n
+		}
+	case 'u':
+		if v, n := digitRun(src, i+1, 16, 4); n > 0 {
+			return utf8.AppendRune(nil, rune(v)), 1 + n
+		}
+	case 'U':
+		if v, n := digitRun(src, i+1, 16, 8); n > 0 {
+			return utf8.AppendRune(nil, rune(v)), 1 + n
+		}
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		// Octal has no marker, so the run starts at the digit itself.
+		if v, n := digitRun(src, i, 8, 3); n > 0 {
+			return []byte{byte(v)}, n
+		}
+	}
+	// An escape bash does not recognise keeps the byte and drops the backslash.
+	return []byte{c}, 1
+}
+
+// digitRun reads up to max digits in the given base starting at i, returning the value
+// and how many digits it took. A run of zero digits means the sequence was not one.
+func digitRun(src string, i, base, max int) (int, int) {
+	v, n := 0, 0
+	for n < max && i+n < len(src) {
+		d := digitValue(src[i+n], base)
+		if d < 0 {
+			break
+		}
+		v = v*base + d
+		n++
+	}
+	return v, n
+}
+
+func digitValue(c byte, base int) int {
+	var v int
+	switch {
+	case c >= '0' && c <= '9':
+		v = int(c - '0')
+	case c >= 'a' && c <= 'f':
+		v = int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		v = int(c-'A') + 10
+	default:
+		return -1
+	}
+	if v >= base {
+		return -1
+	}
+	return v
 }
 
 // FromFile reads a cookie source file, auto-detecting curl vs cookies.txt.
@@ -137,7 +397,7 @@ func FromFile(path string) (string, error) {
 // cookies.txt often carries a header comment mentioning curl, and treating that as a
 // command sends it to a parser that can only fail.
 func isCurlPaste(content string) bool {
-	if curlCookieSingle.MatchString(content) || curlCookieDouble.MatchString(content) {
+	if _, ok := cookieArgument(content); ok {
 		return true
 	}
 	for _, line := range strings.Split(content, "\n") {
@@ -145,7 +405,17 @@ func isCurlPaste(content string) bool {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		return strings.HasPrefix(line, "curl ")
+		// A Windows paste names curl.exe, and the cmd form puts a caret against the
+		// first argument's quote, so neither the program name nor the separator after it
+		// can be matched as a literal prefix.
+		first := strings.FieldsFunc(line, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '^' || r == '"' || r == '\''
+		})
+		if len(first) == 0 {
+			return false
+		}
+		name := strings.ToLower(first[0])
+		return name == "curl" || name == "curl.exe"
 	}
 	return false
 }
