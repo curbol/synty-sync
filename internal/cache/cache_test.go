@@ -25,6 +25,12 @@ func TestStoreRejectsUnsafePathComponents(t *testing.T) {
 		{"token traversal", "../escaped", "pack.zip"},
 		{"token nested", "a/b", "pack.zip"},
 		{"token empty", "", "pack.zip"},
+		{"filename with a colon", "TOKEN", "Z:pack.zip"},
+		{"token with a colon", "Z:..", "pack.zip"},
+		{"filename a device", "TOKEN", "CON"},
+		{"filename a device with an extension", "TOKEN", "nul.zip"},
+		{"token a device", "com1", "pack.zip"},
+		{"token a device with an extension", "LPT9.pack", "pack.zip"},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			base := t.TempDir()
