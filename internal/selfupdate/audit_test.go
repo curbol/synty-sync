@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -201,6 +202,51 @@ func TestUpdateKeepsTheModeOfTheBinaryItReplaces(t *testing.T) {
 				t.Errorf("mode after update = %v, want %v from the %v install it replaced", got, tc.want, tc.have)
 			}
 		})
+	}
+}
+
+// The magic-byte sniff reads four bytes, so it says nothing about the rest of the file.
+// What covers the rest is the zip reader verifying each entry's CRC, and that holds only
+// while extraction reads the entry through to EOF: switching to OpenRaw, or stopping at
+// the declared size, keeps every other test green while a bit-flipped asset with an
+// intact signature is renamed over the working binary.
+func TestUpdateRefusesAnAssetWhoseCRCDoesNotMatch(t *testing.T) {
+	content := fakeBinary("NEW-BINARY-BODY")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	// Stored, so a flipped byte is a flipped byte of the binary rather than a deflate
+	// stream that no longer parses, which would fail for a different reason.
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: installedBinaryName(), Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := buf.Bytes()
+	at := bytes.Index(archive, content)
+	if at < 0 {
+		t.Fatal("the stored entry's bytes are not in the archive; the corruption would land elsewhere")
+	}
+	// Past the signature, so the sniff still passes and only the CRC can refuse it.
+	archive[at+len(content)-1] ^= 0xff
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, fakeBinary("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := assetServer(t, http.StatusOK, archive)
+	err = installTo(context.Background(), "tok", srv.URL, exe)
+	if !errors.Is(err, zip.ErrChecksum) {
+		t.Errorf("installTo = %v, want zip.ErrChecksum for an entry whose bytes do not match its CRC", err)
+	}
+	got, _ := os.ReadFile(exe)
+	if !bytes.Equal(got, fakeBinary("OLD")) {
+		t.Errorf("a corrupted binary replaced the working one: %q", got)
 	}
 }
 
