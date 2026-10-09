@@ -212,6 +212,7 @@ func TestANamedConfigDirMustExistAndBeADirectory(t *testing.T) {
 // user happened to run from. An error naming the ways to say where it goes is better.
 func TestNoHomeAndNoXDGRefusesRatherThanPickingARelativeLibrary(t *testing.T) {
 	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "") // os.UserHomeDir on windows
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("SYNTY_LIBRARY", "")
 
@@ -264,6 +265,7 @@ func TestFlagsAreTheLastLayer(t *testing.T) {
 	clearSyntyEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"),
 		[]byte("customer_id = \"from-file\"\nlibrary_path = \"/from/file\"\nconcurrency = 2\n"), 0o644); err != nil {

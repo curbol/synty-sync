@@ -439,15 +439,25 @@ func TestASaveAcceptedWhileTheInterruptLandsIsStillReturned(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.ContentLength = int64(len(form))
-	answered := make(chan int, 1)
+	// The client buffers the headers and the start of a sized body until the body is
+	// complete, so without this the server has not seen the request at all when the
+	// interrupt lands. With 100-continue the transport reads the first part of the body
+	// only once the server has asked for it, which it does when the handler reads.
+	req.Header.Set("Expect", "100-continue")
+	type answer struct {
+		code int
+		err  error
+	}
+	answered := make(chan answer, 1)
 	go func() {
-		resp, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+		tr := &http.Transport{DisableKeepAlives: true, ExpectContinueTimeout: time.Minute}
+		resp, err := (&http.Client{Transport: tr}).Do(req)
 		if err != nil {
-			answered <- 0
+			answered <- answer{err: err}
 			return
 		}
 		resp.Body.Close()
-		answered <- resp.StatusCode
+		answered <- answer{code: resp.StatusCode}
 	}()
 	if _, err := pw.Write([]byte(form[:len(form)-3])); err != nil {
 		t.Fatal(err)
@@ -473,8 +483,8 @@ func TestASaveAcceptedWhileTheInterruptLandsIsStillReturned(t *testing.T) {
 	}
 	pw.Close()
 
-	if code := <-answered; code != http.StatusOK {
-		t.Fatalf("the in-flight save was answered %d; this test cannot tell us anything", code)
+	if a := <-answered; a.code != http.StatusOK {
+		t.Fatalf("the in-flight save was answered %d (%v); this test cannot tell us anything", a.code, a.err)
 	}
 	r := <-served
 	if r.err != nil || !r.sel["b"] {
