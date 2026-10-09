@@ -159,3 +159,23 @@ func TestAfterKeepsTheErrorMatchable(t *testing.T) {
 		t.Errorf("Do returned %v; the sentinel did not survive the retry loop", err)
 	}
 }
+
+// Do floors attempts at one. Without the floor a zero or negative count runs the loop
+// no times and returns its nil lastErr: success reported for an operation never tried,
+// so a caller that left its attempt count unset would record a download that never ran.
+func TestDoRunsOnceForANonPositiveAttemptCount(t *testing.T) {
+	for _, attempts := range []int{0, -1} {
+		calls := 0
+		sentinel := errors.New("boom")
+		err := Do(context.Background(), attempts, time.Millisecond, func() error {
+			calls++
+			return sentinel
+		})
+		if calls != 1 {
+			t.Errorf("attempts=%d: calls = %d, want 1", attempts, calls)
+		}
+		if !errors.Is(err, sentinel) {
+			t.Errorf("attempts=%d: err = %v, want the one attempt's error", attempts, err)
+		}
+	}
+}
