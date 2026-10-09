@@ -2564,6 +2564,46 @@ func TestAPruneNeverDeletesAPathAnotherFileRecords(t *testing.T) {
 	}
 }
 
+// The preferred copy of a file is the canonical name, and when it was a truncated one
+// the adopt checks refused it after the matcher had already chosen it, so an intact
+// "(1)" copy beside it was never examined and the pack re-downloaded in full. Asked of
+// both places a copy can sit: the layout, and flat at the root where Migrate finds it.
+func TestAnIntactCopyBesideARefusedOneIsAdopted(t *testing.T) {
+	const canonical = "POLYGON_Pirate_Godot_4_5_1_v1_0_1.zip"
+	const collision = "POLYGON_Pirate_Godot_4_5_1_v1_0_1(1).zip"
+	for _, where := range []string{"POLYGON_Pirate", "."} {
+		t.Run(where, func(t *testing.T) {
+			srv := newServer(t, serverOpts{})
+			lib := t.TempDir()
+			dir := filepath.Join(lib, where)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, canonical), truncatedPackageBytes(canonical), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			whole := packageBytes(collision)
+			if err := os.WriteFile(filepath.Join(dir, collision), whole, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rep, err := Run(context.Background(), newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), runOpts(lib, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range rep.Downloaded {
+				if d.FileID == 2282645 {
+					t.Error("the pack was re-downloaded though an intact copy sat beside the refused one")
+				}
+			}
+			got := rep.NewLockfile.Packs["polygon-pirate-pack"].Files[pirateKey]
+			if got.CachePath != "POLYGON_Pirate/"+collision || got.SizeBytes != int64(len(whole)) {
+				t.Errorf("recorded %+v, want the intact copy %s", got, collision)
+			}
+		})
+	}
+}
+
 // SamePath cannot see two spellings that a case-insensitive filesystem calls one file,
 // so the prune asks the filesystem too. A hard link stands in for that here: two names
 // the filesystem reports as one file, on a platform where case alone would not be.

@@ -26,6 +26,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -570,25 +571,65 @@ func normalizeName(s string) string {
 	return normalizeKey(strings.TrimSuffix(s, filepath.Ext(s)))
 }
 
-// preferredMatch reports whether name should displace best as the flat file standing
-// in for a wanted one. Several names can normalize onto a single wanted file: the
-// "(N)" suffix normalizeKey strips is exactly what a second copy of one download is
-// named. ReadDir is sorted, and "(" sorts before ".", so the collision copy comes back
-// ahead of the canonical name for no reason but its punctuation. Prefer the name that
-// needed the least normalizing, so the choice follows the file rather than the order.
-func preferredMatch(best, name string) bool {
-	if best == "" {
-		return true
+// inPreferenceOrder sorts names that normalize onto one wanted file so the one that
+// needed the least normalizing comes first. Several names can match: the "(N)" suffix
+// normalizeKey strips is exactly what a second copy of one download is named. ReadDir is
+// sorted, and "(" sorts before ".", so without this the collision copy would come back
+// ahead of the canonical name for no reason but its punctuation. The sort is stable, so
+// ties keep ReadDir's order and two runs over one directory agree.
+func inPreferenceOrder(names []string) {
+	sort.SliceStable(names, func(i, j int) bool {
+		return collisionSuffix.FindStringIndex(names[i]) == nil && collisionSuffix.FindStringIndex(names[j]) != nil
+	})
+}
+
+// firstAccepted returns the first of names, in preference order, whose root-relative
+// path (dir joined with the name) accept takes. A nil accept takes anything.
+//
+// The caller's checks go into the selection rather than being run on what comes back:
+// run afterwards, they refused the preferred copy while another that would have passed
+// sat unexamined beside it, so a truncated canonical name masked an intact "(1)" and the
+// file re-downloaded in full.
+func firstAccepted(dir string, names []string, accept func(relPath string) bool) (string, bool) {
+	inPreferenceOrder(names)
+	for _, n := range names {
+		if accept == nil || accept(path.Join(dir, n)) {
+			return n, true
+		}
 	}
-	return collisionSuffix.FindStringIndex(name) == nil && collisionSuffix.FindStringIndex(best) != nil
+	return "", false
+}
+
+// readDir lists a root-relative directory through the root.
+func readDir(rt *os.Root, dir string) ([]fs.DirEntry, error) {
+	f, err := rt.Open(filepath.FromSlash(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, err
+}
+
+// candidate reports whether a directory entry can stand in for a wanted file at all.
+// An abandoned download temp is skipped outright: a partial transfer can carry enough of
+// the name to normalize onto a wanted file, and the caller hashes whatever it is handed.
+func candidate(e fs.DirEntry) bool {
+	return !e.IsDir() && !strings.HasPrefix(e.Name(), tempPrefix)
 }
 
 // Migrate folds pre-existing flat files at the library root into the file-identity
 // layout, matching each wanted file by a normalized name key (so variant-rendering,
 // extension and (N) differences don't block a match). Unmatched files are left
 // untouched and will simply re-download. It is best-effort and idempotent.
-func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
-	entries, err := os.ReadDir(libraryRoot)
+//
+// accept is the caller's check on a flat file, given its root-relative path, before it
+// moves; a copy it refuses stays flat and the next match is tried. nil takes anything.
+// Moves go through the root, so a <fileToken>/ that is a symlink out of the library
+// cannot carry a file with it. An interrupt stops it between files.
+func Migrate(ctx context.Context, libraryRoot string, wanted []Wanted, accept func(relPath string) bool) ([]MigrateResult, error) {
+	rt, err := os.OpenRoot(libraryRoot)
 	if errors.Is(err, fs.ErrNotExist) {
 		// A root that does not exist yet holds no flat files to fold in. The first run
 		// on a fresh install reaches here before anything has created it.
@@ -597,70 +638,73 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rt.Close()
+	entries, err := readDir(rt, ".")
+	if err != nil {
+		return nil, err
+	}
 	byNorm := map[string]Wanted{}
+	var keys []string
 	for _, w := range wanted {
 		if safeName("file token", w.FileToken) != nil {
 			continue
 		}
-		byNorm[normalizeKey(w.FileToken+"_"+w.Variant+"_"+w.Version)] = w
+		k := normalizeKey(w.FileToken + "_" + w.Variant + "_" + w.Version)
+		if _, dup := byNorm[k]; !dup {
+			keys = append(keys, k)
+		}
+		byNorm[k] = w
 	}
-	// One flat file per wanted file, decided before anything moves. Folding in every
-	// name that matches would leave the copies the lockfile does not record sitting in
-	// the layout for good: nothing prunes them (the syncer only knows the path it
-	// recorded) and nothing sweeps them (they carry no temp prefix). It would also hand
-	// the caller two results for one fileId, letting ReadDir's order pick which copy
-	// gets hashed and recorded — the decision Locate already refuses to let punctuation
-	// make.
-	pick := map[string]string{}
+	// Matching on the normalized name, which drops the extension, is what lets a Unity
+	// pack's .unitypackage fold in beside a .zip.
+	names := map[string][]string{}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
+		if !candidate(e) {
 			continue
 		}
-		key := normalizeName(e.Name())
-		if _, ok := byNorm[key]; !ok {
-			continue
-		}
-		if preferredMatch(pick[key], e.Name()) {
-			pick[key] = e.Name()
+		if k := normalizeName(e.Name()); byNorm[k].FileToken != "" {
+			names[k] = append(names[k], e.Name())
 		}
 	}
+	// One flat file per wanted file, decided before it moves. Folding in every name that
+	// matches would leave the copies the lockfile does not record sitting in the layout
+	// for good: nothing prunes them (the syncer only knows the path it recorded) and
+	// nothing sweeps them (they carry no temp prefix). It would also hand the caller two
+	// results for one fileId, letting ReadDir's order pick which copy gets hashed and
+	// recorded.
 	var results []MigrateResult
-	for _, e := range entries {
-		// Matching on the normalized name, which drops the extension, is what lets a
-		// Unity pack's .unitypackage fold in beside a .zip. An abandoned download temp
-		// is skipped outright: a partial transfer can carry enough of the name to
-		// normalize onto a wanted file, and the caller hashes whatever lands here.
-		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
+	for _, k := range keys {
+		if ctx.Err() != nil {
+			return results, ctx.Err()
+		}
+		if len(names[k]) == 0 {
 			continue
 		}
-		key := normalizeName(e.Name())
-		w, ok := byNorm[key]
-		if !ok || pick[key] != e.Name() {
+		w := byNorm[k]
+		// The layout copy wins, whether or not the caller would accept it, and the
+		// question is whether the layout holds this wanted file at all, not whether it
+		// holds this exact name. Asking the name leaves every equivalence the matcher
+		// grants — a (N) collision copy, a .unitypackage against a .zip, a dot- against
+		// an underscore-rendered version — pointing at a target that does not exist, so
+		// the rename proceeds and the layout ends up holding two copies of one file
+		// identity; and a target that does exist would be renamed over, letting a flat
+		// file replace bytes on name alone.
+		if _, already := Locate(libraryRoot, w, nil); already {
 			continue
 		}
-		// The layout copy wins, and the question is whether the layout holds this
-		// wanted file at all, not whether it holds this exact name. Asking the name
-		// leaves every equivalence the matcher grants — a (N) collision copy, a
-		// .unitypackage against a .zip, a dot- against an underscore-rendered version —
-		// pointing at a target that does not exist, so the rename proceeds and the
-		// layout ends up holding two copies of one file identity. The caller then
-		// hashes the one it just moved and records that sha, and nothing ever
-		// references the other again: the syncer prunes only the path it recorded and
-		// the sweep spares anything without the temp prefix.
-		if _, already := Locate(libraryRoot, w); already {
+		name, ok := firstAccepted(".", names[k], accept)
+		if !ok {
 			continue
 		}
-		rel := RelPath(w.FileToken, e.Name())
-		dest := filepath.Join(libraryRoot, filepath.FromSlash(w.FileToken))
-		if err := os.MkdirAll(dest, 0o755); err != nil {
+		if err := rt.Mkdir(w.FileToken, 0o755); err != nil && !os.IsExist(err) {
 			return results, err
 		}
-		target := filepath.Join(dest, e.Name())
-		from := filepath.Join(libraryRoot, e.Name())
-		if err := os.Rename(from, target); err != nil {
-			return results, fmt.Errorf("migrate %s: %w", e.Name(), err)
+		rel := RelPath(w.FileToken, name)
+		if err := rt.Rename(name, filepath.FromSlash(rel)); err != nil {
+			pruneEmptyDirs(rt, w.FileToken)
+			return results, fmt.Errorf("migrate %s: %w", name, err)
 		}
-		results = append(results, MigrateResult{FileID: w.FileID, From: e.Name(), RelPath: rel})
+		results = append(results, MigrateResult{FileID: w.FileID, From: name, RelPath: rel})
 	}
 	return results, nil
 }
@@ -670,38 +714,35 @@ func Migrate(libraryRoot string, wanted []Wanted) ([]MigrateResult, error) {
 // (N) collision differences don't block a match), moving nothing. It lets a sync adopt
 // files already in the layout that no lockfile records, instead of re-downloading them.
 // The extension is stripped before normalizing, so both .zip and .unitypackage match.
-func Locate(libraryRoot string, w Wanted) (relPath string, ok bool) {
+//
+// accept is the caller's check on each match, in preference order, and the first it
+// takes is returned; nil takes the preferred match.
+func Locate(libraryRoot string, w Wanted, accept func(relPath string) bool) (relPath string, ok bool) {
 	if safeName("file token", w.FileToken) != nil {
 		return "", false
 	}
-	dir := filepath.Join(libraryRoot, filepath.FromSlash(w.FileToken))
-	entries, err := os.ReadDir(dir)
+	rt, err := os.OpenRoot(libraryRoot)
+	if err != nil {
+		return "", false
+	}
+	defer rt.Close()
+	entries, err := readDir(rt, w.FileToken)
 	if err != nil {
 		return "", false
 	}
 	want := normalizeKey(w.FileToken + "_" + w.Variant + "_" + w.Version)
-	// Several names can normalize onto one wanted file, so both matchers resolve that
-	// the same way, through preferredMatch.
-	best := ""
+	var names []string
 	for _, e := range entries {
-		// An abandoned download temp is skipped outright: a partial transfer can carry
-		// enough of the name to normalize onto a wanted file, and adopting it would
-		// record a truncated body's digest as that file's truth.
-		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
-			continue
-		}
 		// The raw name, exactly as Migrate keys it. normalizeName already drops one
 		// extension, so trimming one here first would make these two matchers disagree
 		// on every name carrying a second dot.
-		if normalizeName(e.Name()) != want {
-			continue
-		}
-		if preferredMatch(best, e.Name()) {
-			best = e.Name()
+		if candidate(e) && normalizeName(e.Name()) == want {
+			names = append(names, e.Name())
 		}
 	}
-	if best == "" {
+	name, ok := firstAccepted(w.FileToken, names, accept)
+	if !ok {
 		return "", false
 	}
-	return RelPath(w.FileToken, best), true
+	return RelPath(w.FileToken, name), true
 }

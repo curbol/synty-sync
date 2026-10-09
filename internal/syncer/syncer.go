@@ -736,22 +736,33 @@ func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfi
 // than the file's, so it is neither reported as a refusal nor recorded.
 func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[int]resolved, []string) {
 	adopted := map[int]resolved{}
-	// A file the flat-file pass moved and then refused is sitting in the layout, where
-	// the scan below finds it again. Without this it would be refused a second time and
-	// the same reason printed twice for one file.
+	// A file the flat-file pass moved and then failed to hash is sitting in the layout,
+	// where the scan below finds it again. Without this it would be refused a second time
+	// and the same reason printed twice for one file.
 	refused := map[int]bool{}
 	var warnings []string
 	wanted := make([]cache.Wanted, 0, len(cands))
 	for _, f := range cands {
 		wanted = append(wanted, cache.Wanted{FileID: f.FileID, FileToken: f.FileToken, Variant: string(f.Variant), Version: f.Version})
 	}
+	// The bytes checks go to the matchers rather than being run on what they return,
+	// because each picks one copy out of every name that matches a wanted file: checked
+	// afterwards, a truncated canonical name masked an intact "(1)" copy beside it and
+	// the file re-downloaded in full. Every copy refused is still reported.
+	accept := func(rel string) bool {
+		if err := adoptable(opts.LibraryRoot, rel); err != nil {
+			warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
+			return false
+		}
+		return true
+	}
 
 	// Flat files at the library root are moved into the layout, which a dry run must
 	// not do. Migrate is best-effort and returns whatever it moved alongside any
 	// error, so a failure costs the files it could not fold in rather than the run.
 	if !opts.DryRun {
-		migrated, err := cache.Migrate(opts.LibraryRoot, wanted)
-		if err != nil {
+		migrated, err := cache.Migrate(ctx, opts.LibraryRoot, wanted, accept)
+		if err != nil && ctx.Err() == nil {
 			warnings = append(warnings, fmt.Sprintf("could not fold pre-existing flat files into the layout: %v", err))
 		}
 		for _, m := range migrated {
@@ -785,17 +796,13 @@ func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[i
 		if refused[f.FileID] {
 			continue
 		}
-		rel, ok := cache.Locate(opts.LibraryRoot, wanted[i])
+		rel, ok := cache.Locate(opts.LibraryRoot, wanted[i], accept)
 		if !ok {
 			continue
 		}
 		if opts.DryRun {
 			// status must not read a multi-gigabyte library back just to say what it
 			// would do, so the checks alone stand in for the hash here.
-			if err := adoptable(opts.LibraryRoot, rel); err != nil {
-				warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
-				continue
-			}
 			adopted[f.FileID] = resolved{cachePath: rel}
 			continue
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,7 +139,7 @@ func TestMigrateDoesNotClobberLayoutCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}})
+			res, err := Migrate(context.Background(), lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +177,7 @@ func TestMigrateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(temp, []byte("PARTIAL"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Migrate(lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}})
+	res, err := Migrate(context.Background(), lib, []Wanted{{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, tempPrefix+name), []byte("half a pack"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if rel, ok := Locate(lib, want); ok {
+	if rel, ok := Locate(lib, want, nil); ok {
 		t.Fatalf("Locate adopted an in-flight download at %s", rel)
 	}
 
@@ -211,7 +212,7 @@ func TestLocateSkipsAnAbandonedTemp(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("the whole pack"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rel, ok := Locate(lib, want)
+	rel, ok := Locate(lib, want, nil)
 	if !ok {
 		t.Fatal("Locate missed the real file sitting beside a temp")
 	}
@@ -236,7 +237,7 @@ func TestSweepTempsOnAMissingRoot(t *testing.T) {
 // enumerated, so a fresh install could never download anything.
 func TestMigrateOnAMissingRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "not-created-yet")
-	got, err := Migrate(root, []Wanted{{FileID: 1, FileToken: "T", Variant: "Godot_4_5_1", Version: "v1"}})
+	got, err := Migrate(context.Background(), root, []Wanted{{FileID: 1, FileToken: "T", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
 	if err != nil {
 		t.Errorf("Migrate on a root that does not exist yet: %v", err)
 	}
@@ -301,7 +302,7 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			moved, err := Migrate(root, []Wanted{w})
+			moved, err := Migrate(context.Background(), root, []Wanted{w}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -315,7 +316,7 @@ func TestMigrateAndLocateAgreeOnEveryName(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(layout, w.FileToken, name), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, locateMatched := Locate(layout, w)
+			_, locateMatched := Locate(layout, w, nil)
 
 			if migrateMatched != locateMatched {
 				t.Errorf("Migrate matched=%v but Locate matched=%v for %q; one key, two answers",
@@ -406,7 +407,7 @@ func TestLocatePrefersTheCanonicalNameOverACollisionCopy(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			rel, ok := Locate(root, w)
+			rel, ok := Locate(root, w, nil)
 			if !ok {
 				t.Fatal("Locate found neither copy")
 			}
@@ -435,7 +436,7 @@ func TestMigrateFoldsOneCopyOfACollisionPairAndLeavesTheOther(t *testing.T) {
 		}
 	}
 
-	moved, err := Migrate(root, []Wanted{w})
+	moved, err := Migrate(context.Background(), root, []Wanted{w}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,6 +677,87 @@ func TestARejectedStoreLeavesNoDirectoryBehind(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "TOKEN", "kept.zip")); err != nil {
 		t.Errorf("Discard took a populated directory with it: %v", err)
+	}
+}
+
+// Both matchers pick one copy out of every name that normalizes onto a wanted file, and
+// the caller's checks used to run on that one copy afterwards. A truncated canonical
+// name then masked an intact "(1)" beside it: the preferred copy was refused, the other
+// was never examined, and the file re-downloaded in full. The checks go into the
+// selection, in preference order, so the first acceptable copy wins.
+func TestTheMatchersTryTheNextCopyWhenThePreferredOneIsRefused(t *testing.T) {
+	w := Wanted{FileID: 7, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1_0_1"}
+	const canonical = "TOK_Godot_4_5_1_v1_0_1.zip"
+	const collision = "TOK_Godot_4_5_1_v1_0_1(1).zip"
+	refuseCanonical := func(rel string) bool { return path.Base(rel) != canonical }
+
+	t.Run("Locate", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, w.FileToken)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{canonical, collision} {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if rel, ok := Locate(root, w, refuseCanonical); !ok || rel != RelPath(w.FileToken, collision) {
+			t.Errorf("Locate = %q, %v; want the acceptable %q", rel, ok, collision)
+		}
+		if rel, ok := Locate(root, w, nil); !ok || rel != RelPath(w.FileToken, canonical) {
+			t.Errorf("Locate with no check = %q, %v; want the canonical %q", rel, ok, canonical)
+		}
+		if rel, ok := Locate(root, w, func(string) bool { return false }); ok {
+			t.Errorf("Locate returned %q though every copy was refused", rel)
+		}
+	})
+	t.Run("Migrate", func(t *testing.T) {
+		root := t.TempDir()
+		for _, n := range []string{canonical, collision} {
+			if err := os.WriteFile(filepath.Join(root, n), []byte(n), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		moved, err := Migrate(context.Background(), root, []Wanted{w}, refuseCanonical)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(moved) != 1 || moved[0].From != collision {
+			t.Fatalf("Migrate moved %+v, want only the acceptable %q", moved, collision)
+		}
+		// The refused copy is left flat, where the user can see it; moving it into the
+		// layout would put bytes nothing records where the adopt scan looks.
+		if _, err := os.Stat(filepath.Join(root, canonical)); err != nil {
+			t.Errorf("the refused copy was moved: %v", err)
+		}
+	})
+}
+
+// Migrate moves files through the root like every other write here, so a <fileToken>/
+// that is a symlink out of the library cannot take a flat file with it.
+func TestMigrateCannotMoveAFileOutThroughASymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "library")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "TOK")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	const name = "TOK_Godot_4_5_1_v1.zip"
+	if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := Migrate(context.Background(), root, []Wanted{{FileID: 1, FileToken: "TOK", Variant: "Godot_4_5_1", Version: "v1"}}, nil)
+	if len(moved) != 0 {
+		t.Errorf("Migrate reported moving %+v through a link out of the root", moved)
+	}
+	if _, err := os.Stat(filepath.Join(outside, name)); err == nil {
+		t.Error("Migrate moved a flat file out of the library through a symlink")
 	}
 }
 

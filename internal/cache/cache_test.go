@@ -110,7 +110,7 @@ func TestMigrateNormalizedMatch(t *testing.T) {
 		{FileID: 2, FileToken: "GENERIC_Particle_FX", Variant: "Godot_4_5_1", Version: "v1_0_0"},
 		{FileID: 3, FileToken: "POLYGON_Dungeon", Variant: "Godot_4_5_1", Version: "v1_0_1"},
 	}
-	results, err := Migrate(lib, wanted)
+	results, err := Migrate(context.Background(), lib, wanted, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestLocate(t *testing.T) {
 		{"missing dir", Wanted{FileToken: "NOPE", Variant: "Godot_4_5_1", Version: "v1"}, ""},
 	}
 	for _, c := range cases {
-		rel, ok := Locate(lib, c.w)
+		rel, ok := Locate(lib, c.w, nil)
 		if c.want == "" {
 			if ok {
 				t.Errorf("%s: located %q, want not found", c.name, rel)
