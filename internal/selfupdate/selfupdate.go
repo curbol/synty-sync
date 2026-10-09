@@ -47,23 +47,31 @@ type release struct {
 	Assets  []asset `json:"assets"`
 }
 
-// Run updates the binary to target (a version like "0.2.0"), or to the latest
-// release when target is empty. current is the running binary's version.
-func Run(ctx context.Context, current, target string) error {
+// Requested is the release a user asked for, empty meaning the latest.
+//
+// Its own type because it sits beside the running build's version in Run and beside the
+// token in fetchRelease, and adjacent strings compile either way round. Transposed in
+// Run, the dev-build refusal keys on what the user typed rather than on what this binary
+// is: a dev build fetches and installs over itself, and a release asked for "dev" refuses.
+type Requested string
+
+// Run updates the binary to want (a version like "0.2.0"), or to the latest release when
+// want is empty. current is the running binary's version.
+func Run(ctx context.Context, current string, want Requested) error {
 	current = strings.TrimSpace(current)
 	if current == "" || current == "dev" {
 		return fmt.Errorf("this is a dev build (version %q); `update` only works on release builds — install one with install.sh", current)
 	}
 	token := resolveToken(ctx)
 
-	rel, err := fetchRelease(ctx, token, target)
+	rel, err := fetchRelease(ctx, token, want)
 	if err != nil {
 		return err
 	}
 	relVer := strings.TrimPrefix(rel.TagName, "v")
 	if relVer == strings.TrimPrefix(current, "v") {
 		label := "latest"
-		if target != "" {
+		if want != "" {
 			label = "requested"
 		}
 		fmt.Fprintf(progress, "already on the %s version (%s)\n", label, relVer)
@@ -114,10 +122,10 @@ func newRequest(ctx context.Context, token, method, url string) (*http.Request, 
 	return req, nil
 }
 
-func fetchRelease(ctx context.Context, token, target string) (*release, error) {
+func fetchRelease(ctx context.Context, token string, want Requested) (*release, error) {
 	url := releasesAPIURL + "/latest"
-	if target != "" {
-		tag := target
+	if want != "" {
+		tag := string(want)
 		if !strings.HasPrefix(tag, "v") {
 			tag = "v" + tag
 		}
@@ -142,8 +150,8 @@ func fetchRelease(ctx context.Context, token, target string) (*release, error) {
 		if token == "" {
 			hint = " (no GitHub token found; set GITHUB_TOKEN or run `gh auth login`)"
 		}
-		if target != "" {
-			return nil, fmt.Errorf("version %s not found%s", target, hint)
+		if want != "" {
+			return nil, fmt.Errorf("version %s not found%s", want, hint)
 		}
 		return nil, fmt.Errorf("no releases found%s", hint)
 	}
@@ -251,10 +259,22 @@ func installTo(ctx context.Context, token, assetURL, exe string) error {
 	if err := checkExecutable(binPath); err != nil {
 		return err
 	}
-	if err := os.Chmod(binPath, 0o755); err != nil {
+	if err := os.Chmod(binPath, installMode(exe)); err != nil {
 		return err
 	}
 	return replaceBinary(binPath, exe)
+}
+
+// installMode is the mode the new binary takes: the one exe already has, so an install
+// the user locked down with chmod 700 is not handed back to group and other, with the
+// owner's execute bit forced on because a binary that cannot run is the one thing an
+// update must never leave behind. 0755 is the fallback when exe cannot be read.
+func installMode(exe string) os.FileMode {
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return 0o755
+	}
+	return fi.Mode().Perm() | 0o100
 }
 
 // executableMagic is the leading signature of a native binary per platform. The zip

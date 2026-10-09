@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,15 @@ import (
 
 	"github.com/curbol/synty-sync/internal/releaseyml"
 )
+
+// requireShell skips on Windows, where install.sh does not run: it refuses the platform
+// itself, and every stub these tests put on PATH is a POSIX shell script.
+func requireShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is a POSIX shell script")
+	}
+}
 
 // installerZip builds a release archive holding one file named synty-sync with the
 // given bytes, so a test can ship either a real-looking binary or something that is
@@ -281,12 +291,16 @@ func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 // on a machine where gh is absent or logged out.
 func runInstallerWithGh(t *testing.T, home, ghToken string, env ...string) (string, error) {
 	t.Helper()
+	requireShell(t)
 	if _, err := exec.LookPath("unzip"); err != nil {
 		t.Skip("install.sh needs unzip")
 	}
 	cmd := exec.Command("bash", "install.sh")
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	cmd.Env = append(cmd.Env, "GITHUB_TOKEN=", "GH_TOKEN=", "PATH="+ghStub(t, ghToken)+":/usr/bin:/bin")
+	// Every stub here is on loopback rather than api.github.com, and install.sh sends a
+	// token nowhere else unless told to. A caller that is testing that refusal clears it.
+	cmd.Env = append(cmd.Env, "SYNTY_INSTALL_ALLOW_TOKEN=1")
 	cmd.Env = append(cmd.Env, env...)
 	raw, err := cmd.CombinedOutput()
 	out := string(raw)
@@ -312,29 +326,114 @@ func runInstallerWithGh(t *testing.T, home, ghToken string, env ...string) (stri
 // nothing, and under `set -e` a bare assignment from it killed the script before any
 // of the messages written for this case could print.
 //
-// A token that cannot see the repo is the other half. GitHub answers 404 rather than
-// 403 for a private repo the caller cannot read, so both arrive here as an empty
-// result: telling someone who has already exported a token to export one sends them to
-// check the thing that is not wrong.
+// A token that cannot see the repo is the second case. GitHub answers 404 rather than
+// 403 for a private repo the caller cannot read, so both arrive as the same status:
+// telling someone who has already exported a token to export one sends them to check
+// the thing that is not wrong.
+//
+// And a failure that is not about the token must not be blamed on it. `curl -f` exits
+// non-zero for every status at or above 400 and for every transport failure alike, so a
+// message keyed on its exit code told a user whose token is fine that it lacks access
+// while the API answered 502 or the network was down, and never named the real cause.
 func TestInstallerReportsAnUnreachableRelease(t *testing.T) {
-	for _, tc := range []struct{ name, ghToken, want, notWant string }{
-		{"no token at all", "", "no GitHub token found", "does not have access"},
-		{"a token without access", "wrong-org-token", "does not have access", "no GitHub token found"},
+	answering := func(status int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"stub"}`, status)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	notFound, badGateway := answering(http.StatusNotFound), answering(http.StatusBadGateway)
+	const unreachable = "http://127.0.0.1:1"
+	blame := []string{"does not have access", "no GitHub token found"}
+
+	for _, tc := range []struct {
+		name, ghToken, api string
+		want               string
+		notWant            []string
+	}{
+		{"no token at all", "", notFound, "no GitHub token found", []string{"does not have access"}},
+		{"a token without access", "wrong-org-token", notFound, "does not have access", []string{"no GitHub token found"}},
+		{"the API failing with a good token", stubToken, badGateway, "answered HTTP 502", blame},
+		{"no route to the API with a good token", stubToken, unreachable, "could not reach " + unreachable, blame},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			out, err := runInstallerWithGh(t, home, tc.ghToken,
-				"SYNTY_INSTALL_API=http://127.0.0.1:1", "SYNTY_INSTALL_DOWNLOAD=http://127.0.0.1:1")
+			out, err := runInstallerWithGh(t, t.TempDir(), tc.ghToken,
+				"SYNTY_INSTALL_API="+tc.api, "SYNTY_INSTALL_DOWNLOAD="+tc.api)
 			if err == nil {
 				t.Fatalf("the installer succeeded against an unreachable release:\n%s", out)
 			}
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("the installer did not say %q:\n%s", tc.want, out)
 			}
-			if strings.Contains(out, tc.notWant) {
-				t.Errorf("the installer gave the other case's advice (%q):\n%s", tc.notWant, out)
+			for _, nw := range tc.notWant {
+				if strings.Contains(out, nw) {
+					t.Errorf("the installer blamed the wrong thing (%q):\n%s", nw, out)
+				}
 			}
 		})
+	}
+}
+
+// SYNTY_INSTALL_API is a test seam. A token attached to whatever it names turns "can set
+// an environment variable" (a shared container image, a CI job definition, a direnv file)
+// into "has this user's GitHub token", and `gh auth token` would hand that over out of a
+// keyring the env-setter cannot read for themselves. Every source is offered here, so a
+// gate placed after any one of them is still caught.
+func TestTheTokenIsNotSentToAnAPIBaseTheEnvironmentNamed(t *testing.T) {
+	var authorized atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorized.Add(1)
+		}
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	out, _ := runInstallerWithGh(t, t.TempDir(), "from-the-gh-cli",
+		"SYNTY_INSTALL_ALLOW_TOKEN=",
+		"GITHUB_TOKEN=from-github-token", "GH_TOKEN=from-gh-token",
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL)
+	if n := authorized.Load(); n != 0 {
+		t.Errorf("the token was sent to an API base the environment named, %d time(s):\n%s", n, out)
+	}
+	// No token was sent, so none can have been refused.
+	if strings.Contains(out, "does not have access") {
+		t.Errorf("no token was sent, yet one was reported as lacking access:\n%s", out)
+	}
+	if !strings.Contains(out, "only ever sent to https://api.github.com") {
+		t.Errorf("the refusal to send the token is not explained:\n%s", out)
+	}
+}
+
+// The asset's URL is read out of the release body and the token travels with the request
+// for it, so a body naming another host would otherwise carry the credential there.
+func TestTheTokenIsNotSentToAnAssetHostOffTheAPI(t *testing.T) {
+	label := platformLabel(t)
+	var leaked atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Add(1)
+		}
+		http.Error(w, "no", http.StatusNotFound)
+	}))
+	t.Cleanup(other.Close)
+	otherHost := strings.TrimPrefix(other.URL, "http://")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, githubReleaseJSON(otherHost, "synty-sync-9.9.9-"+label+".zip", assetShape{}))
+	}))
+	t.Cleanup(api.Close)
+
+	out, err := runInstaller(t, t.TempDir(), "GITHUB_TOKEN="+stubToken,
+		"SYNTY_INSTALL_API="+api.URL, "SYNTY_INSTALL_DOWNLOAD="+api.URL)
+	if err == nil {
+		t.Fatalf("the installer succeeded with an asset off the API host:\n%s", out)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("the token reached a host the release body named, %d time(s):\n%s", n, out)
+	}
+	if !strings.Contains(out, "refusing to send the token there") {
+		t.Errorf("the refusal did not say why:\n%s", out)
 	}
 }
 
@@ -567,6 +666,45 @@ func TestInstallerChecksMacMagicOnADarwinHost(t *testing.T) {
 	}
 }
 
+// check_executable's case has to close on a refusal. detect_platform is what admits an
+// OS, so reaching the signature check with one it does not know means a platform was
+// added there and not here, and a case with no closing arm then passes anything at all:
+// an error page shipped as the asset is chmod +x'd over the working binary. The uname
+// here admits Linux to detect_platform and then answers for an OS the check has no
+// table for, which is that drift in one run.
+func TestInstallerRefusesWhenNoSignatureIsKnownForTheOS(t *testing.T) {
+	home := t.TempDir()
+	srv := stubReleaseLabeled(t, installerZip(t, []byte("\x7fELF a linux binary")), "linux-intel", assetShape{}, nil)
+
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  -s) if [ -e %[1]q ]; then echo Drift; else : > %[1]q; echo Linux; fi ;;
+  -m) echo x86_64 ;;
+esac
+`, calls)
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL,
+		"PATH="+dir+":"+ghStub(t, "")+":/usr/bin:/bin")
+	if err == nil {
+		t.Fatalf("the installer succeeded on an OS it holds no signature for:\n%s", out)
+	}
+	if !strings.Contains(out, "INFO: platform: linux-intel") {
+		t.Fatalf("the stub did not admit the run past detect_platform, so nothing reached the check:\n%s", out)
+	}
+	if !strings.Contains(out, "no executable signature is known for Drift") {
+		t.Errorf("the refusal did not name the missing signature:\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".local", "bin", "synty-sync")); statErr == nil {
+		t.Errorf("an unchecked asset was installed:\n%s", out)
+	}
+}
+
 // assertNoStagingLeft checks the install directory holds the binary and nothing else.
 // The trap that removes the staging directory fires on every exit, so this belongs on
 // the failure paths as much as the success one — those are the ones that depend on the
@@ -671,6 +809,7 @@ func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
 // further. Its non-zero exit is the expected outcome, not a failure.
 func runInstallerAs(t *testing.T, pathPrefix string) string {
 	t.Helper()
+	requireShell(t)
 	// The same gh shadow runInstaller installs, and for the same reason: gh lives in
 	// /usr/bin on a developer machine, so clearing the two environment variables still
 	// leaves install.sh a logged-in CLI to find. Without this the test takes the
@@ -793,41 +932,78 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 	}
 }
 
-// The release action runs with contents: write, and a tag can be moved without
-// anything here changing, so the third-party step stays pinned to a commit.
-func TestReleaseActionIsPinnedToACommit(t *testing.T) {
-	// Every `uses:` in both workflows, rather than the one third-party action that is
-	// there today. Naming it makes the check a note about that action; a second one
-	// added beside it on a floating tag, in the job that already holds contents:write,
-	// would be exactly as dangerous and entirely invisible here.
-	uses := regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:\s+(\S+)`)
-	sha := regexp.MustCompile(`@[0-9a-f]{40}$`)
-	for _, name := range []string{"ci.yml", "release.yml"} {
-		raw, err := os.ReadFile(filepath.Join(".github", "workflows", name))
+// A tag can be repointed at any commit without anything here changing. The release job
+// holds contents: write and publishes the binaries `update` installs unattended, and the
+// CI job decides whether a tag ships at all, so every action in either one is pinned to
+// a commit, first-party included: who wrote the action does not change what the job can
+// do. The comment beside each pin names the exact release that commit is, since a
+// floating major cannot answer which code a pin runs.
+func TestEveryActionIsPinnedToACommit(t *testing.T) {
+	// A real uses: value is a local path or owner/repo@ref. Anchoring on that shape keeps
+	// prose that mentions the word out of the count.
+	const action = `uses:[ \t]*(\./[A-Za-z0-9._/-]*|[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[^\s#]+)`
+	loose := regexp.MustCompile(action)
+	strict := regexp.MustCompile(`^[ \t]*(?:-[ \t]+)?` + action + `[ \t]*(#.*)?$`)
+	pinned := regexp.MustCompile(`@[0-9a-f]{40}$`)
+	release := regexp.MustCompile(`^# v\d+\.\d+\.\d+$`)
+	comment := regexp.MustCompile(`#.*$`)
+
+	// Every workflow and local action under .github, not a named pair: a composite action
+	// referenced as ./.github/actions/<name> runs its own uses: lines in the same job.
+	var files []string
+	err := filepath.WalkDir(".github", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ext := filepath.Ext(p); !d.IsDir() && (ext == ".yml" || ext == ".yaml") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	examined := 0
+	for _, name := range files {
+		raw, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		found := uses.FindAllStringSubmatch(string(raw), -1)
-		if len(found) == 0 {
-			t.Errorf("%s has no uses: at all; this guard would pass over an empty file", name)
-		}
-		for _, m := range found {
-			ref := m[1]
-			switch {
-			case strings.HasPrefix(ref, "./"): // this repo's own workflow
-			case strings.HasPrefix(ref, "actions/"): // first-party, versioned by GitHub
-			case sha.MatchString(ref):
-			default:
-				t.Errorf("%s uses %s, which is third-party and not pinned to a 40-character commit sha", name, ref)
+		for i, line := range strings.Split(string(raw), "\n") {
+			m := strict.FindStringSubmatch(line)
+			if m == nil {
+				// `- {uses: actions/checkout@v6}` is legal YAML that GitHub runs, and an
+				// anchored match alone cannot see it.
+				if loose.MatchString(comment.ReplaceAllString(line, "")) {
+					t.Errorf("%s:%d spells a uses: where this guard cannot check it; put it at the start of its own line: %s",
+						name, i+1, strings.TrimSpace(line))
+				}
+				continue
+			}
+			examined++
+			ref, note := m[1], strings.TrimSpace(m[2])
+			if strings.HasPrefix(ref, "./") {
+				continue // this repo's own workflow or action
+			}
+			if !pinned.MatchString(ref) {
+				t.Errorf("%s:%d uses %s, which is not pinned to a 40-character commit sha", name, i+1, ref)
+				continue
+			}
+			if !release.MatchString(note) {
+				t.Errorf("%s:%d pins %s with comment %q; name the exact release that commit is, as # vX.Y.Z",
+					name, i+1, ref, note)
 			}
 		}
 	}
+	// "Found nothing wrong" and "found nothing at all" must not be the same green.
+	if examined < 5 {
+		t.Errorf("examined %d uses: lines across %v; the guard is no longer reading the workflows", examined, files)
+	}
 }
 
-// The token goes in a curl config file rather than curl's argv, where any other
-// account on the machine could read it out of ps while an install is in flight. The
-// file is created outside the staging directory, so the trap has to remove it too.
-func TestInstallerKeepsTheTokenOutOfArgvAndLeavesNoConfigBehind(t *testing.T) {
+// The token goes in a curl config file, and that file and the release body are created
+// outside the staging directory, so the trap has to remove them too.
+func TestInstallerLeavesNoConfigBehind(t *testing.T) {
 	want := append(nativeMagic(t), []byte("a real enough binary")...)
 	home := t.TempDir()
 	srv := stubRelease(t, installerZip(t, want))
@@ -853,13 +1029,46 @@ func TestInstallerKeepsTheTokenOutOfArgvAndLeavesNoConfigBehind(t *testing.T) {
 		}
 		t.Errorf("install.sh left %v in its TMPDIR; the token travels in one of those files", names)
 	}
-	// install.sh must not pass the token as an argument.
-	sh, err := os.ReadFile("install.sh")
+}
+
+// A token on a command line is readable out of `ps` by every other local user, so the
+// installer hands it to curl in a config file instead. Nothing about that shows in the
+// script's output, and a grep of the script for one spelling of the header passes over
+// every other spelling, so the only way to hold it is to be curl: a stub that records
+// each argv and then runs the real one, through a whole install.
+func TestInstallerKeepsTheTokenOutOfArgv(t *testing.T) {
+	realCurl, err := exec.LookPath("curl")
 	if err != nil {
+		t.Skip("install.sh needs curl")
+	}
+	want := append(nativeMagic(t), []byte("a real enough binary")...)
+	srv := stubRelease(t, installerZip(t, want))
+
+	dir := t.TempDir()
+	argvLog := filepath.Join(dir, "argv")
+	stub := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexec %q \"$@\"\n", argvLog, realCurl)
+	if err := os.WriteFile(filepath.Join(dir, "curl"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(sh), `-H "$hdr"`) || strings.Contains(string(sh), "Authorization: token $token") {
-		t.Error("install.sh passes the Authorization header on curl's command line")
+
+	home := t.TempDir()
+	out, _ := runInstaller(t, home, "GITHUB_TOKEN="+stubToken,
+		"SYNTY_INSTALL_API="+srv.URL, "SYNTY_INSTALL_DOWNLOAD="+srv.URL,
+		"PATH="+dir+":"+ghStub(t, "")+":/usr/bin:/bin")
+	// stubRelease refuses any request without the header, so an install that landed is
+	// the proof the token travelled by some channel; argv is the one it must not use.
+	if _, err := os.ReadFile(filepath.Join(home, ".local", "bin", "synty-sync")); err != nil {
+		t.Fatalf("nothing was installed, so the authenticated requests never all ran: %v\n%s", err, out)
+	}
+	argv, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("the installer never ran the curl on PATH, so nothing was observed: %v", err)
+	}
+	if calls := strings.Count(string(argv), "\n"); calls < 3 {
+		t.Errorf("observed %d curl call(s), want the release, tag and asset requests:\n%s", calls, argv)
+	}
+	if strings.Contains(string(argv), stubToken) {
+		t.Errorf("the token reached curl's argv, where any local user can read it out of ps:\n%s", argv)
 	}
 }
 

@@ -12,7 +12,8 @@ BINARY_NAME="synty-sync"
 INSTALL_DIR="${HOME}/.local/bin"
 # Where releases are read from. Overridable so install_test.go can run the installer
 # end to end against a stub instead of the live GitHub.
-API_BASE="${SYNTY_INSTALL_API:-https://api.github.com}"
+GITHUB_API="https://api.github.com"
+API_BASE="${SYNTY_INSTALL_API:-$GITHUB_API}"
 DOWNLOAD_BASE="${SYNTY_INSTALL_DOWNLOAD:-https://github.com}"
 
 log()  { printf 'INFO: %s\n' "$1"; }
@@ -24,9 +25,11 @@ err()  { printf 'ERROR: %s\n' "$1" >&2; }
 # leaves a truncated binary at the live path.
 STAGE=""
 AUTH_CONF=""
+RELEASE_BODY=""
 cleanup() {
   [[ -n "$STAGE" ]] && rm -rf "$STAGE"
   [[ -n "$AUTH_CONF" ]] && rm -f "$AUTH_CONF"
+  [[ -n "$RELEASE_BODY" ]] && rm -f "$RELEASE_BODY"
   return 0
 }
 trap cleanup EXIT
@@ -36,6 +39,13 @@ trap cleanup EXIT
 # explicitly. Without that the script dies silently on the ordinary no-token path,
 # before any of the messages written for it can print.
 auth_token() {
+  # Never sent anywhere but the host it belongs to. API_BASE is a test seam, and a token
+  # attached to whatever it names turns "can set an environment variable" (a shared
+  # container image, a CI job definition) into "has this user's GitHub token", which
+  # `gh auth token` would otherwise hand over from a keyring the env-setter cannot read.
+  if [[ "$API_BASE" != "$GITHUB_API" && -z "${SYNTY_INSTALL_ALLOW_TOKEN:-}" ]]; then
+    return 0
+  fi
   local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [[ -z "$token" ]] && command -v gh >/dev/null 2>&1; then
     # Bounded the way selfupdate bounds the same call: `gh auth token` can go to the
@@ -84,25 +94,43 @@ detect_platform() {
 
 latest_version() {
   ensure_auth_config
-  local opts=(-fsSL); [[ -n "$AUTH_CONF" ]] && opts+=(--config "$AUTH_CONF")
+  RELEASE_BODY=$(mktemp "${TMPDIR:-/tmp}/.synty-release-XXXXXX")
+  local opts=(-sSL -o "$RELEASE_BODY" -w '%{http_code}')
+  [[ -n "$AUTH_CONF" ]] && opts+=(--config "$AUTH_CONF")
+  # The status, not curl's exit code, decides what is reported. `curl -f` exits non-zero
+  # for every status at or above 400 and for every transport failure alike, so keying on
+  # it told a user whose token is fine that it lacks access while the API answered 502
+  # or the network was down, and the real cause was never named.
+  local status; status=$(curl "${opts[@]}" "${API_BASE}/repos/${REPO}/releases/latest" 2>/dev/null) || true
+  [[ "$status" =~ ^[0-9]{3}$ ]] || status="000"
+  local fail="could not resolve the latest release of ${REPO}"
+  case "$status" in
+    200) ;;
+    # GitHub answers 404, not 403, for a private repo the caller cannot see, so these mean
+    # either no token or a token without access. Telling someone who already exported one
+    # to export one sends them to check the thing that is not wrong.
+    401|403|404)
+      if [[ -n "$AUTH_CONF" ]]; then
+        err "${fail}; the token found does not have access to it (HTTP ${status}; check GITHUB_TOKEN / GH_TOKEN, or \`gh auth status\`)"
+      elif [[ "$API_BASE" != "$GITHUB_API" && -z "${SYNTY_INSTALL_ALLOW_TOKEN:-}" ]]; then
+        err "${fail}; ${API_BASE} answered HTTP ${status}, and a GitHub token is only ever sent to ${GITHUB_API}"
+      else
+        err "${fail}; no GitHub token found, and the repo is private (set GITHUB_TOKEN or run \`gh auth login\`)"
+      fi
+      exit 1 ;;
+    000) err "${fail}; could not reach ${API_BASE}"; exit 1 ;;
+    *) err "${fail}; ${API_BASE} answered HTTP ${status}"; exit 1 ;;
+  esac
   # Whitespace goes first and the match is anchored to the key, for the same reason
   # install_binary does it: the API's compact JSON puts the whole payload on one line,
   # where a greedy match takes the last quoted run in the document — the release body,
   # or the final asset's download URL — and hands back a version that is not one. A tag
   # carries no spaces, so nothing this needs is lost with the whitespace.
-  VERSION=$(curl "${opts[@]}" "${API_BASE}/repos/${REPO}/releases/latest" \
-    | tr -d '[:space:]' | grep -oE '"tag_name":"[^"]+"' | head -1 \
+  VERSION=$(tr -d '[:space:]' < "$RELEASE_BODY" | grep -oE '"tag_name":"[^"]+"' | head -1 \
     | sed -E 's/.*:"(.*)"$/\1/') || true
   VERSION=${VERSION#v}
-  # GitHub answers 404, not 403, for a private repo the caller cannot see, so an empty
-  # result means either no token or a token without access. Telling someone who already
-  # exported one to export one sends them to check the thing that is not wrong.
   if [[ -z "$VERSION" ]]; then
-    if [[ -n "$AUTH_CONF" ]]; then
-      err "could not resolve the latest release of ${REPO}; the token found does not have access to it (check GITHUB_TOKEN / GH_TOKEN, or \`gh auth status\`)"
-    else
-      err "could not resolve the latest release of ${REPO}; no GitHub token found, and the repo is private (set GITHUB_TOKEN or run \`gh auth login\`)"
-    fi
+    err "${fail}; the API answered without a tag_name"
     exit 1
   fi
   log "latest version: $VERSION"
@@ -121,6 +149,10 @@ check_executable() {
         cffaedfe|cefaedfe|cafebabe) ;;
         *) err "the downloaded file is not a macOS executable"; exit 1 ;;
       esac ;;
+    # No silent fall-through. detect_platform refuses an OS this does not build for, so
+    # reaching here means a platform was added there and not here, and the check before
+    # the move would then pass on anything at all.
+    *) err "no executable signature is known for $(uname -s)"; exit 1 ;;
   esac
 }
 
@@ -149,6 +181,10 @@ install_binary() {
       | tr -d '[:space:]' | tr '{' '\n' | grep -F "\"name\":\"${file}\"" \
       | grep -oE "https?://[^\"]+/releases/assets/[0-9]+" | head -1) || true
     [[ -n "$url" ]] || { err "asset ${file} not found in release v${VERSION}"; exit 1; }
+    # The URL came out of a response body, and the token goes with the request below, so
+    # it has to name the API the token was already sent to rather than any host at all.
+    [[ "$url" == "${API_BASE}/repos/${REPO}/releases/assets/"* ]] || {
+      err "release v${VERSION} names its asset off ${API_BASE}; refusing to send the token there"; exit 1; }
     curl -fsSL --config "$AUTH_CONF" -H "Accept: application/octet-stream" -o "${STAGE}/${file}" "$url"
   else
     curl -fsSL -o "${STAGE}/${file}" "${DOWNLOAD_BASE}/${REPO}/releases/download/v${VERSION}/${file}"
@@ -159,6 +195,11 @@ install_binary() {
   [[ -f "${STAGE}/${BINARY_NAME}" ]] || { err "${file} contains no ${BINARY_NAME}"; exit 1; }
   check_executable "${STAGE}/${BINARY_NAME}"
   chmod +x "${STAGE}/${BINARY_NAME}"
+  # Flushed before the rename, the way selfupdate flushes before its own. The rename is
+  # durable ahead of the data it publishes, so a crash inside the writeback window leaves
+  # a truncated binary on PATH, and the smoke test below has already run by then. macOS's
+  # sync takes no operand, hence the fallback.
+  sync "${STAGE}/${BINARY_NAME}" 2>/dev/null || sync
   mv "${STAGE}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   log "installed to ${INSTALL_DIR}/${BINARY_NAME}"
 }

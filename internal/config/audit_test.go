@@ -27,6 +27,7 @@ func TestDefaultLibraryLivesInDataNotCache(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			want := filepath.Join(home, ".local", "share", "synty-sync")
 			if tc.xdg {
@@ -60,6 +61,7 @@ func TestDefaultLibraryLivesInDataNotCache(t *testing.T) {
 func TestResolveDirExpandsHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 
 	mkdir(t, filepath.Join(home, "synty"))
 	mkdir(t, filepath.Join(home, "from-env"))
@@ -78,6 +80,7 @@ func TestResolveDirExpandsHome(t *testing.T) {
 func TestLoadExpandsHomeInSessionSource(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"),
 		[]byte("session_source = \"~/synty.curl\"\n"), 0o644); err != nil {

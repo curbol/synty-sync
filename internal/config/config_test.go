@@ -68,6 +68,7 @@ library_path = "/from/file"
 	// named "~" that the user will never find.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 	t.Setenv("SYNTY_LIBRARY", "~/assets")
 	c, _ = Load(dir, Flags{})
 	if want := filepath.Join(home, "assets"); c.LibraryPath != want {

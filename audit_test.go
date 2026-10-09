@@ -498,6 +498,7 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 func TestCookiesFlagExpandsATilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 
 	curl := filepath.Join(home, "session.curl")
 	if err := os.WriteFile(curl, []byte(`curl 'https://syntystore.com' -H 'Cookie: sid=abc'`), 0o600); err != nil {

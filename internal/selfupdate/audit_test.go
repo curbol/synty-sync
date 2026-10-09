@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -158,6 +159,94 @@ func TestInstallReplacesBinaryInPlace(t *testing.T) {
 	}
 	if acc := hdr.Get("Accept"); acc != "application/octet-stream" {
 		t.Errorf("Accept = %q", acc)
+	}
+}
+
+// An update replaces the bytes, not the permissions the user chose. Forcing 0755 handed
+// group and other read and execute back to an install someone had locked down with
+// chmod 700 on a shared machine, and reported success. The owner's execute bit is the
+// one thing kept regardless, because a binary that cannot run is the one thing this must
+// never leave at the install path.
+func TestUpdateKeepsTheModeOfTheBinaryItReplaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
+	for _, tc := range []struct {
+		name       string
+		have, want os.FileMode
+	}{
+		{"owner only", 0o700, 0o700},
+		{"group but not other", 0o750, 0o750},
+		{"the ordinary install", 0o755, 0o755},
+		{"no execute bit at all", 0o644, 0o744},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			exe := filepath.Join(dir, "synty-sync")
+			if err := os.WriteFile(exe, fakeBinary("OLD"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Set after the write, so the umask cannot decide what the test starts from.
+			if err := os.Chmod(exe, tc.have); err != nil {
+				t.Fatal(err)
+			}
+			srv, _ := assetServer(t, http.StatusOK, zipWith(t, installedBinaryName(), fakeBinary("NEW")))
+			if err := installTo(context.Background(), "tok", srv.URL, exe); err != nil {
+				t.Fatalf("installTo: %v", err)
+			}
+			fi, err := os.Stat(exe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != tc.want {
+				t.Errorf("mode after update = %v, want %v from the %v install it replaced", got, tc.want, tc.have)
+			}
+		})
+	}
+}
+
+// The magic-byte sniff reads four bytes, so it says nothing about the rest of the file.
+// What covers the rest is the zip reader verifying each entry's CRC, and that holds only
+// while extraction reads the entry through to EOF: switching to OpenRaw, or stopping at
+// the declared size, keeps every other test green while a bit-flipped asset with an
+// intact signature is renamed over the working binary.
+func TestUpdateRefusesAnAssetWhoseCRCDoesNotMatch(t *testing.T) {
+	content := fakeBinary("NEW-BINARY-BODY")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	// Stored, so a flipped byte is a flipped byte of the binary rather than a deflate
+	// stream that no longer parses, which would fail for a different reason.
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: installedBinaryName(), Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := buf.Bytes()
+	at := bytes.Index(archive, content)
+	if at < 0 {
+		t.Fatal("the stored entry's bytes are not in the archive; the corruption would land elsewhere")
+	}
+	// Past the signature, so the sniff still passes and only the CRC can refuse it.
+	archive[at+len(content)-1] ^= 0xff
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "synty-sync")
+	if err := os.WriteFile(exe, fakeBinary("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := assetServer(t, http.StatusOK, archive)
+	err = installTo(context.Background(), "tok", srv.URL, exe)
+	if !errors.Is(err, zip.ErrChecksum) {
+		t.Errorf("installTo = %v, want zip.ErrChecksum for an entry whose bytes do not match its CRC", err)
+	}
+	got, _ := os.ReadFile(exe)
+	if !bytes.Equal(got, fakeBinary("OLD")) {
+		t.Errorf("a corrupted binary replaced the working one: %q", got)
 	}
 }
 
@@ -399,7 +488,7 @@ func TestReplaceBinaryFallsBackToCopyingAcrossDevices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o755 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Errorf("mode = %v, want the copy to keep 0755", info.Mode().Perm())
 	}
 	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
@@ -434,6 +523,9 @@ func otherDevice(t *testing.T, dir string) string {
 // exists: it was renamed aside and nothing returned it. The error has to say where
 // it went, or the user is left with no binary and no idea there is one to recover.
 func TestReplaceBinaryNamesTheAsideCopyWhenRestoreFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory on Windows still permits the rename that restores the binary")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions this test relies on")
 	}
@@ -494,7 +586,7 @@ func TestReplaceBinaryPutsTheWorkingBinaryBackWhenTheInstallFails(t *testing.T) 
 	if statErr != nil {
 		t.Fatal(statErr)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("the restored binary is not executable (mode %v)", info.Mode())
 	}
 	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
@@ -527,7 +619,7 @@ func TestRunStopsWhenAlreadyOnTheReleaseVersion(t *testing.T) {
 		name    string
 		tag     string
 		current string
-		target  string
+		target  Requested
 		want    string
 		// wantPath is the release the request has to ask GitHub for. fetchRelease adds
 		// the v itself, and nothing read the URL, so routing a targeted update at
@@ -643,6 +735,24 @@ func TestExecutableMagicPerPlatform(t *testing.T) {
 	// A platform with no table is not second-guessed.
 	if err := checkMagic("plan9", []byte("whatever")); err != nil {
 		t.Errorf("an unknown platform was refused: %v", err)
+	}
+}
+
+// checkMagic lets a GOOS with no table through, so an unlisted platform stays updatable.
+// That fail-open is only safe while every platform the release actually builds has a
+// signature: adding one to release.yml and to assetSuffix without one here turns the last
+// guard before the rename into a no-op on that platform alone, and an error page shipped
+// as the asset is renamed over the working binary and reported as an update.
+func TestEveryReleasedPlatformHasAnExecutableSignature(t *testing.T) {
+	for _, p := range releasePlatforms(t) {
+		if len(executableMagic[p.GOOS]) == 0 {
+			t.Errorf("release.yml builds %s/%s but executableMagic has no signature for %s, "+
+				"so checkExecutable would accept anything there", p.GOOS, p.GOARCH, p.GOOS)
+			continue
+		}
+		if err := checkMagic(p.GOOS, []byte("<!doctype html>")); err == nil {
+			t.Errorf("%s accepted an HTML error page as a binary", p.GOOS)
+		}
 	}
 }
 

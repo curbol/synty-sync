@@ -20,8 +20,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
@@ -61,7 +61,63 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build ./...
           done <<< "$platforms"
 
+      # Nothing else here looks at the tracked file set. go build discards executables
+      # when given more than one package, go vet and gofmt enumerate .go files, and the
+      # fixture guard reads only testdata/ directories, so a binary left at the root by
+      # `go build ./cmd/scrubfixtures` is invisible to every other check and stays in
+      # history for good once committed.
+      #
+      # pipefail, and file(1) checked for up front, because `|| true` over a pipe makes a
+      # missing tool indistinguishable from a clean tree. ':[[:space:]]+' rather than ': '
+      # because file(1) pads names into aligned columns when given several, so a
+      # one-space pattern matches only the longest path. x-pie-executable is what an
+      # ordinary Go binary reports under GOFLAGS=-buildmode=pie.
+      - name: No compiled binaries are tracked
+        run: |
+          set -o pipefail
+          command -v file >/dev/null || { echo "file(1) is missing; this guard cannot run"; exit 1; }
+          BINARY=':[[:space:]]+application/(x-executable|x-pie-executable|x-sharedlib|x-mach-binary|x-dosexec|x-object|x-archive|vnd\.microsoft\.portable-executable)$'
+          tracked=$(git ls-files -z | xargs -0 -r file --mime-type -- | grep -E "$BINARY" || true)
+          if [ -n "$tracked" ]; then
+            echo "these compiled binaries are tracked; add them to .gitignore and git rm --cached:"
+            echo "$tracked"
+            exit 1
+          fi
+          # "Nothing is tracked" and "the pattern matches nothing" are otherwise the same
+          # green. One probe per format a build here can produce, under names of different
+          # lengths so the column padding the real invocation sees is reproduced, and all
+          # of them have to match.
+          probedir="$(mktemp -d)"
+          for goos in linux darwin windows; do
+            CGO_ENABLED=0 GOOS="$goos" GOARCH=amd64 go build -o "$probedir/$goos" ./cmd/scrubfixtures
+          done
+          go build -buildmode=pie -o "$probedir/a-much-longer-pie-probe" ./cmd/scrubfixtures
+          matched=$(file --mime-type -- "$probedir"/* | grep -cE "$BINARY" || true)
+          if [ "$matched" -ne 4 ]; then
+            echo "the compiled-binary pattern matched $matched of 4 probe binaries; it would pass over a tracked one:"
+            file --mime-type -- "$probedir"/*
+            exit 1
+          fi
+
       # syncer fans out with a WaitGroup and a mutex, so the suite is worth running
       # under the detector. No network or session is needed: the tests run against
       # httptest servers and the committed testdata fixtures.
       - run: go test -race ./...
+
+  # The release ships macOS and Windows binaries, and the checks that decide whether an
+  # update is safe select on the host: the executable signature, install.sh's platform
+  # and magic checks, the browser profile bases, and the rename that replaces a running
+  # binary all take a different branch there, so the Linux job above never runs them.
+  cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go test ./...
