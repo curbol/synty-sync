@@ -112,15 +112,16 @@ func TestStrayArgumentIsRejected(t *testing.T) {
 // only layer that knows which cookie source was used.
 func TestExpiredSessionErrorNamesTheCookieSource(t *testing.T) {
 	base := errors.New("expired or missing session")
-	err := explainSession(fmt.Errorf("%w", portal.ErrExpiredSession), "zen")
+	db := "/home/u/.config/zen/abc.default/cookies.sqlite"
+	err := explainSession(fmt.Errorf("%w", portal.ErrExpiredSession), "zen", db)
 	if !errors.Is(err, portal.ErrExpiredSession) {
 		t.Fatalf("wrapping lost the sentinel: %v", err)
 	}
-	if !strings.Contains(err.Error(), "zen") {
-		t.Errorf("err = %q, want it to name the session source", err)
+	if !strings.Contains(err.Error(), "zen") || !strings.Contains(err.Error(), db) {
+		t.Errorf("err = %q, want it to name the session source and the profile it read", err)
 	}
 	// An unrelated error passes through untouched.
-	if got := explainSession(base, "zen"); got != base {
+	if got := explainSession(base, "zen", db); got != base {
 		t.Errorf("unrelated error was rewritten: %v", got)
 	}
 }
@@ -502,12 +503,12 @@ func TestCookiesFlagExpandsATilde(t *testing.T) {
 	if err := os.WriteFile(curl, []byte(`curl 'https://syntystore.com' -H 'Cookie: sid=abc'`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cookie, err := resolveCookie(config.Config{SessionSource: "firefox"}, "~/session.curl")
+	sess, err := resolveCookie(config.Config{SessionSource: "firefox"}, "~/session.curl")
 	if err != nil {
 		t.Fatalf("resolveCookie with a tilde path: %v", err)
 	}
-	if cookie != "sid=abc" {
-		t.Errorf("cookie = %q, want the one in %s", cookie, curl)
+	if sess.Header != "sid=abc" {
+		t.Errorf("cookie = %q, want the one in %s", sess.Header, curl)
 	}
 }
 

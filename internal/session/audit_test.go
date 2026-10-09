@@ -2,6 +2,8 @@ package session
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -449,8 +451,31 @@ func TestResolveRoutesBrowserNamesAndPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := Resolve(p)
-	if err != nil || !strings.Contains(got, "s=v") {
-		t.Errorf("Resolve(path) = %q, %v", got, err)
+	if err != nil || !strings.Contains(got.Header, "s=v") || got.Path != p {
+		t.Errorf("Resolve(path) = {%q, %q}, %v", got.Header, got.Path, err)
+	}
+}
+
+// Which profile a browser search settled on is otherwise invisible: a stale or
+// wrong-account profile winning reads only as an expired session. Resolve names the
+// database it read, and printing the result names that and never the session.
+func TestResolveNamesTheBrowserDatabaseItRead(t *testing.T) {
+	db := newCookieDB(t, false, [3]string{"syntystore.com", "session", "abc"})
+	t.Setenv("SYNTY_BROWSER_PROFILE", filepath.Dir(db))
+	got, err := Resolve("firefox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Header != "session=abc" || got.Path != db {
+		t.Errorf("Resolve = {%q, %q}, want {session=abc, %q}", got.Header, got.Path, db)
+	}
+	for _, verb := range []string{"%v", "%s", "%+v"} {
+		if out := fmt.Sprintf(verb, got); strings.Contains(out, "abc") {
+			t.Errorf("%s of a Resolved prints the session: %q", verb, out)
+		}
+	}
+	if out, err := json.Marshal(got); err != nil || strings.Contains(string(out), "abc") {
+		t.Errorf("json of a Resolved = %s, %v; want no session", out, err)
 	}
 }
 

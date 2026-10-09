@@ -509,29 +509,58 @@ func knownBrowser(name string) bool {
 	return slices.Contains(browserNames, name)
 }
 
-// Resolve turns a session source into the syntystore.com Cookie header. The source
-// is a browser name ("firefox", "zen"; "" means firefox) read from its cookie store,
-// or a path to a cookies.txt / pasted-curl file.
-func Resolve(src string) (string, error) {
+// Resolved is a session read from its source.
+type Resolved struct {
+	// Header is the Cookie header for the store: the user's live session. String
+	// leaves it out, and json:"-" keeps an encoder from reaching past String to it.
+	Header string `json:"-"`
+
+	// Path is the file the session was read from, and is safe to print. Which profile
+	// a browser search settled on is otherwise invisible, so a run against a stale or
+	// wrong-account profile gives no clue why.
+	Path string
+}
+
+func (r Resolved) String() string { return r.Path }
+
+// Resolve reads a session source. The source is a browser name ("firefox", "zen";
+// "" means firefox) read from its cookie store, or a path to a cookies.txt /
+// pasted-curl file.
+func Resolve(src string) (Resolved, error) {
 	if src == "" {
 		src = "firefox"
 	}
 	if knownBrowser(src) {
-		return FromBrowser(src)
+		db, err := browserCookieDB(src)
+		if err != nil {
+			return Resolved{}, err
+		}
+		h, err := geckoCookieHeader(db)
+		return Resolved{Header: h, Path: db}, err
 	}
-	return FromFile(src)
+	h, err := FromFile(src)
+	return Resolved{Header: h, Path: src}, err
 }
 
 // FromBrowser reads cookies from a Gecko browser's profile (Firefox or Zen),
 // honouring SYNTY_BROWSER_PROFILE as a direct profile-dir override.
 func FromBrowser(name string) (string, error) {
+	db, err := browserCookieDB(name)
+	if err != nil {
+		return "", err
+	}
+	return geckoCookieHeader(db)
+}
+
+// browserCookieDB finds the cookies.sqlite FromBrowser reads.
+func browserCookieDB(name string) (string, error) {
 	if p := os.Getenv("SYNTY_BROWSER_PROFILE"); p != "" {
 		// No shell expands an environment value, so a ~ written in a systemd unit, a
 		// direnv file or a quoted export arrives literally. Every other path input this
 		// tool takes is expanded; leaving this one out made the documented escape hatch
 		// for an unrecognized profile layout fail with the path the reader can see
 		// exists, and nothing saying the ~ was taken at face value.
-		return geckoCookieHeader(filepath.Join(config.ExpandHome(p), "cookies.sqlite"))
+		return filepath.Join(config.ExpandHome(p), "cookies.sqlite"), nil
 	}
 	if !knownBrowser(name) {
 		return "", fmt.Errorf("unknown browser %q (use %s, or a cookies file path)", name, strings.Join(browserNames, ", "))
@@ -570,7 +599,7 @@ func FromBrowser(name string) (string, error) {
 		}
 		return "", fmt.Errorf("no %s profile found under %s (set SYNTY_BROWSER_PROFILE)", name, strings.Join(bases, ", "))
 	}
-	return geckoCookieHeader(pickGeckoProfile(cands))
+	return pickGeckoProfile(cands), nil
 }
 
 func geckoCookieHeader(dbPath string) (string, error) {

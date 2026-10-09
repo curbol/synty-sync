@@ -212,24 +212,30 @@ func run(args []string) error {
 		return fmt.Errorf("no customer id: pass --customer, set SYNTY_CUSTOMER_ID, or put customer_id in config.toml")
 	}
 	src := sessionSource(cfg, f.cookies)
-	cookie, err := resolveCookie(cfg, f.cookies)
+	sess, err := resolveCookie(cfg, f.cookies)
 	if err != nil {
 		return err
 	}
-	client := newPortalClient(cfg.CustomerID, cookie)
+	if sess.Path != src {
+		fmt.Fprintln(os.Stderr, "session: read from", sess.Path)
+	}
+	client := newPortalClient(cfg.CustomerID, sess.Header)
 
 	if cmd == "select" {
-		return explainSession(selectPacks(ctx, client, manifestPath, ln), src)
+		return explainSession(selectPacks(ctx, client, manifestPath, ln), src, sess.Path)
 	}
-	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, f.only, isDryRun(cmd, f.dryRun)), src)
+	return explainSession(runSyncOrStatus(ctx, client, cfg, manifestPath, lockPath, f.only, isDryRun(cmd, f.dryRun)), src, sess.Path)
 }
 
 // explainSession turns the bare expired-session sentinel into something actionable.
 // Only main knows which cookie source was actually resolved, so the hint belongs
 // here; the wrap keeps errors.Is working for callers that check the sentinel.
-func explainSession(err error, src string) error {
+func explainSession(err error, src, path string) error {
 	if !errors.Is(err, portal.ErrExpiredSession) {
 		return err
+	}
+	if path != src {
+		src = fmt.Sprintf("%s (read from %s)", src, path)
 	}
 	return fmt.Errorf("%w\n  session source: %s\n  log in at https://syntystore.com in that browser (or re-export your cookie file) and run again", err, src)
 }
@@ -501,7 +507,7 @@ func printVersion() {
 	fmt.Fprintf(stdout, "synty-sync %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
-func resolveCookie(cfg config.Config, override string) (string, error) {
+func resolveCookie(cfg config.Config, override string) (session.Resolved, error) {
 	src := cfg.SessionSource
 	if override != "" {
 		// The flag is applied after config.Load has expanded its own paths, so a
