@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -793,34 +794,72 @@ func TestInstallerAndWorkflowAgreeOnTheAssetFilename(t *testing.T) {
 	}
 }
 
-// The release action runs with contents: write, and a tag can be moved without
-// anything here changing, so the third-party step stays pinned to a commit.
-func TestReleaseActionIsPinnedToACommit(t *testing.T) {
-	// Every `uses:` in both workflows, rather than the one third-party action that is
-	// there today. Naming it makes the check a note about that action; a second one
-	// added beside it on a floating tag, in the job that already holds contents:write,
-	// would be exactly as dangerous and entirely invisible here.
-	uses := regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:\s+(\S+)`)
-	sha := regexp.MustCompile(`@[0-9a-f]{40}$`)
-	for _, name := range []string{"ci.yml", "release.yml"} {
-		raw, err := os.ReadFile(filepath.Join(".github", "workflows", name))
+// A tag can be repointed at any commit without anything here changing. The release job
+// holds contents: write and publishes the binaries `update` installs unattended, and the
+// CI job decides whether a tag ships at all, so every action in either one is pinned to
+// a commit, first-party included: who wrote the action does not change what the job can
+// do. The comment beside each pin names the exact release that commit is, since a
+// floating major cannot answer which code a pin runs.
+func TestEveryActionIsPinnedToACommit(t *testing.T) {
+	// A real uses: value is a local path or owner/repo@ref. Anchoring on that shape keeps
+	// prose that mentions the word out of the count.
+	const action = `uses:[ \t]*(\./[A-Za-z0-9._/-]*|[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[^\s#]+)`
+	loose := regexp.MustCompile(action)
+	strict := regexp.MustCompile(`^[ \t]*(?:-[ \t]+)?` + action + `[ \t]*(#.*)?$`)
+	pinned := regexp.MustCompile(`@[0-9a-f]{40}$`)
+	release := regexp.MustCompile(`^# v\d+\.\d+\.\d+$`)
+	comment := regexp.MustCompile(`#.*$`)
+
+	// Every workflow and local action under .github, not a named pair: a composite action
+	// referenced as ./.github/actions/<name> runs its own uses: lines in the same job.
+	var files []string
+	err := filepath.WalkDir(".github", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ext := filepath.Ext(p); !d.IsDir() && (ext == ".yml" || ext == ".yaml") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	examined := 0
+	for _, name := range files {
+		raw, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		found := uses.FindAllStringSubmatch(string(raw), -1)
-		if len(found) == 0 {
-			t.Errorf("%s has no uses: at all; this guard would pass over an empty file", name)
-		}
-		for _, m := range found {
-			ref := m[1]
-			switch {
-			case strings.HasPrefix(ref, "./"): // this repo's own workflow
-			case strings.HasPrefix(ref, "actions/"): // first-party, versioned by GitHub
-			case sha.MatchString(ref):
-			default:
-				t.Errorf("%s uses %s, which is third-party and not pinned to a 40-character commit sha", name, ref)
+		for i, line := range strings.Split(string(raw), "\n") {
+			m := strict.FindStringSubmatch(line)
+			if m == nil {
+				// `- {uses: actions/checkout@v6}` is legal YAML that GitHub runs, and an
+				// anchored match alone cannot see it.
+				if loose.MatchString(comment.ReplaceAllString(line, "")) {
+					t.Errorf("%s:%d spells a uses: where this guard cannot check it; put it at the start of its own line: %s",
+						name, i+1, strings.TrimSpace(line))
+				}
+				continue
+			}
+			examined++
+			ref, note := m[1], strings.TrimSpace(m[2])
+			if strings.HasPrefix(ref, "./") {
+				continue // this repo's own workflow or action
+			}
+			if !pinned.MatchString(ref) {
+				t.Errorf("%s:%d uses %s, which is not pinned to a 40-character commit sha", name, i+1, ref)
+				continue
+			}
+			if !release.MatchString(note) {
+				t.Errorf("%s:%d pins %s with comment %q; name the exact release that commit is, as # vX.Y.Z",
+					name, i+1, ref, note)
 			}
 		}
+	}
+	// "Found nothing wrong" and "found nothing at all" must not be the same green.
+	if examined < 5 {
+		t.Errorf("examined %d uses: lines across %v; the guard is no longer reading the workflows", examined, files)
 	}
 }
 
