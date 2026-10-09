@@ -548,7 +548,8 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 
 // download fetches one file and checks the delivered bytes before letting them take a
 // cache path. The client has already refused a document Content-Type; this catches the
-// response that claims to be an archive and is not.
+// response that claims to be an archive and is not, and the archive that stopped part
+// way, through the same checks adoption runs.
 func download(ctx context.Context, c *portal.Client, opts Options, f model.FileEntry) (resolved, error) {
 	body, filename, err := c.Resolve(ctx, f)
 	if err != nil {
@@ -567,7 +568,7 @@ func download(ctx context.Context, c *portal.Client, opts Options, f model.FileE
 	if err != nil {
 		return resolved{}, err
 	}
-	if err := looksLikePackage(pending.TempPath()); err != nil {
+	if err := looksLikePackage(pending.TempPath(), pending.RelPath); err != nil {
 		pending.Discard()
 		return resolved{}, fmt.Errorf("%s: %w", f.Key(), err)
 	}
@@ -593,18 +594,41 @@ func sniffPackage(head []byte) error {
 	return nil
 }
 
-func looksLikePackage(path string) error {
+// looksLikePackage runs the body checks over a pending download's temp file. name is
+// the path the bytes are bound for, for the error.
+func looksLikePackage(path, name string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	head := make([]byte, sniffLen)
-	n, err := f.Read(head)
-	if err != nil && err != io.EOF {
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return err
 	}
-	return sniffPackage(head[:n])
+	head = head[:n]
+	if err := sniffPackage(head); err != nil {
+		return err
+	}
+	return wholeArchive(name, head, func(n int) ([]byte, error) { return tailOf(f, n) })
+}
+
+// tailOf returns up to the last n bytes of an open file.
+func tailOf(f *os.File, n int) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := fi.Size()
+	if int64(n) > size {
+		n = int(size)
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, size-int64(n)); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // selection is one owning pack's view of a selected file. A fileId can have several.
@@ -732,9 +756,10 @@ var zipMagic = []byte("PK\x03\x04")
 
 // wholeArchive reports whether a file that opens as a zip carries the trailer only a
 // complete one has. The head sniff cannot see this: a copy that stopped part way still
-// begins with an archive's magic, and adopting it records its own short bytes as the
+// begins with an archive's magic, and recording one, by adoption or by a download whose
+// body ended early without the transport noticing, takes its own short bytes as the
 // file's truth, after which every Verify compares those bytes against themselves and
-// finds them intact forever.
+// finds them intact forever. tail reads the file's last n bytes; name is for the error.
 //
 // Keyed on the leading bytes rather than the extension. The name comes from a signed
 // URL, a Content-Disposition, or a file someone placed by hand, so an archive can
@@ -742,16 +767,16 @@ var zipMagic = []byte("PK\x03\x04")
 // under any extension or none, which is exactly the set an extension check would
 // leave unexamined. A container this cannot read (.unitypackage) has no decidable
 // answer without decompressing and is passed through.
-func wholeArchive(libraryRoot, relPath string, head []byte) error {
+func wholeArchive(name string, head []byte, tail func(n int) ([]byte, error)) error {
 	if !bytes.HasPrefix(head, zipMagic) {
 		return nil
 	}
-	tail, err := cache.Tail(libraryRoot, relPath, eocdSearchLen)
+	end, err := tail(eocdSearchLen)
 	if err != nil {
 		return err
 	}
-	if !bytes.Contains(tail, eocdSig) {
-		return fmt.Errorf("%w: %s", ErrTruncatedArchive, relPath)
+	if !bytes.Contains(end, eocdSig) {
+		return fmt.Errorf("%w: %s", ErrTruncatedArchive, name)
 	}
 	return nil
 }
@@ -767,7 +792,7 @@ func adoptable(libraryRoot, relPath string) error {
 	if err := sniffPackage(head); err != nil {
 		return err
 	}
-	return wholeArchive(libraryRoot, relPath, head)
+	return wholeArchive(relPath, head, func(n int) ([]byte, error) { return cache.Tail(libraryRoot, relPath, n) })
 }
 
 // progressStep is how much has to transfer before another line is printed. Small
@@ -839,8 +864,13 @@ func downloadWithRetry(ctx context.Context, c *portal.Client, opts Options, f mo
 // signature that a fresh Resolve re-signs, 429 a rate limit that backing off clears,
 // and 408 the server saying the request did not finish in time. Only 403 is specific
 // to this layer; the other two match the page fetcher's policy.
+//
+// A truncated archive counts as not a package: the transport already fails a body that
+// ends short of its Content-Length or its final chunk, so one that arrives whole and
+// lacks its trailer is the object the server holds, and fetching it again re-transfers
+// the same short bytes.
 func permanentDownloadFailure(err error) bool {
-	if errors.Is(err, portal.ErrNotAPackage) || errors.Is(err, ErrNotAPackageBody) {
+	if errors.Is(err, portal.ErrNotAPackage) || errors.Is(err, ErrNotAPackageBody) || errors.Is(err, ErrTruncatedArchive) {
 		return true
 	}
 	code, ok := portal.StatusOf(err)

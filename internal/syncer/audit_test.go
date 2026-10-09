@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/curbol/synty-sync/internal/cache"
 	"github.com/curbol/synty-sync/internal/lockfile"
 	"github.com/curbol/synty-sync/internal/model"
 	"github.com/curbol/synty-sync/internal/portal"
@@ -44,6 +45,7 @@ func TestRateLimitIsRetryable(t *testing.T) {
 		// The content-type refusal and the body sniff, each as its caller wraps it.
 		{"not-a-package type", fmt.Errorf("download T|Godot: %w (Content-Type text/html)", portal.ErrNotAPackage), true},
 		{"not-a-package body", fmt.Errorf("T|Godot: %w", ErrNotAPackageBody), true},
+		{"truncated archive", fmt.Errorf("T|Godot: %w", ErrTruncatedArchive), true},
 		// A transport failure carries no status and no sentinel, and retrying is the
 		// whole point of one.
 		{"no status", errors.New("connection reset by peer"), false},
@@ -526,9 +528,14 @@ func cachedFiles(t *testing.T, libraryRoot string) []string {
 // bytes must never occupy a cache path and a login page's digest must never be
 // recorded as a pack's verified content, or every later Verify compares them against
 // themselves and finds them intact forever.
-func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
+//
+// A truncated archive is the third shape: a copy that stopped part way still begins
+// with a zip's magic, so the sniff passes it, and only the end-of-central-directory
+// check sees that it is not the whole file.
+func TestARejectedBodyIsNeitherStoredNorRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
+		body        []byte // nil serves a login page
 		contentType string
 		wantGuard   string
 	}{
@@ -545,10 +552,20 @@ func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
 			contentType: "application/zip",
 			wantGuard:   ErrNotAPackageBody.Error(),
 		},
+		{
+			name:        "a truncated archive is refused on its trailer",
+			body:        truncatedPackageBytes("pack"),
+			contentType: "application/zip",
+			wantGuard:   ErrTruncatedArchive.Error(),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			if body == nil {
+				body = []byte("<!doctype html><title>Log in</title>")
+			}
 			srv := newServer(t, serverOpts{fileBody: func(string) ([]byte, string, bool) {
-				return []byte("<!doctype html><title>Log in</title>"), tc.contentType, true
+				return body, tc.contentType, true
 			}})
 			lib := t.TempDir()
 			lockPath := filepath.Join(t.TempDir(), "lock.json")
@@ -558,7 +575,7 @@ func TestDocumentBodyIsNeitherStoredNorRecorded(t *testing.T) {
 				t.Fatalf("a rejected body must fail its file, not the run: %v", err)
 			}
 			if len(rep.Failures) == 0 {
-				t.Fatal("no failures reported for a run where every body was a document")
+				t.Fatal("no failures reported for a run where every body was rejected")
 			}
 			for _, f := range rep.Failures {
 				if !strings.Contains(f.Err, tc.wantGuard) {
@@ -837,58 +854,85 @@ func TestADocumentAlreadyInTheLayoutIsNotAdopted(t *testing.T) {
 // records them: the layout adopt scan looks for the new version's name and never
 // matches, and the next run classifies DownloadNow rather than Changed, so the
 // Changed-only prune never fires either.
+//
+// The update can fail at the transport or at the body checks, and the body checks are
+// the case that matters most here: the new version downloads under the same filename,
+// so a rejected body that reached the real path would replace the verified copy with
+// the very bytes the checks refused. Each case asserts which guard refused it.
 func TestFailedUpdateKeepsTheVerifiedCopyRecorded(t *testing.T) {
-	lib := t.TempDir()
-	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	version := "v1_0_0"
-	broken := false
-	srv := newServer(t, serverOpts{
-		itemHTML: func(orderItem string) (string, bool) {
-			if orderItem == "1" {
-				return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+	const name = "GENERIC_Particle_FX_Godot_4_5_1.zip" // one name across versions
+	for _, tc := range []struct {
+		what    string
+		status  int
+		body    []byte
+		wantErr string
+	}{
+		{what: "a server error", status: http.StatusInternalServerError, wantErr: "500"},
+		{what: "a document body", body: []byte("<!doctype html><title>Log in</title>"), wantErr: ErrNotAPackageBody.Error()},
+		{what: "a truncated archive", body: truncatedPackageBytes(name), wantErr: ErrTruncatedArchive.Error()},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			broken := false
+			srv := newServer(t, serverOpts{
+				itemHTML: func(orderItem string) (string, bool) {
+					if orderItem == "1" {
+						return itemPage("GENERIC_Particle_FX", "Godot_4_5_1", version, 999), true
+					}
+					return "", false
+				},
+				downloadName: func(fileID string) (string, bool) { return name, fileID == "999" },
+				downloadStatus: func(fileID string) (int, bool) {
+					return tc.status, broken && tc.status != 0 && fileID == "999"
+				},
+				fileBody: func(string) ([]byte, string, bool) {
+					return tc.body, "application/zip", broken && tc.body != nil
+				},
+			})
+
+			opts := runOpts(lib, false)
+			opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
+			lf := seedRun(t, srv, lockPath, opts)
+			const key = "GENERIC_Particle_FX|Godot_4_5_1"
+			before := lf.Packs["polygon-pirate-pack"].Files[key]
+			if !before.Tracked {
+				t.Fatal("seed produced no tracked bundled file")
 			}
-			return "", false
-		},
-		downloadStatus: func(fileID string) (int, bool) {
-			if broken && fileID == "999" {
-				return http.StatusInternalServerError, true
+
+			version, broken = "v2_0_0", true
+			opts.Attempts, opts.Backoff = 1, 0
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+			if err != nil {
+				t.Fatalf("a failed update aborted the run: %v", err)
 			}
-			return 0, false
-		},
-	})
+			if len(rep.Failures) != 1 {
+				t.Fatalf("failures = %+v, want the one file whose update failed", rep.Failures)
+			}
+			if !strings.Contains(rep.Failures[0].Err, tc.wantErr) {
+				t.Errorf("failure %q was not refused by the guard this case is about (%s)", rep.Failures[0].Err, tc.wantErr)
+			}
 
-	opts := runOpts(lib, false)
-	opts.PackSelected = func(slug string) bool { return slug == "polygon-pirate-pack" }
-	lf := seedRun(t, srv, lockPath, opts)
-	const key = "GENERIC_Particle_FX|Godot_4_5_1"
-	before := lf.Packs["polygon-pirate-pack"].Files[key]
-	if !before.Tracked {
-		t.Fatal("seed produced no tracked bundled file")
-	}
-
-	version, broken = "v2_0_0", true
-	opts.Attempts, opts.Backoff = 1, 0
-	rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
-	if err != nil {
-		t.Fatalf("a failed update aborted the run: %v", err)
-	}
-	if len(rep.Failures) != 1 {
-		t.Fatalf("failures = %+v, want the one file whose update failed", rep.Failures)
-	}
-
-	after, err := lockfile.Load(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := after.Packs["polygon-pirate-pack"].Files[key]
-	if !got.Tracked || got.CachePath != before.CachePath || got.SHA256 != before.SHA256 {
-		t.Errorf("the verified copy at %s is no longer recorded: %+v", before.CachePath, got)
-	}
-	if got.Version != before.Version {
-		t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
-	}
-	if !cacheFileExists(lib, before.CachePath) {
-		t.Fatalf("the prior copy at %s is gone", before.CachePath)
+			after, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := after.Packs["polygon-pirate-pack"].Files[key]
+			if !got.Tracked || got.CachePath != before.CachePath || got.SHA256 != before.SHA256 {
+				t.Errorf("the verified copy at %s is no longer recorded: %+v", before.CachePath, got)
+			}
+			if got.Version != before.Version {
+				t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
+			}
+			sha, _, err := cache.Hash(lib, before.CachePath)
+			if err != nil {
+				t.Fatalf("the prior copy at %s is gone: %v", before.CachePath, err)
+			}
+			if sha != before.SHA256 {
+				t.Errorf("the bytes at %s were replaced by the rejected body", before.CachePath)
+			}
+		})
 	}
 }
 
@@ -1407,7 +1451,7 @@ func TestAUnityPackageIsAdoptedWithoutAZipTrailer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := wholeArchive(lib, rel, body); err != nil {
+	if err := wholeArchive(rel, body, func(int) ([]byte, error) { return nil, nil }); err != nil {
 		t.Errorf("a container with no zip magic was put through the zip trailer check: %v", err)
 	}
 	if err := adoptable(lib, rel); err != nil {
