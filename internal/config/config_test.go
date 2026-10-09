@@ -93,3 +93,16 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 		t.Errorf("err = %v, want it to name the key that went unread", err)
 	}
 }
+
+// A Windows user writes ~\assets as readily as ~/assets, and a path the expansion
+// skips lands under a directory literally named "~" in the working directory.
+func TestExpandHomeTakesEitherSeparatorTheOSUses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
+	for _, in := range []string{"~/assets", "~" + string(filepath.Separator) + "assets"} {
+		if got, want := ExpandHome(in), filepath.Join(home, "assets"); got != want {
+			t.Errorf("ExpandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

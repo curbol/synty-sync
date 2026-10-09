@@ -547,9 +547,11 @@ func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 	fmt.Fprintf(w, "library: %s\n", cfg.LibraryPath)
 	fmt.Fprintf(w, "packs: %d of %d in the lockfile  files selected: %d\n",
 		rep.PacksInScope, len(rep.NewLockfile.Packs), len(rep.Diffs))
-	fmt.Fprintf(w, "  new=%d changed=%d download-now=%d cache-missing=%d adopted=%d unchanged=%d\n",
-		counts[syncer.New], counts[syncer.Changed], counts[syncer.DownloadNow],
-		counts[syncer.CacheMissing], counts[syncer.Adopted], counts[syncer.Unchanged])
+	tally := make([]string, 0, len(syncer.Classes()))
+	for _, c := range syncer.Classes() {
+		tally = append(tally, fmt.Sprintf("%s=%d", c, counts[c]))
+	}
+	fmt.Fprintf(w, "  %s\n", strings.Join(tally, " "))
 	if dry {
 		pending := counts[syncer.New] + counts[syncer.Changed] + counts[syncer.DownloadNow] + counts[syncer.CacheMissing]
 		fmt.Fprintf(w, "would download: %d files\n", pending)

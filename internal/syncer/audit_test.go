@@ -1752,6 +1752,82 @@ func TestAnInterruptKeepsTheRecordOfWhatTheRunDid(t *testing.T) {
 	}
 }
 
+// A session that expires part way through the download pass serves a login page where
+// each remaining pack belongs. Failing them one by one blames every file for the session,
+// and the exit names a broken download rather than the one thing to fix. The run stops
+// with the expired session, keeps the record of what it already did, and carries the
+// rest forward, whichever of the two download checks saw the login page.
+func TestASessionExpiringMidRunStopsTheRunAndKeepsItsRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType string
+	}{
+		{"refused by Content-Type", "text/html; charset=utf-8"},
+		{"refused by the body sniff", "application/zip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lib := t.TempDir()
+			lockPath := filepath.Join(t.TempDir(), "lock.json")
+			version := "v1_0_0"
+			var expired atomic.Bool
+			srv := newServer(t, serverOpts{
+				itemHTML: func(orderItem string) (string, bool) {
+					switch orderItem {
+					case "1":
+						return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
+					case "4":
+						return itemPage("POLYGON_Dungeon", "Godot_4_5_1", version, 5353), true
+					}
+					return "", false
+				},
+				downloadName: func(fileID string) (string, bool) {
+					switch fileID {
+					case "4242":
+						return "POLYGON_Pirate_Godot_4_5_1_" + version + ".zip", true
+					case "5353":
+						return "POLYGON_Dungeon_Godot_4_5_1_" + version + ".zip", true
+					}
+					return "", false
+				},
+				fileBody: func(string) ([]byte, string, bool) {
+					if !expired.Load() {
+						return nil, "", false
+					}
+					return []byte("<!DOCTYPE html><html><body>Log in</body></html>"), tc.contentType, true
+				},
+				loggedOut: expired.Load,
+			})
+			opts := twoPackOpts(lib)
+			lf := seedRun(t, srv, lockPath, opts)
+			const dungeonKey = "POLYGON_Dungeon|Godot_4_5_1"
+			dungeonBefore := lf.Packs["polygon-dungeon-pack"].Files[dungeonKey]
+
+			version = "v2_0_0"
+			opts.Progress = func(m string) {
+				if m == "download "+dungeonKey {
+					expired.Store(true)
+				}
+			}
+			rep, err := Run(context.Background(), newClient(srv.URL), lf, lockPath, opts)
+			if !errors.Is(err, portal.ErrExpiredSession) {
+				t.Fatalf("err = %v, want ErrExpiredSession", err)
+			}
+			if len(rep.Failures) != 0 {
+				t.Errorf("an expired session was recorded as per-file failures: %+v", rep.Failures)
+			}
+			after, err := lockfile.Load(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pirate := after.Packs["polygon-pirate-pack"].Files[pirateKey]; pirate.Version != "v2_0_0" || !pirate.Tracked {
+				t.Errorf("the download the run finished is not recorded: %+v", pirate)
+			}
+			if dungeon := after.Packs["polygon-dungeon-pack"].Files[dungeonKey]; dungeon != dungeonBefore {
+				t.Errorf("the file the session expired on was not carried forward unchanged:\n got %+v\nwant %+v", dungeon, dungeonBefore)
+			}
+		})
+	}
+}
+
 // status writes nothing, interrupted or not.
 func TestAnInterruptedStatusWritesNoLockfile(t *testing.T) {
 	srv := newServer(t, serverOpts{})

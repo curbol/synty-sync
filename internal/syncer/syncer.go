@@ -397,6 +397,9 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	// reached is every fileId the pass below gave a verdict. An interrupt leaves the rest
 	// without one, and they are carried forward rather than rebuilt from nothing.
 	reached := map[int]bool{}
+	// sessionLost is set when a download finds the session logged out. Every file
+	// after it would fail the same way, so it ends the pass the way an interrupt does.
+	var sessionLost error
 pass:
 	for _, id := range selOrder {
 		// An interrupt ends the pass, not the run: what the pass already did is on disk,
@@ -441,6 +444,10 @@ pass:
 				if ctx.Err() != nil {
 					break pass
 				}
+				if errors.Is(err, portal.ErrExpiredSession) {
+					sessionLost = err
+					break pass
+				}
 				// A failed update must not erase the copy the last run verified.
 				// Rebuilding the entry from scratch drops its path and sha while the bytes
 				// stay on disk, orphaning them with nothing recording it, and leaves an
@@ -478,6 +485,9 @@ pass:
 	}
 
 	interrupted := ctx.Err()
+	if interrupted == nil {
+		interrupted = sessionLost
+	}
 	if interrupted != nil {
 		if opts.DryRun {
 			return Report{}, interrupted
@@ -671,6 +681,11 @@ func download(ctx context.Context, c *portal.Client, opts Options, f model.FileE
 	}
 	if err := looksLikePackage(pending.TempPath(), pending.RelPath); err != nil {
 		pending.Discard()
+		// The client's own check asks the library page only for a document
+		// Content-Type; a login page served as an archive reaches here instead.
+		if errors.Is(err, ErrNotAPackageBody) && errors.Is(c.CheckSession(ctx), portal.ErrExpiredSession) {
+			return resolved{}, fmt.Errorf("%s: %w (%w)", f.Key(), portal.ErrExpiredSession, err)
+		}
 		return resolved{}, fmt.Errorf("%s: %w", f.Key(), err)
 	}
 	if err := pending.Commit(); err != nil {

@@ -108,6 +108,9 @@ type serverOpts struct {
 	// downloadStatus replaces the redirect for one fileId with a bare status, so a
 	// test can pull a single file out from under the run.
 	downloadStatus func(fileID string) (int, bool)
+	// loggedOut, when it answers true, serves the library page as a logged-out shell,
+	// so a test can expire the session part way through a run.
+	loggedOut func() bool
 }
 
 // packageBytes builds a real (tiny) zip carrying name, so a fixture body is a whole
@@ -145,6 +148,10 @@ func newServer(t *testing.T, opts serverOpts) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/apps/downloads/orders/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("line_items_page") == "1" {
+			if opts.loggedOut != nil && opts.loggedOut() {
+				fmt.Fprint(w, logoutShell)
+				return
+			}
 			fmt.Fprint(w, page1)
 			return
 		}

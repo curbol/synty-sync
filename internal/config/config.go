@@ -201,9 +201,10 @@ func overlay(c *Config, fc fileConfig) {
 
 // ExpandHome resolves a leading ~ to the user's home directory. It is exported
 // because --manifest and --cookies are resolved outside this package and need the same
-// treatment as the paths inside it.
+// treatment as the paths inside it. Either separator follows the ~ on Windows, where a
+// path is as often written ~\x as ~/x.
 func ExpandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~"+string(filepath.Separator)) {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
