@@ -785,6 +785,35 @@ func TestPrintReportNamesEveryOutcome(t *testing.T) {
 	}
 }
 
+// A session for a different account enumerates a library disjoint from the lockfile,
+// so every pack it records comes back "no longer in your library": hundreds of
+// consecutive lines that bury the failures and warnings printed around them. A few is
+// the ordinary case and each is still named; past that, the rest is counted.
+func TestTheNoLongerInYourLibraryListIsCapped(t *testing.T) {
+	var removed []string
+	for i := range 300 {
+		removed = append(removed, fmt.Sprintf("pack-%03d", i))
+	}
+	var out bytes.Buffer
+	printReport(&out, true, config.Config{}, syncer.Report{Removed: removed})
+	got := out.String()
+	if n := strings.Count(got, "no longer in your library"); n > 20 {
+		t.Errorf("the summary printed %d no-longer-in-your-library lines", n)
+	}
+	if !strings.Contains(got, "pack-000") {
+		t.Errorf("the capped list names none of the packs:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("and %d more", 300-maxListed)) {
+		t.Errorf("the summary does not account for the packs it did not name:\n%s", got)
+	}
+
+	out.Reset()
+	printReport(&out, true, config.Config{}, syncer.Report{Removed: removed[:maxListed]})
+	if got := out.String(); strings.Count(got, "no longer in your library") != maxListed || strings.Contains(got, "more") {
+		t.Errorf("a list at the cap was truncated:\n%s", got)
+	}
+}
+
 // A file the store no longer serves fails forever, so it is reported without moving
 // the exit status — otherwise a single 404 makes every future sync exit non-zero and
 // the status stops meaning "something a re-run could fix". main restates the rule

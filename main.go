@@ -511,6 +511,10 @@ func resolveCookie(cfg config.Config, override string) (string, error) {
 	return session.Resolve(src)
 }
 
+// maxListed is how many entries of a per-pack list the summary names before counting
+// the rest.
+const maxListed = 10
+
 func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 	counts := map[syncer.Class]int{}
 	for _, d := range rep.Diffs {
@@ -539,7 +543,13 @@ func printReport(w io.Writer, dry bool, cfg config.Config, rep syncer.Report) {
 		}
 		fmt.Fprintf(w, "  %s: %s %s: %s\n", what, f.PackSlug, f.Key, f.Err)
 	}
-	for _, slug := range rep.Removed {
+	// Capped: a session for another account lists a library disjoint from the lockfile,
+	// and one line per recorded pack buries everything printed around it.
+	for i, slug := range rep.Removed {
+		if i == maxListed {
+			fmt.Fprintf(w, "  …and %d more no longer in your library (their lockfile records are kept)\n", len(rep.Removed)-maxListed)
+			break
+		}
 		fmt.Fprintf(w, "  no longer in your library: %s (its lockfile record is kept)\n", slug)
 	}
 	for _, warning := range rep.Warnings {
