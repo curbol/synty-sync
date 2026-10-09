@@ -3,6 +3,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,9 @@ func sample() Manifest {
 // file holds the user's pack selection, so losing it means choosing again by hand.
 // The lockfile has had this guard; its twin did not.
 func TestFailedSaveLeavesThePriorFileAndNoTemp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory on Windows still accepts new files, so nothing here can fail")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName)
 	const prior = "variant_includes = [\"Godot_4_5_1\"]\n"

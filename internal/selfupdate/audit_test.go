@@ -488,7 +488,7 @@ func TestReplaceBinaryFallsBackToCopyingAcrossDevices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o755 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Errorf("mode = %v, want the copy to keep 0755", info.Mode().Perm())
 	}
 	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
@@ -523,6 +523,9 @@ func otherDevice(t *testing.T, dir string) string {
 // exists: it was renamed aside and nothing returned it. The error has to say where
 // it went, or the user is left with no binary and no idea there is one to recover.
 func TestReplaceBinaryNamesTheAsideCopyWhenRestoreFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory on Windows still permits the rename that restores the binary")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions this test relies on")
 	}
@@ -583,7 +586,7 @@ func TestReplaceBinaryPutsTheWorkingBinaryBackWhenTheInstallFails(t *testing.T) 
 	if statErr != nil {
 		t.Fatal(statErr)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("the restored binary is not executable (mode %v)", info.Mode())
 	}
 	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {

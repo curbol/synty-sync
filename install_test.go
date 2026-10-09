@@ -20,6 +20,15 @@ import (
 	"github.com/curbol/synty-sync/internal/releaseyml"
 )
 
+// requireShell skips on Windows, where install.sh does not run: it refuses the platform
+// itself, and every stub these tests put on PATH is a POSIX shell script.
+func requireShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is a POSIX shell script")
+	}
+}
+
 // installerZip builds a release archive holding one file named synty-sync with the
 // given bytes, so a test can ship either a real-looking binary or something that is
 // not a binary at all.
@@ -282,6 +291,7 @@ func runInstaller(t *testing.T, home string, env ...string) (string, error) {
 // on a machine where gh is absent or logged out.
 func runInstallerWithGh(t *testing.T, home, ghToken string, env ...string) (string, error) {
 	t.Helper()
+	requireShell(t)
 	if _, err := exec.LookPath("unzip"); err != nil {
 		t.Skip("install.sh needs unzip")
 	}
@@ -799,6 +809,7 @@ func TestInstallerPlatformLabelsMatchTheRelease(t *testing.T) {
 // further. Its non-zero exit is the expected outcome, not a failure.
 func runInstallerAs(t *testing.T, pathPrefix string) string {
 	t.Helper()
+	requireShell(t)
 	// The same gh shadow runInstaller installs, and for the same reason: gh lives in
 	// /usr/bin on a developer machine, so clearing the two environment variables still
 	// leaves install.sh a logged-in CLI to find. Without this the test takes the

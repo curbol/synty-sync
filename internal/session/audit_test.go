@@ -458,11 +458,12 @@ func TestBrowserProfileOverrideIsHonored(t *testing.T) {
 		// No shell expands an environment value, so a ~ written in a systemd unit, a
 		// direnv file or a quoted export arrives literally. Without expansion this
 		// stats ./~/<profile> and reports a path the reader can see exists.
-		{name: "a tilde path", value: filepath.Join("~", filepath.Base(profile)), home: filepath.Dir(profile)},
+		{name: "a tilde path", value: "~/" + filepath.Base(profile), home: filepath.Dir(profile)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.home != "" {
 				t.Setenv("HOME", tc.home)
+				t.Setenv("USERPROFILE", tc.home) // os.UserHomeDir on windows
 			}
 			t.Setenv("SYNTY_BROWSER_PROFILE", tc.value)
 			got, err := FromBrowser("firefox")

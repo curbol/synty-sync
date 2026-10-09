@@ -1,0 +1,7 @@
+# LF in every working tree. Windows runners default to core.autocrlf=true, which rewrites
+# text on checkout, and the tests read workflows and scripts byte for byte.
+* text=auto eol=lf
+
+# The captured pages keep the line endings the store served them with, CRs included, and
+# the scrubber writes them back byte for byte. No conversion in either direction.
+testdata/** -text

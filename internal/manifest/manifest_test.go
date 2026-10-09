@@ -3,6 +3,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -173,6 +174,9 @@ func TestValidateRejectsMalformedGlob(t *testing.T) {
 // read bits, so the change is invisible in a diff and shows up as a CI step or another
 // account that can no longer read the project's manifest.
 func TestSaveKeepsTheModeOfTheFileItRewrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "synty-sync.toml")
 	if err := os.WriteFile(path, []byte("variant_includes = [\"Godot_*\"]\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -192,6 +196,9 @@ func TestSaveKeepsTheModeOfTheFileItRewrites(t *testing.T) {
 // A manifest that does not exist yet is created readable rather than owner-only, since
 // it is committed and shared the moment it is written.
 func TestSaveCreatesAReadableManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "synty-sync.toml")
 	if err := Save(path, Manifest{VariantIncludes: []string{"Godot_*"}}); err != nil {
 		t.Fatal(err)

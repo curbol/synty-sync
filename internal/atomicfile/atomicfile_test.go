@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,9 @@ func write(s string) func(io.Writer) error {
 }
 
 func TestWriteCreatesAReadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "new.json")
 	if err := Write(path, ".tmp-*", write("hello")); err != nil {
 		t.Fatal(err)
@@ -38,6 +42,9 @@ func TestWriteCreatesAReadableFile(t *testing.T) {
 }
 
 func TestWriteKeepsTheModeOfTheFileItRewrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "existing.toml")
 	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
 		t.Fatal(err)

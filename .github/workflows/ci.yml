@@ -103,3 +103,21 @@ jobs:
       # under the detector. No network or session is needed: the tests run against
       # httptest servers and the committed testdata fixtures.
       - run: go test -race ./...
+
+  # The release ships macOS and Windows binaries, and the checks that decide whether an
+  # update is safe select on the host: the executable signature, install.sh's platform
+  # and magic checks, the browser profile bases, and the rename that replaces a running
+  # binary all take a different branch there, so the Linux job above never runs them.
+  cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go test ./...

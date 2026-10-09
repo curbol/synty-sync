@@ -491,6 +491,7 @@ func TestSyncWithFailedDownloadsExitsNonZero(t *testing.T) {
 func TestApplyFlagsIsTheLastLayer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
 
 	base := config.Config{LibraryPath: "/from/env", Concurrency: 4, CustomerID: "from-env"}
 

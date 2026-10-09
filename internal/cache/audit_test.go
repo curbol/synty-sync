@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -243,6 +244,9 @@ func TestMigrateOnAMissingRoot(t *testing.T) {
 // A committed download is readable rather than owner-only: the library path is
 // configurable, so it can sit on a volume more than one account reads.
 func TestStoreCommitsAReadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	root := t.TempDir()
 	storeCommitted(t, root, "T", "x.zip", "PK\x03\x04data")
 	fi, err := os.Stat(filepath.Join(root, "T", "x.zip"))

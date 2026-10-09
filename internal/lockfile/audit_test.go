@@ -3,6 +3,7 @@ package lockfile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,9 @@ import (
 // bits, so the change never shows in a diff — it surfaces as a CI step or another
 // account that can no longer read the project's lockfile.
 func TestSaveKeepsTheModeOfTheFileItRewrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "synty-sync.lock.json")
 	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -31,6 +35,9 @@ func TestSaveKeepsTheModeOfTheFileItRewrites(t *testing.T) {
 // A lockfile that does not exist yet is created readable rather than owner-only, since
 // it is committed and shared the moment it is written.
 func TestSaveCreatesAReadableLockfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
 	path := filepath.Join(t.TempDir(), "synty-sync.lock.json")
 	if err := Save(path, sample()); err != nil {
 		t.Fatal(err)
@@ -48,6 +55,9 @@ func TestSaveCreatesAReadableLockfile(t *testing.T) {
 // never leaves the previous one truncated. A Save into a directory that cannot hold
 // the temp must leave the existing file exactly as it was, and leave no temp behind.
 func TestFailedSaveLeavesThePriorFileAndNoTemp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory on Windows still accepts new files, so nothing here can fail")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "synty-sync.lock.json")
 	const prior = "{\n  \"generatedAt\": \"before\"\n}\n"
