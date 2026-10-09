@@ -189,7 +189,10 @@ func run(args []string) error {
 		defer func() { _ = ln.Close() }()
 	}
 
-	authDir := config.ResolveDir(f.cfgDir)
+	authDir, err := config.ResolveDir(f.cfgDir)
+	if err != nil {
+		return err
+	}
 	cfg, err := config.Load(authDir)
 	if err != nil {
 		return err

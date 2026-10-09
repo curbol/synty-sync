@@ -61,11 +61,14 @@ func TestResolveDirExpandsHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	if got := ResolveDir("~/synty"); got != filepath.Join(home, "synty") {
+	mkdir(t, filepath.Join(home, "synty"))
+	mkdir(t, filepath.Join(home, "from-env"))
+
+	if got := resolveDir(t, "~/synty"); got != filepath.Join(home, "synty") {
 		t.Errorf("ResolveDir(flag) = %q, want it under %q", got, home)
 	}
 	t.Setenv("SYNTY_CONFIG_DIR", "~/from-env")
-	if got := ResolveDir(""); got != filepath.Join(home, "from-env") {
+	if got := resolveDir(t, ""); got != filepath.Join(home, "from-env") {
 		t.Errorf("ResolveDir(env) = %q, want it under %q", got, home)
 	}
 }
@@ -110,26 +113,93 @@ func TestLoadReportsAConfigItCannotRead(t *testing.T) {
 // this function: getting it wrong points the tool at a config dir the user is not
 // editing, and it then reports the settings their file already holds as missing.
 func TestResolveDirPrecedenceWithEveryRungSetAtOnce(t *testing.T) {
-	t.Setenv("SYNTY_CONFIG_DIR", "/from/synty-env")
+	flagDir := mkdir(t, filepath.Join(t.TempDir(), "from-flag"))
+	envDir := mkdir(t, filepath.Join(t.TempDir(), "from-synty-env"))
+	t.Setenv("SYNTY_CONFIG_DIR", envDir)
 	t.Setenv("XDG_CONFIG_HOME", "/from/xdg")
 
 	// All three set: the flag wins.
-	if got := ResolveDir("/from/flag"); got != "/from/flag" {
+	if got := resolveDir(t, flagDir); got != flagDir {
 		t.Errorf("with every rung set, ResolveDir = %q, want the flag to win", got)
 	}
 	// Flag gone: SYNTY_CONFIG_DIR beats XDG.
-	if got := ResolveDir(""); got != "/from/synty-env" {
+	if got := resolveDir(t, ""); got != envDir {
 		t.Errorf("ResolveDir = %q, want SYNTY_CONFIG_DIR to beat XDG_CONFIG_HOME", got)
 	}
 	// SYNTY_CONFIG_DIR gone: XDG beats the home fallback.
 	t.Setenv("SYNTY_CONFIG_DIR", "")
 	want := filepath.Join("/from/xdg", "synty-sync")
-	if got := ResolveDir(""); got != want {
+	if got := resolveDir(t, ""); got != want {
 		t.Errorf("ResolveDir = %q, want %q", got, want)
 	}
 	// And only with both cleared does the home fallback apply.
 	t.Setenv("XDG_CONFIG_HOME", "")
-	if got := ResolveDir(""); !strings.HasSuffix(got, filepath.Join(".config", "synty-sync")) {
+	if got := resolveDir(t, ""); !strings.HasSuffix(got, filepath.Join(".config", "synty-sync")) {
 		t.Errorf("ResolveDir = %q, want the ~/.config fallback", got)
+	}
+}
+
+// resolveDir is ResolveDir where the directory is expected to resolve. The two named
+// rungs refuse a directory that is not there, so a test about precedence supplies ones
+// that exist; the fallbacks are not checked and need none.
+func resolveDir(t *testing.T, flag string) string {
+	t.Helper()
+	dir, err := ResolveDir(flag)
+	if err != nil {
+		t.Fatalf("ResolveDir(%q): %v", flag, err)
+	}
+	return dir
+}
+
+func mkdir(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A config directory the user named is checked; one this package fell back to is not.
+// An absent config.toml is the ordinary first run, so Load reads it as "no config", and
+// a misspelled --config is indistinguishable from that: library_path is dropped and the
+// run mirrors gigabytes into the default directory, said only by the "library:" line
+// the summary prints once the downloads are done. Naming the file rather than the
+// directory is the same mistake, and on Windows it arrives as ERROR_PATH_NOT_FOUND,
+// which errors.Is reads as fs.ErrNotExist.
+func TestANamedConfigDirMustExistAndBeADirectory(t *testing.T) {
+	t.Setenv("SYNTY_CONFIG_DIR", "")
+	missing := filepath.Join(t.TempDir(), "synty-snyc")
+	file := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(file, []byte("library_path = \"/mnt/big\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{missing, file} {
+		if _, err := ResolveDir(bad); err == nil {
+			t.Errorf("--config %s was accepted", bad)
+		} else if !strings.Contains(err.Error(), bad) {
+			t.Errorf("error %q does not name %s", err, bad)
+		}
+	}
+	t.Setenv("SYNTY_CONFIG_DIR", missing)
+	if _, err := ResolveDir(""); err == nil {
+		t.Error("a $SYNTY_CONFIG_DIR naming a directory that does not exist was accepted")
+	}
+
+	// The fallbacks need not exist: refusing there would fail every first run until a
+	// directory was made by hand for a file that is optional.
+	t.Setenv("SYNTY_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "nothing-here"))
+	if _, err := ResolveDir(""); err != nil {
+		t.Errorf("the XDG fallback refused a directory that does not exist yet: %v", err)
+	}
+	// A fallback that exists but is a file is still not a directory to read from.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	clash := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "synty-sync")
+	if err := os.WriteFile(clash, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(clash); err == nil {
+		t.Error("Load read a regular file as a config directory with nothing in it")
 	}
 }

@@ -36,24 +36,47 @@ type fileConfig struct {
 // flag, else $SYNTY_CONFIG_DIR, else $XDG_CONFIG_HOME/synty-sync, else
 // ~/.config/synty-sync. The project manifest and lockfile live with the project, not
 // here.
-func ResolveDir(flag string) string {
+//
+// A directory the user named has to exist and be a directory; one this function fell
+// back to need not exist. Load reads an absent config.toml as no config at all, which is
+// the ordinary first run, and a misspelled --config is indistinguishable from it: the
+// run drops library_path and mirrors gigabytes into the default directory. Only here is
+// it known which of the two a path is.
+func ResolveDir(flag string) (string, error) {
 	if flag != "" {
-		return ExpandHome(flag)
+		return named(ExpandHome(flag), "--config")
 	}
 	// No shell expands an environment value or a quoted flag, so a "~" written in
 	// either arrives literally and would resolve to a directory of that name — the
 	// config file is then never found, and the run reports the setting it contains
 	// as missing.
 	if v := os.Getenv("SYNTY_CONFIG_DIR"); v != "" {
-		return ExpandHome(v)
+		return named(ExpandHome(v), "$SYNTY_CONFIG_DIR")
 	}
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return filepath.Join(v, "synty-sync")
+		return filepath.Join(v, "synty-sync"), nil
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".config", "synty-sync")
+		return filepath.Join(home, ".config", "synty-sync"), nil
 	}
-	return "synty-sync"
+	return "synty-sync", nil
+}
+
+// named checks a config directory the user chose.
+func named(dir, source string) (string, error) {
+	fi, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%s names %s, which does not exist; a config directory that is not there "+
+			"reads as no config at all, so every setting in it would be silently ignored", source, dir)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s names %s: %w", source, dir, err)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s names %s, which is not a directory: it takes the directory holding "+
+			"config.toml, not the file itself", source, dir)
+	}
+	return dir, nil
 }
 
 // defaultLibraryPath is the cache location when nothing overrides it:
@@ -81,6 +104,13 @@ func defaults() Config {
 // overrides (SYNTY_CUSTOMER_ID, SYNTY_LIBRARY). A missing config.toml is fine.
 func Load(dir string) (Config, error) {
 	c := defaults()
+	// Asked of dir itself rather than read off the errno of opening a file through it:
+	// Windows answers a path that runs through a regular file with ERROR_PATH_NOT_FOUND,
+	// which errors.Is reads as fs.ErrNotExist, so the absent-file case below would take
+	// it there.
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
+		return Config{}, fmt.Errorf("%s is not a directory: the config dir holds config.toml", dir)
+	}
 	p := filepath.Join(dir, "config.toml")
 	// Only a path with nothing at it is "no config file". Anything else is surfaced,
 	// since skipping it leaves the user reading an error that names a setting their
