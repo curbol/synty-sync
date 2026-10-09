@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -73,10 +74,10 @@ func TestStoreAndVerify(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(lib, filepath.FromSlash(p.RelPath))); string(got) != "hello" {
 		t.Errorf("stored content = %q", got)
 	}
-	if !Verify(lib, p.RelPath, p.Size) || !VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if !Verify(lib, p.RelPath, p.Size) || !VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Error("a freshly stored file should pass both checks")
 	}
-	if VerifyDeep(lib, p.RelPath, "deadbeef") {
+	if VerifyDeep(context.Background(), lib, p.RelPath, "deadbeef") {
 		t.Error("VerifyDeep should fail on sha mismatch")
 	}
 	if err := Remove(lib, p.RelPath); err != nil || Verify(lib, p.RelPath, p.Size) {
@@ -265,7 +266,7 @@ func TestVerifyCatchesTruncationWithoutHashing(t *testing.T) {
 func TestVerifyDeepCatchesCorruptionThatKeptTheSize(t *testing.T) {
 	lib := t.TempDir()
 	p := storeCommitted(t, lib, "TOKEN", "pack.zip", "original")
-	if !VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if !VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Fatal("VerifyDeep rejected an intact file")
 	}
 	if err := os.WriteFile(filepath.Join(lib, "TOKEN", "pack.zip"), []byte("corrupti"), 0o644); err != nil {
@@ -274,7 +275,7 @@ func TestVerifyDeepCatchesCorruptionThatKeptTheSize(t *testing.T) {
 	if Verify(lib, p.RelPath, p.Size) != true {
 		t.Fatal("the corruption changed the size, so this no longer tests what it means to")
 	}
-	if VerifyDeep(lib, p.RelPath, p.SHA256) {
+	if VerifyDeep(context.Background(), lib, p.RelPath, p.SHA256) {
 		t.Error("VerifyDeep accepted a same-size corruption")
 	}
 }

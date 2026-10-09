@@ -925,7 +925,7 @@ func TestFailedUpdateKeepsTheVerifiedCopyRecorded(t *testing.T) {
 			if got.Version != before.Version {
 				t.Errorf("version = %q, want the version the recorded sha actually belongs to (%q)", got.Version, before.Version)
 			}
-			sha, _, err := cache.Hash(lib, before.CachePath)
+			sha, _, err := cache.Hash(context.Background(), lib, before.CachePath)
 			if err != nil {
 				t.Fatalf("the prior copy at %s is gone: %v", before.CachePath, err)
 			}
@@ -1584,32 +1584,176 @@ func TestAdvertisedSizeAndSizeBytesStaySeparate(t *testing.T) {
 	}
 }
 
-// An interrupt is not a per-file verdict. Returning a report instead of the error
-// would record every file the run had not reached yet as failed, for a reason that
-// has nothing to do with any of them, and write that as the committed record.
-func TestInterruptDuringDownloadsIsAnErrorNotAReport(t *testing.T) {
+// An interrupt is not a per-file verdict: recording every file the run had not reached
+// as failed would blame each of them for something that has nothing to do with it. Nor
+// is it a reason to throw the record away. A Changed file the run already downloaded has
+// had its prior copy pruned, so a lockfile left as it was names a path holding nothing
+// and a sha for bytes that are gone, and the new copy sits in the cache unrecorded. The
+// run saves what it resolved, carries what it never reached forward unchanged, and
+// still reports the interrupt as the error.
+func TestAnInterruptKeepsTheRecordOfWhatTheRunDid(t *testing.T) {
 	lib := t.TempDir()
 	lockPath := filepath.Join(t.TempDir(), "lock.json")
-	ctx, cancel := context.WithCancel(context.Background())
+	version := "v1_0_0"
 	srv := newServer(t, serverOpts{
-		fileBody: func(string) ([]byte, string, bool) {
-			cancel() // the run is interrupted part way through its first transfer
-			return packageBytes("x"), "application/zip", true
+		itemHTML: func(orderItem string) (string, bool) {
+			switch orderItem {
+			case "1":
+				return itemPage("POLYGON_Pirate", "Godot_4_5_1", version, 4242), true
+			case "4":
+				return itemPage("POLYGON_Dungeon", "Godot_4_5_1", version, 5353), true
+			}
+			return "", false
+		},
+		downloadName: func(fileID string) (string, bool) {
+			switch fileID {
+			case "4242":
+				return "POLYGON_Pirate_Godot_4_5_1_" + version + ".zip", true
+			case "5353":
+				return "POLYGON_Dungeon_Godot_4_5_1_" + version + ".zip", true
+			}
+			return "", false
 		},
 	})
+	opts := twoPackOpts(lib)
+	lf := seedRun(t, srv, lockPath, opts)
+	const dungeonKey = "POLYGON_Dungeon|Godot_4_5_1"
+	pirateBefore := lf.Packs["polygon-pirate-pack"].Files[pirateKey]
+	dungeonBefore := lf.Packs["polygon-dungeon-pack"].Files[dungeonKey]
 
-	rep, err := Run(ctx, newClient(srv.URL), lockfile.New(), lockPath, runOpts(lib, false))
-	if err == nil {
-		t.Fatalf("an interrupted run reported success: %d diffs", len(rep.Diffs))
+	version = "v2_0_0"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts.Progress = func(m string) {
+		// Interrupted as the second download starts, after Pirate's has landed and its
+		// prior copy has been pruned.
+		if m == "download "+dungeonKey {
+			cancel()
+		}
 	}
+	rep, err := Run(ctx, newClient(srv.URL), lf, lockPath, opts)
 	if !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want context.Canceled", err)
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if len(rep.Failures) != 0 {
-		t.Errorf("an interrupt was recorded as %d per-file failures", len(rep.Failures))
+		t.Errorf("an interrupt was recorded as per-file failures: %+v", rep.Failures)
+	}
+
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pirate := after.Packs["polygon-pirate-pack"].Files[pirateKey]
+	if pirate.Version != "v2_0_0" || !pirate.Tracked || !cacheFileExists(lib, pirate.CachePath) {
+		t.Errorf("the download the run finished is not recorded: %+v", pirate)
+	}
+	if cacheFileExists(lib, pirateBefore.CachePath) {
+		t.Fatalf("the prior copy at %s was not pruned, so this does not test what it means to", pirateBefore.CachePath)
+	}
+	dungeon := after.Packs["polygon-dungeon-pack"].Files[dungeonKey]
+	if dungeon != dungeonBefore {
+		t.Errorf("the file the run never reached was not carried forward unchanged:\n got %+v\nwant %+v", dungeon, dungeonBefore)
+	}
+}
+
+// status writes nothing, interrupted or not.
+func TestAnInterruptedStatusWritesNoLockfile(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := runOpts(t.TempDir(), true)
+	// The filter runs once the item pages are read, so this lands in the classify pass.
+	opts.Filter = func(v model.Variant) bool { cancel(); return godotSourceFilter(v) }
+
+	if _, err := Run(ctx, newClient(srv.URL), lockfile.New(), lockPath, opts); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(lockPath); err == nil {
-		t.Error("an interrupted run wrote the lockfile")
+		t.Error("an interrupted status wrote the lockfile")
+	}
+}
+
+// main's signal handler takes SIGINT's default action away for the life of the run, so a
+// pass that never looks at the context ignores Ctrl-C until it finishes. Under sync the
+// classify pass re-hashes the whole library, which is minutes of reading; acting on a
+// verdict an interrupted hash produced is worse, because a cancelled verify reads as a
+// mismatch and the file is re-downloaded as CacheMissing.
+func TestAnInterruptStopsTheClassifyPass(t *testing.T) {
+	srv := newServer(t, serverOpts{})
+	lib := t.TempDir()
+	lockPath := filepath.Join(t.TempDir(), "lock.json")
+	lf := seedRun(t, srv, lockPath, runOpts(lib, false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := runOpts(lib, false)
+	opts.Filter = func(v model.Variant) bool { cancel(); return godotSourceFilter(v) }
+	rep, err := Run(ctx, newClient(srv.URL), lf, lockPath, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(rep.Diffs) != 0 || len(rep.Downloaded) != 0 {
+		t.Errorf("the classify pass kept going after the interrupt: %d diffs, %d downloads", len(rep.Diffs), len(rep.Downloaded))
+	}
+	after, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Packs, lf.Packs) {
+		t.Error("a run interrupted before it acted on anything changed the record")
+	}
+}
+
+// The adopt pass hashes every file it takes, so it is as long as the classify pass on a
+// library a lost lockfile left unrecorded. An interrupt there must stop it, and the
+// adoption it cut short is the run's outcome, not a refusal to report against the file.
+func TestAnInterruptStopsTheAdoptPass(t *testing.T) {
+	lib := t.TempDir()
+	version := "v1_0_0"
+	srv := twoFileServer(t, &version, func(v string) string { return "POLYGON_Pirate_Godot_4_5_1_" + v + ".zip" })
+	seedRun(t, srv, filepath.Join(t.TempDir(), "seed.json"), twoPackOpts(lib))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := twoPackOpts(lib)
+	adopts := 0
+	opts.Progress = func(m string) {
+		if strings.HasPrefix(m, "adopt ") {
+			adopts++
+			cancel()
+		}
+	}
+	rep, err := Run(ctx, newClient(srv.URL), lockfile.New(), filepath.Join(t.TempDir(), "lock.json"), opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if adopts != 1 {
+		t.Errorf("the adopt pass started %d adoptions, want it to stop after the interrupt", adopts)
+	}
+	if w := warnContaining(rep.Warnings, "canceled"); len(w) != 0 {
+		t.Errorf("an interrupt was reported as a refused adoption: %v", w)
+	}
+	if len(rep.Downloaded) != 0 {
+		t.Errorf("an interrupted run went on to download %d files", len(rep.Downloaded))
+	}
+}
+
+// An item page interrupted mid-request comes back as an error that wraps the
+// cancellation. Recording that as the run's first error printed "item page for X:
+// context canceled", naming a pack for what was the user's own Ctrl-C.
+func TestAnInterruptedItemPageIsTheInterrupt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := newServer(t, serverOpts{itemHTML: func(string) (string, bool) {
+		cancel()
+		time.Sleep(50 * time.Millisecond) // past the client noticing
+		return "", false
+	}})
+	packs := []model.Pack{{Slug: "polygon-pirate-pack", ItemURL: "/apps/downloads/customers/1/orders/100/order_items/1"}}
+	_, _, err := fetchAll(ctx, newClient(srv.URL), packs, 1)
+	if err != context.Canceled {
+		t.Errorf("err = %v, want the bare context.Canceled", err)
 	}
 }
 

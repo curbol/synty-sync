@@ -352,7 +352,7 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 	report.PacksInScope = len(packFiles)
 
 	priorByID := indexByFileID(lf)
-	cacheOK := cacheChecker(opts)
+	cacheOK := cacheChecker(ctx, opts)
 
 	vd, selectedByID, selOrder := readRows(packFiles, opts.Filter)
 
@@ -363,24 +363,37 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 		opts.Backoff = 500 * time.Millisecond
 	}
 
-	adoptedByID, adoptWarnings := adoptAll(opts, adoptCandidates(selOrder, selectedByID, priorByID))
+	adoptedByID, adoptWarnings := adoptAll(ctx, opts, adoptCandidates(selOrder, selectedByID, priorByID))
 
 	var pruneWarnings []string
+	// reached is every fileId the pass below gave a verdict. An interrupt leaves the rest
+	// without one, and they are carried forward rather than rebuilt from nothing.
+	reached := map[int]bool{}
+pass:
 	for _, id := range selOrder {
+		// An interrupt ends the pass, not the run: what the pass already did is on disk,
+		// and the record of it is still saved below.
+		if ctx.Err() != nil {
+			break
+		}
 		rep := selectedByID[id][0].file
 		fd := FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}
 
 		if r, ok := adoptedByID[id]; ok {
-			fd.Class = Adopted
-			report.Diffs = append(report.Diffs, fd)
-			report.Adopted = append(report.Adopted, fd)
-			r.version, r.variant = rep.Version, string(rep.Variant)
-			vd.resolved[id] = r
+			recordAdopted(&report, vd, fd, rep, r)
+			reached[id] = true
 			continue
 		}
 
 		prior, hasPrior := priorByID[id]
-		fd.Class = classify(rep, prior, hasPrior, cacheOK)
+		class := classify(rep, prior, hasPrior, cacheOK)
+		// A probe the interrupt cut short answers false rather than failing, so a
+		// cancelled verify reads as a mismatch. Acting on that verdict would re-download
+		// an intact copy as CacheMissing.
+		if ctx.Err() != nil {
+			break
+		}
+		fd.Class = class
 		report.Diffs = append(report.Diffs, fd)
 
 		switch {
@@ -398,7 +411,17 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 				// An interrupt is not a per-file verdict: every file left would be
 				// recorded as failed for a reason that has nothing to do with it.
 				if ctx.Err() != nil {
-					return Report{}, ctx.Err()
+					break pass
+				}
+				// A failed update must not erase the copy the last run verified.
+				// Rebuilding the entry from scratch drops its path and sha while the bytes
+				// stay on disk, orphaning them with nothing recording it, and leaves an
+				// out-of-scope owner of the same fileId carrying a record this one lost.
+				// Only Changed qualifies: every other class reaches here with no good
+				// prior copy to hold on to, and every owning pack has to say so.
+				keep := fd.Class == Changed && prior.CachePath != "" && cacheOK(prior)
+				if ctx.Err() != nil {
+					break pass
 				}
 				// One bad file costs that file. Aborting here would also throw away the
 				// lockfile, leaving everything this run did download unrecorded.
@@ -406,23 +429,12 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 					PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id,
 					Err: err.Error(), Gone: goneFromTheStore(err),
 				})
-				// A failed update must not erase the copy the last run verified.
-				// Rebuilding the entry from scratch drops its path and sha while the bytes
-				// stay on disk, orphaning them with nothing recording it, and leaves an
-				// out-of-scope owner of the same fileId carrying a record this one lost.
-				// Only Changed qualifies: every other class reaches here with no good
-				// prior copy to hold on to, and every owning pack has to say so.
-				if fd.Class == Changed && prior.CachePath != "" && cacheOK(prior) {
-					// The prior variant travels with the prior version for the same reason:
-					// these are the bytes the last run verified, so the entry has to name
-					// them as what they are, not as what the page now advertises.
-					vd.resolved[id] = resolved{
-						cachePath: prior.CachePath, sha: prior.SHA256,
-						size: prior.SizeBytes, version: prior.Version, variant: prior.Variant,
-					}
+				if keep {
+					vd.resolved[id] = priorCopy(prior)
 				} else {
 					vd.unresolved[id] = struct{}{}
 				}
+				reached[id] = true
 				continue
 			}
 			if fd.Class == Changed {
@@ -434,6 +446,15 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 			vd.resolved[id] = r
 			report.Downloaded = append(report.Downloaded, fd)
 		}
+		reached[id] = true
+	}
+
+	interrupted := ctx.Err()
+	if interrupted != nil {
+		if opts.DryRun {
+			return Report{}, interrupted
+		}
+		carryUnreached(&report, vd, selOrder, selectedByID, reached, adoptedByID, priorByID)
 	}
 
 	buildLockfile(&report, packFiles, opts, vd, lf)
@@ -444,10 +465,57 @@ func Run(ctx context.Context, c *portal.Client, lf lockfile.Lockfile, lockPath s
 
 	if !opts.DryRun {
 		if err := lockfile.Save(lockPath, report.NewLockfile); err != nil {
+			if interrupted != nil {
+				return Report{}, fmt.Errorf("%w (and the lockfile could not be saved: %v)", interrupted, err)
+			}
 			return Report{}, err
 		}
 	}
-	return report, nil
+	// The report travels with the interrupt, so a caller can say what the run did
+	// before it stopped.
+	return report, interrupted
+}
+
+// recordAdopted takes a file adoption resolved as this run's bytes for its fileId.
+func recordAdopted(report *Report, vd verdicts, fd FileDiff, rep model.FileEntry, r resolved) {
+	fd.Class = Adopted
+	report.Diffs = append(report.Diffs, fd)
+	report.Adopted = append(report.Adopted, fd)
+	r.version, r.variant = rep.Version, string(rep.Variant)
+	vd.resolved[rep.FileID] = r
+}
+
+// priorCopy is a prior record's bytes, resolved as what they are. The prior version and
+// variant travel with the prior sha: these are the bytes an earlier run verified, so an
+// entry has to name them as what they are, not as what the page now advertises.
+func priorCopy(prior lockfile.File) resolved {
+	return resolved{
+		cachePath: prior.CachePath, sha: prior.SHA256,
+		size: prior.SizeBytes, version: prior.Version, variant: prior.Variant,
+	}
+}
+
+// carryUnreached gives every selected fileId an interrupted pass never reached the
+// verdict that leaves its record as it was. An adoption the adopt pass completed is on
+// disk and is recorded; a prior copy is resolved as itself, unexamined, which is exactly
+// what the prior lockfile already said of it; anything else reaches no channel and is
+// rebuilt untracked, as the prior record had it. None of them goes to unresolved, which
+// would drop a copy this run never looked at from every owner.
+func carryUnreached(report *Report, vd verdicts, order []int, byID map[int][]selection,
+	reached map[int]bool, adopted map[int]resolved, prior map[int]lockfile.File) {
+	for _, id := range order {
+		if reached[id] {
+			continue
+		}
+		rep := byID[id][0].file
+		if r, ok := adopted[id]; ok {
+			recordAdopted(report, vd, FileDiff{PackSlug: rep.PackSlug, Key: rep.Key(), FileID: id}, rep, r)
+			continue
+		}
+		if p, ok := prior[id]; ok && p.Tracked && p.CachePath != "" {
+			vd.resolved[id] = priorCopy(p)
+		}
+	}
 }
 
 type packWithFiles struct {
@@ -502,6 +570,11 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 				err = fmt.Errorf("no files parsed (markup may have changed)")
 			}
 			if err != nil {
+				// The user's interrupt, not this pack's failure: naming the pack for it
+				// reads as a fault in that pack.
+				if ctx.Err() != nil {
+					return
+				}
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = fmt.Errorf("item page for %s: %w", p.Slug, err)
@@ -527,14 +600,15 @@ func fetchAll(ctx context.Context, c *portal.Client, packs []model.Pack, concurr
 		}(i, p)
 	}
 	wg.Wait()
-	if firstErr != nil {
-		return nil, nil, firstErr
-	}
 	// A pack skipped on the way out leaves a nil behind. Only an interrupted run gets
 	// here with packs left unread, and it must say so rather than return a short list
-	// the caller would read as the whole library.
+	// the caller would read as the whole library. Asked before firstErr, because a pack
+	// that failed after the interrupt landed failed because of it.
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	if firstErr != nil {
+		return nil, nil, firstErr
 	}
 	read := make([]packWithFiles, 0, len(out))
 	for _, pf := range out {
@@ -657,7 +731,10 @@ func adoptCandidates(order []int, byID map[int][]selection, prior map[int]lockfi
 // adoptAll folds pre-existing files into the layout and takes any already in it,
 // returning what it resolved by fileId and what it refused. Nothing here is worth
 // ending a run over: adoption saves a download the run can always fall back to.
-func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string) {
+//
+// An interrupt stops both passes. An adoption it cut short is the run's outcome rather
+// than the file's, so it is neither reported as a refusal nor recorded.
+func adoptAll(ctx context.Context, opts Options, cands []model.FileEntry) (map[int]resolved, []string) {
 	adopted := map[int]resolved{}
 	// A file the flat-file pass moved and then refused is sitting in the layout, where
 	// the scan below finds it again. Without this it would be refused a second time and
@@ -678,7 +755,13 @@ func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string
 			warnings = append(warnings, fmt.Sprintf("could not fold pre-existing flat files into the layout: %v", err))
 		}
 		for _, m := range migrated {
-			r, err := adopt(opts.LibraryRoot, m.RelPath)
+			if ctx.Err() != nil {
+				break
+			}
+			r, err := adopt(ctx, opts.LibraryRoot, m.RelPath)
+			if ctx.Err() != nil {
+				break
+			}
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", m.RelPath, err))
 				refused[m.FileID] = true
@@ -693,6 +776,9 @@ func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string
 	// for status too.
 	progress := opts.progressSink()
 	for i, f := range cands {
+		if ctx.Err() != nil {
+			break
+		}
 		if _, done := adopted[f.FileID]; done {
 			continue
 		}
@@ -714,7 +800,10 @@ func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string
 			continue
 		}
 		progress(fmt.Sprintf("adopt %s", f.Key()))
-		r, err := adopt(opts.LibraryRoot, rel)
+		r, err := adopt(ctx, opts.LibraryRoot, rel)
+		if ctx.Err() != nil {
+			break
+		}
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("not adopting %s: %v", rel, err))
 			continue
@@ -730,11 +819,11 @@ func adoptAll(opts Options, cands []model.FileEntry) (map[int]resolved, []string
 // added to one and missed on the other would let a rejected body through the gap.
 // Every failure is the caller's to report and skip: adoption saves a download it
 // could always fall back to, so nothing here is worth ending a run over.
-func adopt(libraryRoot, relPath string) (resolved, error) {
+func adopt(ctx context.Context, libraryRoot, relPath string) (resolved, error) {
 	if err := adoptable(libraryRoot, relPath); err != nil {
 		return resolved{}, err
 	}
-	sha, size, err := cache.Hash(libraryRoot, relPath)
+	sha, size, err := cache.Hash(ctx, libraryRoot, relPath)
 	if err != nil {
 		return resolved{}, err
 	}
@@ -1191,11 +1280,11 @@ func indexByFileID(lf lockfile.Lockfile) map[int]lockfile.File {
 // is intact: an interrupted transfer and a stored error page both leave something at
 // the path. Re-hashing is reserved for sync, where the cost of reading the library
 // back buys the only check that sees a mid-file corruption.
-func cacheChecker(opts Options) func(lockfile.File) bool {
+func cacheChecker(ctx context.Context, opts Options) func(lockfile.File) bool {
 	if opts.FullVerify {
 		return func(f lockfile.File) bool {
 			return cache.Verify(opts.LibraryRoot, f.CachePath, f.SizeBytes) &&
-				cache.VerifyDeep(opts.LibraryRoot, f.CachePath, f.SHA256)
+				cache.VerifyDeep(ctx, opts.LibraryRoot, f.CachePath, f.SHA256)
 		}
 	}
 	return func(f lockfile.File) bool { return cache.Verify(opts.LibraryRoot, f.CachePath, f.SizeBytes) }

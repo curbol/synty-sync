@@ -14,6 +14,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -421,8 +422,8 @@ func Verify(libraryRoot, relPath string, wantSize int64) bool {
 // Hash produced when the file was adopted, and it holds for the life of the file, so
 // the two have to agree forever about what they read and how. Two copies of that only
 // agree until one of them changes.
-func VerifyDeep(libraryRoot, relPath, sha string) bool {
-	got, _, err := Hash(libraryRoot, relPath)
+func VerifyDeep(ctx context.Context, libraryRoot, relPath, sha string) bool {
+	got, _, err := Hash(ctx, libraryRoot, relPath)
 	return err == nil && got == sha
 }
 
@@ -477,18 +478,36 @@ func Head(libraryRoot, relPath string, n int) ([]byte, error) {
 
 // Hash returns the sha256 and byte size of a cached file (used to adopt a file
 // migrated in from a pre-existing flat file).
-func Hash(libraryRoot, relPath string) (sha string, size int64, err error) {
+//
+// It takes a context because one call can be minutes of reading a multi-gigabyte pack,
+// and main's signal handler has taken SIGINT's default action away for the life of the
+// run: without it a Ctrl-C during a full verify is ignored until the file is read.
+func Hash(ctx context.Context, libraryRoot, relPath string) (sha string, size int64, err error) {
 	f, err := open(libraryRoot, relPath)
 	if err != nil {
 		return "", 0, err
 	}
 	defer f.Close()
 	h := sha256.New()
-	size, err = io.Copy(h, f)
+	size, err = io.Copy(h, &ctxReader{ctx: ctx, r: f})
 	if err != nil {
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
+// ctxReader ends a long read when the run does, checking between reads, so the
+// granularity is io.Copy's buffer rather than the file.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // Remove deletes the file at relPath (used to prune a prior version), and the

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -69,10 +70,10 @@ func TestCachePathsCannotEscapeTheRoot(t *testing.T) {
 			if Verify(root, rel, 5) {
 				t.Errorf("Verify accepted %q outside the root", rel)
 			}
-			if VerifyDeep(root, rel, "whatever") {
+			if VerifyDeep(context.Background(), root, rel, "whatever") {
 				t.Errorf("VerifyDeep accepted %q outside the root", rel)
 			}
-			if _, _, err := Hash(root, rel); err == nil {
+			if _, _, err := Hash(context.Background(), root, rel); err == nil {
 				t.Errorf("Hash accepted %q outside the root", rel)
 			}
 			if err := Remove(root, rel); err == nil {
@@ -97,10 +98,10 @@ func TestCachePathsAcceptOrdinaryRelativePaths(t *testing.T) {
 	root := t.TempDir()
 	p := storeCommitted(t, root, "TOKEN", "pack.zip", "bytes")
 	rel := p.RelPath
-	if !Verify(root, rel, p.Size) || !VerifyDeep(root, rel, p.SHA256) {
+	if !Verify(root, rel, p.Size) || !VerifyDeep(context.Background(), root, rel, p.SHA256) {
 		t.Errorf("a stored file at %q is not visible to Verify/VerifyDeep", rel)
 	}
-	if _, _, err := Hash(root, rel); err != nil {
+	if _, _, err := Hash(context.Background(), root, rel); err != nil {
 		t.Errorf("Hash(%q): %v", rel, err)
 	}
 	if err := Remove(root, rel); err != nil {
@@ -494,7 +495,7 @@ func TestHashAgreesWithWhatStoreRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sha, size, err := Hash(root, pending.RelPath)
+	sha, size, err := Hash(context.Background(), root, pending.RelPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +505,7 @@ func TestHashAgreesWithWhatStoreRecorded(t *testing.T) {
 	if size != pending.Size || size != int64(len(body)) {
 		t.Errorf("Hash size = %d, Store recorded %d, body is %d", size, pending.Size, len(body))
 	}
-	if !VerifyDeep(root, pending.RelPath, sha) {
+	if !VerifyDeep(context.Background(), root, pending.RelPath, sha) {
 		t.Error("VerifyDeep rejects the digest Hash just produced")
 	}
 }
@@ -534,7 +535,7 @@ func TestASymlinkedSegmentCannotCarryAPathOutOfTheRoot(t *testing.T) {
 	if Verify(root, rel, 6) {
 		t.Error("Verify followed a symlink out of the root")
 	}
-	if _, _, err := Hash(root, rel); err == nil {
+	if _, _, err := Hash(context.Background(), root, rel); err == nil {
 		t.Error("Hash followed a symlink out of the root")
 	}
 	if _, err := Head(root, rel, 16); err == nil {
@@ -675,5 +676,20 @@ func TestARejectedStoreLeavesNoDirectoryBehind(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "TOKEN", "kept.zip")); err != nil {
 		t.Errorf("Discard took a populated directory with it: %v", err)
+	}
+}
+
+// A full verify reads the whole library back, one multi-gigabyte pack per call, so an
+// interrupt has to land inside a hash rather than after it.
+func TestHashStopsWhenTheRunDoes(t *testing.T) {
+	root := t.TempDir()
+	p := storeCommitted(t, root, "TOK", "pack.zip", strings.Repeat("x", 1<<20))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := Hash(ctx, root, p.RelPath); !errors.Is(err, context.Canceled) {
+		t.Errorf("Hash on a cancelled run = %v, want context.Canceled", err)
+	}
+	if VerifyDeep(ctx, root, p.RelPath, p.SHA256) {
+		t.Error("VerifyDeep vouched for a file it was told to stop reading")
 	}
 }
