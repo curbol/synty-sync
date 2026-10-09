@@ -251,10 +251,22 @@ func installTo(ctx context.Context, token, assetURL, exe string) error {
 	if err := checkExecutable(binPath); err != nil {
 		return err
 	}
-	if err := os.Chmod(binPath, 0o755); err != nil {
+	if err := os.Chmod(binPath, installMode(exe)); err != nil {
 		return err
 	}
 	return replaceBinary(binPath, exe)
+}
+
+// installMode is the mode the new binary takes: the one exe already has, so an install
+// the user locked down with chmod 700 is not handed back to group and other, with the
+// owner's execute bit forced on because a binary that cannot run is the one thing an
+// update must never leave behind. 0755 is the fallback when exe cannot be read.
+func installMode(exe string) os.FileMode {
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return 0o755
+	}
+	return fi.Mode().Perm() | 0o100
 }
 
 // executableMagic is the leading signature of a native binary per platform. The zip

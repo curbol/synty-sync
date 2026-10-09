@@ -161,6 +161,49 @@ func TestInstallReplacesBinaryInPlace(t *testing.T) {
 	}
 }
 
+// An update replaces the bytes, not the permissions the user chose. Forcing 0755 handed
+// group and other read and execute back to an install someone had locked down with
+// chmod 700 on a shared machine, and reported success. The owner's execute bit is the
+// one thing kept regardless, because a binary that cannot run is the one thing this must
+// never leave at the install path.
+func TestUpdateKeepsTheModeOfTheBinaryItReplaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports 0666 for every writable file; there are no mode bits to keep")
+	}
+	for _, tc := range []struct {
+		name       string
+		have, want os.FileMode
+	}{
+		{"owner only", 0o700, 0o700},
+		{"group but not other", 0o750, 0o750},
+		{"the ordinary install", 0o755, 0o755},
+		{"no execute bit at all", 0o644, 0o744},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			exe := filepath.Join(dir, "synty-sync")
+			if err := os.WriteFile(exe, fakeBinary("OLD"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Set after the write, so the umask cannot decide what the test starts from.
+			if err := os.Chmod(exe, tc.have); err != nil {
+				t.Fatal(err)
+			}
+			srv, _ := assetServer(t, http.StatusOK, zipWith(t, installedBinaryName(), fakeBinary("NEW")))
+			if err := installTo(context.Background(), "tok", srv.URL, exe); err != nil {
+				t.Fatalf("installTo: %v", err)
+			}
+			fi, err := os.Stat(exe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != tc.want {
+				t.Errorf("mode after update = %v, want %v from the %v install it replaced", got, tc.want, tc.have)
+			}
+		})
+	}
+}
+
 // A release asset that is not an executable (an error page, the wrong file) must be
 // refused rather than swapped over a working binary.
 func TestInstallRejectsNonExecutableAsset(t *testing.T) {
